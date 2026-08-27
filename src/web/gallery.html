@@ -1,0 +1,259 @@
+<!doctype html>
+<!--
+  Focus Agent — Response-component gallery (P3-02)
+
+  Verification surface for the component library. Renders every ClarifyQuestion
+  input_type with a realistic sample question via
+  FocusComponents.renderClarifyQuestion(), and shows a LIVE JSON readout of the
+  exact value each control emits through onAnswer — so the emitted value shape
+  can be confirmed by clicking through. Reuses the app's Nocturne tokens
+  (P10-00: Nocturne is the only palette; class="dark" is permanent).
+
+  Served at /static/gallery.html.
+-->
+<html lang="en" class="dark" data-face="capsule">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Focus · Component gallery</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=IBM+Plex+Mono:wght@400;500&family=Caveat:wght@500;600&display=swap">
+
+  <!-- The design system, in the app's own link order (P11-02). This page
+       used to load a single /static/style.css, which stopped existing when
+       the CSS was split by ownership into eight files, so the gallery had
+       been rendering unstyled. The order here mirrors index.html exactly,
+       because that order IS the cascade the kit was built against. -->
+  <link rel="stylesheet" href="/static/css/tokens.css">
+  <link rel="stylesheet" href="/static/css/face.css">
+  <link rel="stylesheet" href="/static/css/conversation.css">
+  <link rel="stylesheet" href="/static/css/chrome.css">
+  <link rel="stylesheet" href="/static/css/horizon.css">
+  <link rel="stylesheet" href="/static/css/responsive.css">
+  <link rel="stylesheet" href="/static/css/clarify.css">
+  <link rel="stylesheet" href="/static/css/now.css">
+
+  <style>
+    /* Gallery-only chrome. The component styles all live in style.css. */
+    html, body { height: auto; }
+    body { overflow: auto; }                 /* tokens.css hides overflow for the app; restore it here */
+    /* the face bar: switching here writes data-face on <html>, the same
+       switch the Settings Face picker makes in the app (P11-02). */
+    .gface { display: flex; gap: 8px; }
+    .gface button {
+      font: 500 12px/1 var(--sans); color: var(--muted); cursor: pointer;
+      background: var(--control); border: 1px solid var(--line);
+      border-radius: 999px; padding: 8px 14px;
+    }
+    .gface button[aria-pressed="true"] { color: var(--ground); background: var(--accent); border-color: var(--accent); }
+    .gwrap { max-width: 1120px; margin: 0 auto; padding: 0 24px 80px; }
+
+    .ghead { padding: 56px 0 30px; }
+    .geyebrow {
+      font: 500 12px/1 var(--sans); letter-spacing: 0.18em; text-transform: uppercase;
+      color: var(--accent); margin: 0 0 16px;
+    }
+    .gtitle {
+      font-family: var(--serif); font-weight: 500; font-size: clamp(32px, 5vw, 52px);
+      line-height: 1.03; letter-spacing: -0.01em; margin: 0 0 14px; max-width: 18ch;
+    }
+    .glede { font-size: clamp(16px, 2vw, 19px); color: var(--muted); max-width: 60ch; margin: 0; }
+
+    .gbar { display: flex; align-items: center; gap: 10px; margin-top: 22px; }
+
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+    @media (max-width: 780px) { .grid { grid-template-columns: 1fr; } }
+    .cell {
+      background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
+      padding: 20px; box-shadow: var(--panel-shadow); display: flex; flex-direction: column; gap: 14px;
+    }
+    .cell.wide { grid-column: 1 / -1; }
+    .cell-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+    .cell-head .name { font-weight: 600; font-size: 14px; color: var(--text); }
+    .cell-head .tag {
+      font: 500 10px/1 var(--mono); color: var(--accent); background: rgba(var(--glow-rgb), 0.14);
+      padding: 5px 8px; border-radius: 6px; letter-spacing: 0.02em;
+    }
+    .emit {
+      font: 500 11px/1.5 var(--mono); color: var(--muted);
+      background: rgba(var(--glow-rgb), 0.08); border: 1px solid var(--line);
+      border-radius: 8px; padding: 8px 10px; word-break: break-word;
+    }
+    .emit .lbl { color: var(--faint); }
+    .emit .val { color: var(--accent); }
+
+    .gfoot { margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--line);
+      color: var(--faint); font-size: 13px; }
+    .gfoot b { color: var(--muted); font-weight: 600; }
+  </style>
+</head>
+
+<body>
+  <div class="gwrap">
+    <header class="ghead">
+      <p class="geyebrow">Focus Agent · P3-02</p>
+      <h1 class="gtitle">Response components</h1>
+      <p class="glede">Every <code>input_type</code> the agent can ask, rendered through
+        <code>renderClarifyQuestion()</code>. Interact with each control, and the boxed line under it
+        shows the live, exact value it emits through <code>onAnswer</code>.</p>
+      <div class="gbar">
+        <div class="gface" id="gface" role="group" aria-label="Face">
+          <button type="button" data-f="capsule" aria-pressed="true">Capsule</button>
+          <button type="button" data-f="lumen" aria-pressed="false">Lumen</button>
+          <button type="button" data-f="folio" aria-pressed="false">Folio</button>
+        </div>
+        <span class="chip-btn" style="cursor:default" aria-hidden="true">14 input types</span>
+      </div>
+    </header>
+
+    <div id="grid" class="grid"></div>
+
+    <footer class="gfoot">
+      <p><b>How to read this.</b> Each cell mounts one component with a sample ClarifyQuestion.
+      The component renders its own friendly readout (as in the app); the extra boxed
+      <b>emit</b> line shows the raw typed value passed to <code>onAnswer</code>, so the value
+      shape for every <code>input_type</code> can be verified at a glance.</p>
+    </footer>
+  </div>
+
+  <script src="/static/components.js"></script>
+  <script>
+    (function () {
+      "use strict";
+
+      // Realistic sample ClarifyQuestion objects, one per input_type, in the
+      // order the artifact presents them. `wide` widens the cell to two columns.
+      var SAMPLES = [
+        { wide: false, q: {
+            question: "What should I call this task?", field: "title", input_type: "free_text",
+            why: "So it reads well on your week.", allow_free_text: true,
+            options: [{ label: "Draft the Q3 report intro", value: "" }] } },
+
+        { wide: false, q: {
+            question: "What kind of energy does this need?", field: "energy", input_type: "single_select",
+            why: "I place deep work in your freshest hours.",
+            options: [ { label: "Deep focus", value: "deep" }, { label: "Light", value: "light" }, { label: "Admin", value: "admin" } ] } },
+
+        { wide: false, q: {
+            question: "Which platforms do you already have?", field: "platforms", input_type: "multi_select",
+            why: "I'll only suggest courses you can actually start.",
+            options: [
+              { label: "Coursera", value: "coursera" }, { label: "Udemy", value: "udemy" },
+              { label: "DataCamp", value: "datacamp" }, { label: "edX", value: "edx" },
+              { label: "YouTube", value: "youtube" }, { label: "Other", value: "other", opens_free_text: true } ] } },
+
+        { wide: false, q: {
+            question: "How much is riding on this?", field: "importance", input_type: "scale_1_5",
+            why: "Stake weights the priority score.", config: { min: 1, max: 5 } } },
+
+        { wide: false, q: {
+            question: "How long will this take?", field: "estimate_minutes", input_type: "duration",
+            why: "So I can size the block.", allow_free_text: true,
+            config: { min: 15, max: 480, step: 15, unit: "minutes" },
+            options: [ { label: "30m", value: 30 }, { label: "1h", value: 60 }, { label: "2h", value: 120 }, { label: "Half day", value: 240 } ] } },
+
+        { wide: false, q: {
+            question: "How much free time do you have this afternoon?", field: "free_window", input_type: "duration_range",
+            why: "The scheduler treats it as a window, not a promise.",
+            config: { min: 0, max: 480, step: 15, unit: "minutes" } } },
+
+        { wide: false, q: {
+            question: "When do you want to do this?", field: "time_of_day", input_type: "time_bucket",
+            why: '"Pick a time" opens the exact field.',
+            options: [ { label: "Morning", value: "morning" }, { label: "Afternoon", value: "afternoon" }, { label: "Evening", value: "evening" } ] } },
+
+        { wide: false, q: {
+            question: "What hours should I keep free for you?", field: "working_hours", input_type: "time_range",
+            why: "An honest window the agent plans around." } },
+
+        { wide: false, q: {
+            question: "When is this due?", field: "deadline", input_type: "date",
+            why: "Feeds slack and urgency in the priority score." } },
+
+        { wide: false, q: {
+            question: "Any stretch you'll be away?", field: "away", input_type: "date_range",
+            why: "Blocks out capacity for a trip or a hard break." } },
+
+        { wide: true, q: {
+            question: '"Gym most mornings", so which days, and when?', field: "recurrence", input_type: "recurrence",
+            why: "Turns a fuzzy habit into a real constraint the schedule respects." } },
+
+        { wide: true, q: {
+            question: "How many hours a week can you give this?", field: "weekly_hours", input_type: "number",
+            why: "Paces a long goal against real availability.",
+            config: { min: 1, max: 25, step: 1, value: 5, unit: "hours a week" } } },
+
+        { wide: true, q: {
+            question: "I can move three blocks to clear tomorrow morning. Do it?", field: "replan", input_type: "confirm",
+            why: "Only asked when a wrong guess is expensive.",
+            options: [ { label: "Yes, replan", value: true }, { label: "Not now", value: false } ] } },
+
+        // P9-04 course cards: the fourteenth type, and the only one whose
+        // body is live search DATA rather than an option set.
+        { wide: true, q: {
+            question: "Want me to build the plan around these?", field: "courses", input_type: "courses",
+            why: "Real courses, found just now, so the plan has something concrete to hang on.",
+            courses: [
+              { title: "Introduction to Public Speaking", provider: "University of Washington",
+                url: "https://www.edx.org/", citation: "edx.org",
+                description: "A six-week course on structuring a talk and holding a room." },
+              { title: "Dynamic Public Speaking", provider: "Coursera",
+                url: "https://www.coursera.org/", citation: "coursera.org",
+                description: "Four short courses that build to a recorded final talk." },
+              { title: "The Art of Storytelling", provider: "Toastmasters",
+                url: "https://www.toastmasters.org/", citation: "toastmasters.org",
+                description: "Weekly practice with a live audience and immediate feedback." },
+            ] } },
+      ];
+
+      var grid = document.getElementById("grid");
+
+      SAMPLES.forEach(function (s) {
+        var cell = document.createElement("div");
+        cell.className = "cell" + (s.wide ? " wide" : "");
+
+        var head = document.createElement("div");
+        head.className = "cell-head";
+        head.innerHTML = '<span class="name">' + s.q.field + '</span>' +
+                         '<span class="tag">' + s.q.input_type + '</span>';
+        cell.appendChild(head);
+
+        var mount = document.createElement("div");
+        cell.appendChild(mount);
+
+        var emit = document.createElement("div");
+        emit.className = "emit";
+        emit.innerHTML = '<span class="lbl">onAnswer →</span> <span class="val">(interact to emit)</span>';
+        cell.appendChild(emit);
+
+        window.FocusComponents.renderClarifyQuestion(mount, s.q, function (value) {
+          emit.innerHTML = '<span class="lbl">onAnswer →</span> <span class="val">' +
+            JSON.stringify(value) + '</span> <span class="lbl">(' + typeof (Array.isArray(value) ? [] : value) + ')</span>';
+        });
+
+        grid.appendChild(cell);
+      });
+
+      // P10-00: the palette toggle is gone. Blink is Nocturne-only and
+      // <html class="dark"> is permanent. What IS switchable is the FACE
+      // (P10-01/P10-02, skinned across the kit by P11-02), so the bar below
+      // sets data-face directly. FocusSettings is app.js's, and app.js does
+      // not load here, so this page owns the switch itself.
+      var faceBar = document.getElementById("gface");
+      if (faceBar) {
+        faceBar.addEventListener("click", function (e) {
+          var b = e.target.closest("button[data-f]");
+          if (!b) return;
+          document.documentElement.dataset.face = b.getAttribute("data-f");
+          faceBar.querySelectorAll("button").forEach(function (o) {
+            o.setAttribute("aria-pressed", String(o === b));
+          });
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

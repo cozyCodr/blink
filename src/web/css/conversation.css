@@ -1,0 +1,510 @@
+/* conversation.css — Conversation: mic, surface, compose field, echo, hint.
+   Load order is index.html's link order; it preserves the pre-split cascade.
+   Rule: new styles go in the file that owns the feature, never back into one blob. */
+/* ============ The dock trio: keyboard · mic · attach (P11-02a) ============
+   Three EQUAL circles. Before P11-02 the dock held a mic and a line of text
+   that said "or type", naming a door that wasn't drawn: the only way to the
+   field was to tap the mic and hope. Now each way in is a control you can
+   see. The mic is primary through COLOUR and weight (accent icon, accent-
+   tinted rim, the listening pulse) rather than size, so the row still reads
+   as one instrument instead of a button and two afterthoughts.
+   Grounds ride --control, never --surface: on lumen --surface IS the page
+   (see tokens.css). */
+.dock-trio { display: flex; align-items: center; gap: 16px; }
+
+.dock-btn {
+  width: var(--mic-size); height: var(--mic-size); border-radius: 50%;
+  border: 1px solid var(--line); background: var(--control); color: var(--muted);
+  display: grid; place-items: center; cursor: pointer; padding: 0;
+  transition: transform 0.18s cubic-bezier(0.34, 1.4, 0.44, 1),
+              border-color 0.2s ease, color 0.2s ease, box-shadow 0.3s ease;
+}
+.dock-btn svg { width: 23px; height: 23px; }
+.dock-btn:hover {
+  transform: translateY(-2px); border-color: var(--accent); color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--glow-rgb), 0.10);
+}
+.dock-btn:active { transform: translateY(0) scale(0.96); }
+.dock-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ============ Mic (the primary of the three) ============ */
+.mic {
+  width: var(--mic-size); height: var(--mic-size); border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: var(--control); color: var(--accent); cursor: pointer;
+  display: grid; place-items: center;
+  touch-action: none; user-select: none; -webkit-user-select: none;
+  -webkit-touch-callout: none;   /* no long-press callout mid-hold (P7-09) */
+  transition: transform 0.18s ease, border-color 0.2s ease, box-shadow 0.3s ease, background 0.3s ease, color 0.3s ease;
+}
+.mic:hover { transform: translateY(-2px); border-color: var(--accent); }
+.mic svg { width: 26px; height: 26px; }
+[data-state="listening"] .mic {
+  border-color: var(--accent); color: var(--ground); background: var(--accent);
+  box-shadow: 0 0 0 0 rgba(var(--glow-rgb), 0.5); animation: micPulse 1.6s ease-out infinite;
+}
+@keyframes micPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(var(--glow-rgb), 0.45); }
+  100% { box-shadow: 0 0 0 22px rgba(var(--glow-rgb), 0); }
+}
+
+/* ============ Conversation surface — UNBOXED, below the eyes ============
+   The eyes stay centered in the UPPER part of the stage: the stage reserves
+   room at the bottom (padding-bottom) so `place-items-center` pushes the face
+   up, leaving the lower band for the surface. The surface is absolutely
+   positioned in that lower band, so it can never overlap the eyes.
+
+   P11-01 took the panel away. There is no card and nothing that could read
+   as one: no border, no radius, no shadow, no backdrop-blur plate, no name
+   badge, and NO background of any kind declared here. The reply sets
+   DIRECTLY on the app ground with generous margin.
+
+   Whatever a face needs behind the words is that face's business and lives
+   in face.css: capsule paints a feathered scrim of its own ground colour so
+   the halo can't wash the text out, and folio rules the page. This file
+   owns only the geometry, the scroll bound, and the cross-fade. */
+.stage { padding-bottom: min(42vh, 384px); }
+
+.surface {
+  position: absolute; left: 50%; bottom: 20px;
+  transform: translate(-50%, 12px);
+  width: min(640px, 92vw);
+  max-height: min(40vh, 360px); overflow-y: auto;
+  padding: 10px 4px 14px;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.4s ease, transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), filter 0.4s ease;
+  z-index: 40; text-align: left;
+}
+.surface.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+
+/* Bounded but invisible scroll region (P11-01, was P7-02's thin bar): a
+   long reply still scrolls inside the band instead of running off screen,
+   but a scrollbar is chrome and chrome is exactly what left. */
+.surface { scrollbar-width: none; -ms-overflow-style: none; }
+.surface::-webkit-scrollbar { width: 0; height: 0; }
+
+/* ---- Scrolled-out edges FADE, they do not crop (2026-08-27) --------------
+   A scrolled long reply used to end in a hard horizontal cut at the band's
+   edge, which reads as broken rather than as "there is more above".
+
+   This is a MASK, not a gradient overlay, and that is forced by P11-01: the
+   surface has no card background of its own any more, so an overlay would
+   have to paint some colour over whatever the face is showing behind the
+   words — capsule's halo, folio's paper grain, lumen's porcelain — and the
+   band would be visible on every one of them. A mask fades the CONTENT to
+   transparent and lets the face's ground through untouched.
+
+   The mask is measured from the padding box, so it stays pinned to the band
+   while the text scrolls under it. The two ramps are variables held at 0, so
+   with neither class on, the mask is fully opaque and costs the words
+   nothing: app.js's syncEdgeFades adds .fade-top / .fade-bot ONLY while
+   something really is out of view in that direction. A fade with nothing
+   behind it would just be dimmed text, which is the fault this fixes.
+
+   Static by design: no transition, nothing to fight prefers-reduced-motion,
+   and no work on the scroll path beyond a class toggle at the boundary. */
+.surface {
+  --fade-top: 0px;
+  --fade-bot: 0px;
+  -webkit-mask-image: linear-gradient(to bottom,
+    transparent 0, #000 var(--fade-top),
+    #000 calc(100% - var(--fade-bot)), transparent 100%);
+  mask-image: linear-gradient(to bottom,
+    transparent 0, #000 var(--fade-top),
+    #000 calc(100% - var(--fade-bot)), transparent 100%);
+}
+/* ~2.5rem: enough for a line and a half of the reply to melt out, gentle
+   enough that it never reads as a vignette. */
+.surface.fade-top { --fade-top: 2.5rem; }
+.surface.fade-bot { --fade-bot: 2.5rem; }
+
+/* Mode cross-fade (P7-02): while .swap is on (140ms, timed by app.js) the
+   content rows ease out; when it lifts the new content eases back in on the
+   same transition. Nothing around the words moves. */
+.surface .said, .surface .why, .surface #p-extra {
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+.surface.swap .said, .surface.swap .why, .surface.swap #p-extra {
+  opacity: 0; transform: translateY(5px);
+}
+
+/* Clarify control veil (P7-02): the ask control is built up-front but stays
+   hidden until a beat after the question prompt finishes typing on.
+   P11-02e gives the lift a direction: the prompt writes on, and the kit
+   FADES UP into place behind it (app.js holds it 120ms past the last
+   letter). The transition is the shared one declared just above, so the
+   140ms swap timing is untouched. */
+.surface #p-extra.veil { opacity: 0; transform: translateY(9px); }
+/* CENTRED REPLY (user request, 2026-08-27). The agent's answer is centred in
+   every face, so the centring lives here on the shared rows rather than three
+   times over in face.css. Only `.said` and `.why` take it: they are one block
+   and read as one voice. `.surface` itself stays `text-align: left` so
+   #p-extra's control kit (chips, steppers, confirm rows) keeps its own
+   left-aligned internal layout — those are controls, not prose.
+
+   The measure is capped at 34em with auto margins so a long reply keeps a
+   readable line length instead of running the full 640px band; centred text
+   loses its ragged left edge as an anchor, so an over-wide measure is much
+   harder to track back to the start of the next line. 34em is ~680px at the
+   20px serif, so on the widest band (640px) it is the band that binds and the
+   cap only bites on a wider viewport; folio's 28px hand is already well under
+   34em of its own size, so its measure is the band's too. */
+.surface .said {
+  font-family: var(--serif); font-size: 20px; line-height: 1.5; color: var(--text);
+  margin: 0 auto; min-height: 30px; white-space: pre-wrap;
+  max-width: 34em; text-align: center;
+  overflow-wrap: anywhere;   /* long pasted tokens/URLs never overflow (P7-02) */
+}
+.surface .said .caret { color: var(--accent); animation: caret 1s step-end infinite; }
+@keyframes caret { 50% { opacity: 0; } }
+
+/* Caption-synced word spans (P7-01): each word starts hidden + blurred and
+   is revealed (.on) by the rAF loop in step with the reply audio. */
+.surface .said .w { opacity: 0; filter: blur(4px); will-change: opacity, filter; }
+.surface .said .w.on {
+  opacity: 1; filter: blur(0);
+  transition: opacity 0.12s ease, filter 0.12s ease;
+}
+
+/* ---- Typed inline references (P11-08) ------------------------------------
+   The reply stays ONE plain string (exactly what Cloud TTS speaks) and the
+   server sends word-aligned typed spans beside it; app.js wraps the named run
+   of `.w` spans in a `.ref` parent and leaves the leaf words — and their
+   reveal classes — completely alone. A reference exists only because a real
+   object was matched behind it, so this decoration is a TRUTH SIGNAL: an
+   unmatched (or fabricated) value simply renders as flat text.
+
+   Styling is SEMANTIC, never markdown: no bold, no italic chatter. This file
+   owns only the shared mechanics — the neutral reset, the numeric treatment
+   and the focus ring. The reference MARK itself is face identity and lives in
+   face.css under each `data-face` scope, its second expressive channel after
+   the eyes. */
+.surface .said .ref {
+  display: inline;
+  /* an actionable reference is a real <button>; strip the native widget
+     chrome, which a light-ground face (lumen, folio) otherwise draws as a
+     box around the words */
+  -webkit-appearance: none;
+  appearance: none;
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  text-align: inherit;
+}
+/* Numbers and dates read as VALUES: tabular figures, so a count sits in the
+   sentence with the weight of a measurement. */
+.surface .said .ref-count,
+.surface .said .ref-date {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+/* An ACTIONABLE reference is a real button in the flow (app.js gives it the
+   aria-label naming what it does); #p-said's aria-live still announces the
+   plain reply exactly once, decoration and all left unspoken. */
+.surface .said .ref-act {
+  cursor: pointer;
+  border-radius: 3px;
+  transition: opacity 0.16s ease;
+}
+.surface .said .ref-act:hover { opacity: 0.78; }
+.surface .said .ref-act:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The ONE prominent action. Restraint is an acceptance criterion here: the
+   server caps this at a single button, because a calm surface with a row of
+   buttons is just a form again. It lands after the words have. */
+.surface .reply-actions { margin-top: 14px; }
+.surface .reply-action {
+  font-size: 13px;
+  padding: 7px 15px;
+  animation: reply-action-in 0.24s ease both;
+}
+
+@keyframes reply-action-in {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .surface .said .ref-act { transition: none; }
+  .surface .reply-action { animation: none; }
+}
+
+/* Auto-minimized reply (P7-01): after ~20s of stillness the finished reply
+   recedes — smaller, dimmer, softly blurred — until any pointer/key activity
+   (or a click/Esc dismiss) restores or clears it. */
+.surface.surface-min {
+  opacity: 0.55;
+  transform: translate(-50%, 4px) scale(0.97);
+  filter: blur(1.5px);
+}
+.surface .why { font-size: 12px; color: var(--faint); margin: 8px 0 0; text-align: center; }
+
+/* ---- one-turn user echo: the margin note (P7-02, reshaped by P11-01) ----
+   Now that the reply is unboxed and unlabelled, this quiet italic line IS
+   how you tell the two voices apart: your words sit right-aligned and small
+   in the margin above, like a note pencilled beside the page, and the
+   agent's answer holds the ground below. Slides in on send, dims to ~40%
+   when the reply starts, replaced next turn. Each face gives it its own
+   hand in face.css. */
+.echo {
+  position: absolute; z-index: 41; margin: 0;
+  bottom: calc(20px + min(40vh, 360px) + 14px);
+  right: max(calc(50% - 320px), 4vw);
+  max-width: 40ch;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: italic 400 14px/1.45 var(--serif); letter-spacing: 0.01em;
+  color: var(--faint); text-align: right;
+  opacity: 0; transform: translateY(6px);
+  pointer-events: none;
+  transition: opacity 0.28s ease, transform 0.28s ease;
+}
+.echo.show { opacity: 1; transform: translateY(0); }
+.echo.show.dim { opacity: 0.4; }
+
+/* ---- hint line (P7-02): text swaps ride a short opacity dip ---- */
+#hint { transition: color 0.3s ease, opacity 0.12s ease; }
+.surface #p-extra:not(:empty) { margin-top: 14px; }
+
+/* ============ The field: a rule, not a box (P11-02b) ============
+   P11-01 took the plate out from under Blink's words. P11-02 does the same
+   for yours. The old field was a 14px-radius tub with a hardcoded inset
+   shadow, which put you inside a widget while the agent wrote on the open
+   page. Now there is one hairline under the line you're writing, and on
+   focus an accent rule LIFTS into place along it (a background gradient
+   grown from 0 to full width, so the rule draws rather than blinks on).
+   No radius, no fill, no shadow: you write ON the surface.
+   Shared with the clarify kit's free-text inputs, which is the point —
+   typing an answer and typing a message are the same act. */
+.field {
+  width: 100%; font: 400 15px/1.5 var(--sans); color: var(--text);
+  background-color: transparent;
+  border: 0; border-bottom: 1px solid color-mix(in srgb, var(--line) 92%, transparent);
+  border-radius: 0; padding: 11px 2px 9px;
+  box-shadow: none;
+  /* the lifting rule: an accent line pinned to the bottom edge, grown from
+     the centre out on focus. background-size is the animated channel. */
+  background-image: linear-gradient(var(--accent), var(--accent));
+  background-repeat: no-repeat;
+  background-position: 50% 100%;
+  background-size: 0% 1.5px;
+  transition: border-color 0.18s ease,
+              background-size 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+  resize: none; caret-color: var(--accent);
+  /* the field itself arrives on the same breath: a short rise as the row
+     mounts, so opening compose reads as the page offering you a line */
+  animation: fieldRise 0.34s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+.field:hover { border-bottom-color: color-mix(in srgb, var(--accent) 42%, var(--line)); }
+.field:focus { outline: none; background-size: 100% 1.5px; }
+.field::placeholder { color: var(--faint); transition: opacity 0.2s ease; }
+.field:focus::placeholder { opacity: 0.55; }
+@keyframes fieldRise {
+  from { opacity: 0; transform: translateY(7px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+/* Reduced motion: the rule is simply there, at rest and on focus. */
+@media (prefers-reduced-motion: reduce) {
+  .field { animation: none; transition: border-color 0.18s ease; }
+  .field:focus { background-size: 100% 1.5px; }
+}
+
+/* Send (and the optional Skip beside it) centres under the centred kit —
+   2026-08-27, with the rest of the column. */
+.surface .send { display: flex; justify-content: center; align-items: center; gap: 12px; margin-top: 14px; }
+.btn {
+  font: 600 14px/1 var(--sans); border-radius: 11px; padding: 10px 18px; cursor: pointer;
+  border: 1px solid var(--line); background: transparent; color: var(--text);
+  transition: all 0.16s;
+}
+.btn.go {
+  background: var(--accent); color: var(--ground); border-color: var(--accent);
+  border-radius: 999px; padding: 10px 20px;
+  box-shadow: 0 2px 10px rgba(var(--glow-rgb), 0.22);
+  transition: filter 0.16s ease, transform 0.2s cubic-bezier(0.34, 1.4, 0.44, 1), box-shadow 0.2s ease, opacity 0.2s ease;
+}
+.btn.go:hover { filter: brightness(1.08); transform: translateY(-1px); box-shadow: 0 4px 16px rgba(var(--glow-rgb), 0.30); }
+.btn.go:active { transform: translateY(0) scale(0.97); }
+.btn.go:disabled { opacity: 0.45; transform: none; box-shadow: none; cursor: default; }
+.btn.ghost:hover { border-color: var(--accent); }
+
+/* ============ Photo-to-plan (P9-02): drop glow, chip ============ */
+/* The compose row: the ruled field and the pill Send, side by side, with the
+   field taking the room. P11-02a moved the attach "+" out of this row and
+   into the dock trio (see .dock-btn above), where it stands beside the mic
+   and the keyboard as one of the three equal ways in. */
+/* 2026-08-27: the row centres with the rest of the column. The field keeps
+   the room it needs but no longer runs the full band, so the field + Send
+   pairing sits as ONE centred group under the centred reply instead of a bar
+   pinned across the column. What you type inside the field stays left. */
+.compose-row { display: flex; align-items: flex-end; gap: 10px; justify-content: center; }
+.compose-row .field { flex: 0 1 460px; min-width: 0; text-align: left; }
+
+/* Drop-zone glow: while a file drags over the app, a soft dashed accent
+   frame breathes inside the stage so the whole room reads as the target
+   (the hint says "Show me a syllabus"). Overlay-only: nothing else moves. */
+#app.dropping .stage::after {
+  content: ""; position: absolute; inset: 12px; border-radius: 26px;
+  border: 1.5px dashed color-mix(in srgb, var(--accent) 60%, transparent);
+  box-shadow: inset 0 0 60px rgba(var(--glow-rgb), 0.16);
+  pointer-events: none; z-index: 60;
+  animation: dropGlow 1.5s ease-in-out infinite;
+}
+@keyframes dropGlow {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 1; }
+}
+
+/* Thumbnail chip in the margin-note position while an image is being read.
+   It rides 4px lower than the echo line because the chip is a 46px block and
+   the note is a single line: this keeps their optical centres together. */
+.img-chip {
+  position: absolute; z-index: 41;
+  bottom: calc(20px + min(40vh, 360px) + 10px);
+  right: max(calc(50% - 320px), 4vw);
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px 5px 5px; border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  pointer-events: none;
+  opacity: 0; transform: translateY(6px);
+  transition: opacity 0.28s ease, transform 0.28s ease;
+}
+.img-chip.show { opacity: 1; transform: translateY(0); }
+.img-chip img { width: 36px; height: 36px; object-fit: cover; border-radius: 8px; display: block; }
+.img-chip-label {
+  font: 400 12px/1 var(--sans); color: var(--muted);
+  animation: chipReading 1.4s ease-in-out infinite;
+}
+@keyframes chipReading {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
+/* Reduced motion: the glow and label hold steady, the chip lands instantly. */
+@media (prefers-reduced-motion: reduce) {
+  #app.dropping .stage::after { animation: none; opacity: 1; }
+  .img-chip { transition: none; transform: none; }
+  .img-chip-label { animation: none; opacity: 0.8; }
+}
+
+
+/* =====================================================================
+   P11-03 — THE TWO LAYERS STOP FIGHTING
+
+   With the plan open, the conversation layer and the plan were drawing in
+   the same pixels: the reply's serif ran straight across the week runs, the
+   echo crossed the hour labels, and the compose placeholder sat on top of
+   the horizon's own meta line. P11-01 is the reason there is nothing to
+   separate them any more (the reply panel is gone, correctly), so the
+   separation has to come from somewhere that is NOT a card.
+
+   Three moves, in order:
+     1. THE DOCK LEAVES. While the plan is open, the keyboard/mic/attach trio
+        and the hint line fade out entirely. The plan gets the screen. Every
+        input path still works without them: hold Space to talk, just start
+        typing (app.js opens the field on the first printable key), drop or
+        paste an image. They fade back as the plan closes.
+     2. THE PLAN RESERVES WHAT IS ACTUALLY THERE. app.js measures the visible
+        conversation band each time it changes and sets #horizon's
+        padding-bottom to it, so the plan's own content — #h-meta included —
+        ends above the conversation rather than under it. With the dock gone
+        the band is small, and the plan gets that room back.
+     3. WHAT REMAINS GETS ATMOSPHERE, NOT A BOX. A reply or a clarify
+        question still arrives over the plan, so #convo-scrim lays a
+        feathered wash of the ground under it with a real backdrop blur,
+        masked to nothing at every edge. No border, no radius, no rectangle:
+        the plan just goes soft and quiet where the words are.
+   ===================================================================== */
+
+/* ---- 1. the dock stands down while the plan is up ---- */
+#dock {
+  transition: opacity 0.34s ease, transform 0.42s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+#app.viewing #dock {
+  opacity: 0; transform: translateY(14px); pointer-events: none;
+  /* it is gone, so nothing in it can be tabbed to by accident */
+  visibility: hidden;
+  transition: opacity 0.26s ease, transform 0.3s ease, visibility 0s linear 0.3s;
+}
+
+/* ---- 3. the scrim: atmosphere under the words, never an object ----
+   Sits between the horizon (z 30) and the surface (z 40). Its size and
+   position are set by app.js from the real band it has to cover, so it can
+   never be a fixed rectangle that misses. The mask is what makes it
+   edgeless: the wash AND the backdrop blur both feather to zero. */
+.convo-scrim {
+  position: absolute; z-index: 39; pointer-events: none;
+  left: 0; right: 0; bottom: 0; height: 0;
+  opacity: 0;
+  background:
+    radial-gradient(118% 135% at 50% 82%,
+      color-mix(in srgb, var(--ground) 99%, transparent) 0%,
+      color-mix(in srgb, var(--ground) 96%, transparent) 46%,
+      color-mix(in srgb, var(--ground) 74%, transparent) 72%,
+      transparent 94%);
+  /* the blur does the work on a textured ground (folio's paper grain, the
+     capsule runs); the wash does it on a flat one (lumen's white). Both are
+     turned up a notch from the first pass because the words have to be
+     plainly readable, not merely separable. */
+  backdrop-filter: blur(26px) saturate(0.82);
+  -webkit-backdrop-filter: blur(26px) saturate(0.82);
+  -webkit-mask-image: radial-gradient(115% 130% at 50% 82%,
+      #000 0%, #000 58%, rgba(0, 0, 0, 0.55) 78%, transparent 96%);
+  mask-image: radial-gradient(115% 130% at 50% 82%,
+      #000 0%, #000 58%, rgba(0, 0, 0, 0.55) 78%, transparent 96%);
+  transition: opacity 0.4s ease;
+}
+#app.viewing .convo-scrim.on { opacity: 1; }
+
+/* ---- the peek handle, when the plan is open: a real way out ----
+   Closed it stays the quiet hairline it has always been. Open it widens into
+   a grabber and says what pulling it down does, because an unlabelled 3px
+   line is not an affordance anyone can find. */
+.peek-word {
+  position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+  font: 500 11px/1 var(--sans); letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--faint); white-space: nowrap;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+#app.viewing .peek { width: 148px; height: 34px; bottom: 10px; }
+#app.viewing .peek-line { width: 62px; height: 4px; }
+#app.viewing .peek:hover .peek-line, #app.viewing .peek:focus-visible .peek-line { width: 78px; }
+#app.viewing .peek-word { opacity: 1; }
+#app.viewing .peek:hover .peek-word { color: var(--muted); }
+/* while a drag is live the sheet follows the finger, so the handle must not
+   animate against it */
+#app.dragging-close #horizon { transition: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  #dock, #app.viewing #dock, .convo-scrim, .peek-word { transition: none !important; }
+  #app.viewing #dock { transform: none; }
+}
+
+/* =====================================================================
+   The conversation's reduced-motion guard (moved here P11-07)
+   These guards sat at the tail of horizon.css; every selector in them is
+   owned by this file (the mic, the surface, the caption words, the echo,
+   the hint), and the standard says a feature's reduced-motion handling
+   ships beside the animation it guards. Appended at the END so their order
+   relative to the rest of this file matches the order they had when they
+   loaded two files later.
+   ===================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  [data-state="listening"] .mic { animation: none !important; }
+  /* synced captions still reveal, but instantly and without blur;
+     the eyes stay still (app.js never adds .talking-live under reduce) */
+  .surface .said .w { filter: none; }
+  .surface .said .w.on { transition: none; }
+  .surface, .surface.surface-min { transition: opacity 0.4s ease; filter: none; }
+  /* P7-02: mode swaps, the veil lift, the echo, and hint swaps land instantly */
+  .surface .said, .surface .why, .surface #p-extra { transition: none; }
+  .echo, #hint { transition: none; }
+  .echo { transform: none; }
+}

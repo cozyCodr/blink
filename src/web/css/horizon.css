@@ -1,0 +1,967 @@
+/* horizon.css — The horizon: container, peek handle, zoom shell, all five levels.
+   Load order is index.html's link order; it preserves the pre-split cascade.
+   Rule: new styles go in the file that owns the feature, never back into one blob. */
+/* ============ The horizon (P7-05) — the plan, in the space the eyes vacate ============
+   Lives INSIDE the stage, under the face-rig (z 30 < 35 so the parked eyes
+   stay clickable). Only opacity/transform animate. Opening: 420ms fade/rise
+   delayed 300ms behind the park; closing: a quick 200ms out so the unpark
+   (delayed 200ms on .face-rig) starts as it clears. */
+#horizon {
+  position: absolute; inset: 0; z-index: 30;
+  padding: 108px clamp(16px, 4vw, 40px) 28px;
+  overflow-y: auto;
+  opacity: 0; pointer-events: none;
+  /* P11-05: the closed state IS the state the pull-down drag settles into —
+     pushed down and a shade smaller, exactly what setDrag() interpolates
+     toward (translateY + a ~3% scale + fading). So the sheet is drawn up from
+     the band the parked eyes vacate on the way in, and pushed back down into
+     it on the way out: one object, one axis, run in reverse. It used to open
+     from a 12px/0.96 nudge, which had no relationship to the close at all. */
+  transform: translateY(64px) scale(0.97);
+  /* P11-03: leaving matches arriving. The close used to snap out in 200ms
+     against a 720ms open, which is most of why it felt awkward; it now eases
+     on the same character. A live pull-down drag turns this off (see
+     #app.dragging-close in conversation.css) so the sheet follows the finger. */
+  transition: opacity 0.42s ease, transform 0.5s cubic-bezier(0.22, 0.9, 0.3, 1);
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+#horizon:focus { outline: none; }
+#horizon::-webkit-scrollbar { width: 6px; }
+#horizon::-webkit-scrollbar-thumb { background: var(--line); border-radius: 999px; }
+/* P11-05: open and close now cost the same. The open used to wait 300ms
+   behind the park and then take 420ms (720ms total) against a close that had
+   already been brought to 500ms, so the two halves of one gesture were
+   nothing alike. The delay is trimmed to the 80ms the park needs to commit
+   and the travel matches the close exactly (0.42s opacity / 0.5s transform,
+   same curve), which lands the open at 580ms against the close's 500ms — and
+   because both are plain CSS transitions on the same property, an open
+   interrupted by a pull-down reverses from wherever it had got to. */
+#app.viewing #horizon {
+  opacity: 1; pointer-events: auto; transform: none;
+  transition: opacity 0.42s ease 0.08s,
+              transform 0.5s cubic-bezier(0.22, 0.9, 0.3, 1) 0.08s;
+}
+/* day cards stagger in ~45ms apart once the horizon opens. CSS-timed via
+   --i (set inline by the renderer), so the no-GSAP path is identical. */
+#app.viewing #horizon .h-card {
+  animation: hCardIn 0.42s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: calc(90ms + var(--i, 0) * 45ms);
+}
+
+/* ---- P11-05: the header cross-fades with the canvas ----
+   #h-title / #h-sub / #h-meta used to hard-cut via bare textContent while the
+   canvas underneath was still mid cross-fade, so the words arrived a beat
+   ahead of the picture. setText() in app.js eases them out and back in on
+   opacity and a 4px lift, both composited, neither reflowing the header. */
+#h-title, #h-sub, #h-meta {
+  transition: opacity 0.22s ease, transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+#h-title.hz-txt-out, #h-sub.hz-txt-out, #h-meta.hz-txt-out {
+  opacity: 0; transform: translateY(-4px);
+  transition-duration: 0.13s;
+}
+@keyframes hCardIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ---- peek handle: a thin glowing line at the bottom edge ---- */
+.peek {
+  position: fixed; left: 50%; bottom: 6px; z-index: 10;
+  transform: translateX(-50%);
+  width: 72px; height: 20px; padding: 0;
+  background: transparent; border: 0; cursor: pointer;
+  display: grid; place-items: center;
+}
+.peek-line {
+  width: 44px; height: 3px; border-radius: 999px;
+  background: rgba(var(--glow-rgb), 0.55);
+  box-shadow: 0 0 10px rgba(var(--glow-rgb), 0.45);
+  transition: width 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+.peek:hover .peek-line, .peek:focus-visible .peek-line {
+  width: 58px; background: rgba(var(--glow-rgb), 0.9);
+  box-shadow: 0 0 14px rgba(var(--glow-rgb), 0.6);
+}
+.peek:focus-visible { outline: none; }
+
+/* ============ Horizon zoom (P7-06) — pills, gauge, layers, week + day ============ */
+
+/* controls row: the five level pills left, the utilization gauge right;
+   at narrow widths the pills scroll sideways rather than wrapping the row */
+#hz-controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+#hz-pills {
+  display: flex; gap: 6px; padding: 2px;
+  overflow-x: auto; max-width: 100%;
+  scrollbar-width: none;
+  scroll-snap-type: x proximity;   /* narrow screens: pills rest on a snap point (P7-09) */
+}
+#hz-pills::-webkit-scrollbar { display: none; }
+.hz-pill {
+  font-family: var(--sans); font-size: 12px; font-weight: 500;
+  letter-spacing: 0.06em; text-transform: capitalize; white-space: nowrap;
+  padding: 5px 13px; border-radius: 999px; cursor: pointer;
+  scroll-snap-align: start;
+  color: var(--muted); background: transparent; border: 1px solid var(--line);
+  transition: color 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+}
+.hz-pill:hover { color: var(--text); border-color: var(--faint); }
+.hz-pill.on { color: var(--ground); background: var(--accent); border-color: var(--accent); }
+.hz-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* the slim utilization gauge: calm accent under 85, warm 85–100, alert past */
+#hz-gauge { display: flex; align-items: center; gap: 8px; min-height: 20px; }
+.hz-g-bar {
+  display: inline-block; width: 90px; height: 5px;
+  border-radius: 999px; background: var(--line); overflow: hidden;
+}
+/* P11-05: the fill travels on transform, not width. It used to carry
+   `transition: width .4s` and never once fired, because renderGauge rebuilt
+   the node on every render and a new node has nothing to travel from. The
+   renderer now keeps the node and updates scaleX in place, so the bar really
+   does move between two levels' utilization — and on the compositor, with no
+   layout for the header to pay for. */
+.hz-g-fill {
+  display: block; width: 100%; height: 100%; border-radius: 999px;
+  background: var(--accent);
+  transform: scaleX(0); transform-origin: left center;
+  transition: transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1), background 0.3s ease;
+}
+.hz-g-warm .hz-g-fill  { background: var(--warm); }
+.hz-g-alert .hz-g-fill { background: var(--alert); }
+.hz-g-num { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.hz-g-chip {
+  font-family: var(--sans); font-size: 11px; padding: 3px 10px; border-radius: 999px;
+  border: 1px solid var(--alert); color: var(--alert); background: transparent; cursor: pointer;
+}
+/* ---- the legend (P11-03): the key, in words, always on screen ----
+   Every meaning the spine draws used to live in a `title` tooltip, which a
+   touch device never shows. This strip says each one out loud, and the
+   renderer only lists the keys the level actually drew — so the legend can
+   never promise a mark that is not on the canvas. */
+#hz-legend {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px;
+  margin-top: 12px;
+}
+#hz-legend[hidden] { display: none; }
+.hz-lg {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--sans); font-size: 11px; letter-spacing: 0.04em;
+  color: var(--muted); white-space: nowrap;
+}
+/* The key is literally the same paint as the canvas: each swatch is a
+   miniature run, built from the very declarations .hz-run / .hz-open /
+   .hz-span / .hz-busy use, so a face that re-skins the spine re-skins the
+   legend with it and the two can never drift (P11-03). */
+.hz-lg-mark {
+  display: block; width: 22px; height: 12px; border-radius: 3px; flex: none;
+  background: var(--control); border: 1px solid var(--line);
+}
+.hz-lg-open {
+  background: color-mix(in srgb, var(--accent) 18%, var(--control));
+  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+}
+/* P11-04: the three states of a placed session, each swatch built from the
+   very declarations the canvas uses — an outline, a solid fill, a hatched
+   fill — so the key and the spine can never say different things. */
+.hz-lg-planned {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: var(--accent); border-left: 3px solid var(--accent-bright);
+}
+.hz-lg-timer {
+  background: color-mix(in srgb, var(--accent) 46%, transparent);
+  border-color: var(--accent); border-left: 3px solid var(--accent-bright);
+}
+.hz-lg-reported {
+  background: repeating-linear-gradient(-45deg,
+    color-mix(in srgb, var(--accent) 52%, transparent) 0 3px,
+    transparent 3px 7px);
+  border-color: var(--accent); border-left: 3px solid var(--accent-bright);
+}
+.hz-lg-busy {
+  background:
+    repeating-linear-gradient(-45deg, transparent 0 5px,
+      color-mix(in srgb, var(--faint) 45%, transparent) 5px 6px),
+    var(--control);
+}
+.hz-lg-now    { width: 2px; height: 13px; border-radius: 999px; background: var(--accent); box-shadow: 0 0 6px rgba(var(--glow-rgb), 0.7); }
+.hz-lg-due    { width: 10px; height: 3px; background: var(--warm); }
+.hz-lg-hot    { border: 1px solid var(--warm); background: color-mix(in srgb, var(--warm) 18%, transparent); }
+.hz-lg-press  { width: 4px; height: 13px; border-radius: 999px; background: linear-gradient(0deg, var(--accent) 55%, var(--line) 55%); }
+.hz-lg-dia    { width: 10px; height: 10px; border-radius: 2px; transform: rotate(45deg); border: 1px solid var(--accent); background: var(--accent); }
+.hz-lg-flag   { width: 3px; height: 13px; background: var(--warm); }
+.hz-lg-star   { width: auto; height: auto; color: var(--warm); font-size: 12px; line-height: 1; }
+
+#hz-unplaced {
+  margin-top: 10px; padding: 10px 14px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface);
+}
+.hz-unplaced-row { display: flex; justify-content: space-between; gap: 12px; margin: 4px 0; font-size: 12px; }
+.hz-unplaced-title { color: var(--text); }
+.hz-unplaced-reason { color: var(--faint); text-align: right; }
+
+/* the canvas: two stacked layers so level swaps can shared-axis cross-fade.
+   The incoming layer owns the flow (and the height); the outgoing goes
+   absolute for its 260ms exit. */
+#hz-canvas { position: relative; }
+.hz-layer {
+  transition: opacity 0.26s ease, transform 0.26s cubic-bezier(0.2, 0.8, 0.2, 1);
+  transform-origin: 50% 30%;
+}
+.hz-layer.hz-hidden { display: none; }
+.hz-layer.hz-abs { position: absolute; top: 0; left: 0; width: 100%; pointer-events: none; }
+.hz-layer.hz-start-small, .hz-layer.hz-end-small { opacity: 0; transform: scale(0.95); }
+.hz-layer.hz-start-big,  .hz-layer.hz-end-big  { opacity: 0; transform: scale(1.06); }
+
+/* ---- P11-05: the level's frame, while its data is still in flight ----
+   The swap used to wait on the network with the OLD level on screen under the
+   NEW pill. The new level's frame now goes up immediately and the detail
+   resolves into it. These shapes are scenery: the right grid at the right
+   proportions, carrying no number, name or date. The whole scaffold breathes
+   on ONE opacity animation (a single composited layer, not 35 of them) so a
+   slow fetch still reads as work in progress. */
+.hz-scaffold { animation: hzSkelBreathe 1.7s ease-in-out infinite; }
+@keyframes hzSkelBreathe {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 0.78; }
+}
+.hz-sk-axis, .hz-sk-row, .hz-sk-cell, .hz-sk-band, .hz-sk-lane {
+  border-radius: 10px; background: var(--surface); border: 1px solid var(--line);
+}
+.hz-sk-axis { height: 18px; border-radius: 6px; margin-bottom: 14px; }
+.hz-sk-rows { display: flex; flex-direction: column; gap: 8px; }
+.hz-sk-row { height: 62px; }
+.hz-scaffold-day .hz-sk-row { height: 84px; }
+.hz-sk-mrow { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 6px; }
+.hz-sk-cell { height: 74px; border-radius: 8px; }
+.hz-sk-band { height: 46px; margin-bottom: 18px; }
+.hz-sk-lane { height: 54px; margin-bottom: 10px; }
+/* P11-06: the two band levels no longer share one shape. The quarter's band
+   is a dated ruler and each lane carries a measured strip under its axis; the
+   year's band is the four quarter arcs and its lanes are commitment runs.
+   The frame has to go up at the proportions the content really lands at, so
+   these are measured against the real thing: quarter ruler 16px / lane 48px,
+   year band 70px / run 40px. */
+.hz-scaffold-quarter .hz-sk-band { height: 16px; margin-bottom: 16px; }
+.hz-scaffold-quarter .hz-sk-lane { height: 48px; margin-bottom: 16px; }
+.hz-scaffold-year .hz-sk-band { height: 70px; margin-bottom: 22px; }
+.hz-scaffold-year .hz-sk-lane { height: 40px; margin-bottom: 14px; }
+
+/* the detail arriving into the waiting frame: up and in, opacity + transform */
+.hz-layer.hz-settle { opacity: 0; transform: translateY(8px); }
+
+/* (the old .hz-loading text is gone — P11-05 replaced "Loading your plan…"
+   with the level's own waiting frame above.) */
+.hz-empty {
+  border: 1px solid var(--line); background: var(--surface);
+  border-radius: 16px; padding: 32px 20px; text-align: center;
+}
+.hz-empty-title { font-family: var(--serif); font-size: 19px; color: var(--text); margin: 0; }
+.hz-empty-sub { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+
+/* ============ Month / quarter / year (P7-08) ============ */
+
+/* --- month: a 5-week Monday-start grid; the left gutter carries each
+   week's planned hours, each cell a numeral + density glyph + ticks --- */
+.hz-month { display: flex; flex-direction: column; gap: 6px; }
+.hz-m-row { display: grid; grid-template-columns: 40px repeat(7, 1fr); gap: 6px; align-items: stretch; }
+.hz-m-head { margin-bottom: 2px; }
+.hz-m-wd {
+  font-family: var(--sans); font-size: 10px; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--faint); text-align: center;
+}
+.hz-m-gut {
+  display: flex; flex-direction: column; align-items: flex-end; justify-content: center;
+  gap: 4px;
+  font-family: var(--mono); font-size: 10px; color: var(--faint);
+  white-space: nowrap; padding-right: 2px;
+}
+.hz-m-head .hz-m-gut { align-items: end; text-transform: uppercase; letter-spacing: 0.12em; }
+/* P11-06: the week's ink weight in the shared gutter — how heavy this week is
+   against the heaviest week on the grid. Width is set inline from the data;
+   an empty week keeps the rail and draws no ink, which reads as "nothing
+   here" rather than as a missing bar. */
+.hz-m-gbar {
+  width: 100%; max-width: 34px; height: 3px; border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 70%, transparent);
+  position: relative; overflow: hidden;
+}
+.hz-m-gbar::after {
+  content: ""; position: absolute; inset: 0 auto 0 0;
+  width: var(--w, 0%); border-radius: 999px; background: var(--accent); opacity: 0.55;
+}
+.hz-m-cell {
+  position: relative; min-height: 56px; padding: 6px 16px 6px 7px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+  text-align: left; color: inherit; font: inherit; cursor: pointer;
+  transition: border-color 0.2s ease;
+}
+/* P11-06: the month's density as INK. At this distance an hour is no longer a
+   length, so the day's pressure becomes the weight of the cell instead. It
+   rides a pseudo-element rather than the cell's own background so a face that
+   re-tokens the surface (lumen's --control) keeps its ground and still gets
+   the ink. --ink is set inline, 0 to 1, from the ledger. */
+.hz-m-cell::before {
+  content: ""; position: absolute; inset: 0; z-index: 0; border-radius: 9px;
+  background: var(--accent); opacity: calc(var(--ink, 0) * 0.16);
+  pointer-events: none;
+}
+button.hz-m-cell:hover { border-color: var(--faint); }
+.hz-m-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hz-m-num { position: relative; z-index: 1; font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.hz-m-today .hz-m-num { color: var(--accent); font-weight: 600; }
+/* the density glyph: a slim vertical well filled bottom-up by pressure */
+.hz-m-glyph {
+  position: absolute; top: 7px; bottom: 7px; right: 6px; width: 4px;
+  border-radius: 999px; background: var(--line); overflow: hidden;
+  display: flex; align-items: flex-end;
+}
+.hz-m-gfill { width: 100%; border-radius: 999px; background: var(--faint); opacity: 0.8; }
+.hz-m-on .hz-m-gfill { background: var(--accent); opacity: 1; }
+/* P11-04: the recorded bar — how much of what was planned into this day was
+   actually put in. Same two paints as the spine's fills; a day with nothing
+   recorded gets no bar at all rather than an empty one. */
+.hz-m-bar {
+  position: absolute; left: 6px; right: 12px; bottom: 5px; height: 3px;
+  display: flex; border-radius: 999px; overflow: hidden;
+  background: color-mix(in srgb, var(--line) 70%, transparent);
+}
+.hz-m-bfill { height: 100%; }
+.hz-m-ticks { position: relative; z-index: 1; display: flex; gap: 3px; margin-top: auto; }
+.hz-m-tick { width: 8px; height: 3px; border-radius: 999px; background: var(--warm); }
+/* overcommitted: the cell edge takes a warm glow */
+.hz-m-hot {
+  border-color: var(--warm);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--warm) 28%, transparent);
+}
+/* days past the 35-day frontier: the quiet open-horizon wash */
+.hz-m-out {
+  border-style: dashed; background: linear-gradient(180deg, transparent, rgba(var(--glow-rgb), 0.05));
+  opacity: 0.55; cursor: default;
+}
+.hz-m-past { background: transparent; opacity: 0.35; cursor: default; }
+
+/* --- quarter: commitment lanes over a shared 92-day axis. Narrow screens
+   scroll the lane block sideways (with a snap rest) instead of crushing it. --- */
+.hz-quarter { display: flex; flex-direction: column; gap: 20px; }
+.hz-q-scroll { overflow-x: auto; scroll-snap-type: x proximity; scrollbar-width: thin; padding-bottom: 4px; }
+.hz-q-lanes {
+  /* --hz-qlbl is the label gutter every lane AND the ruler share, so the
+     ticks over the top land on the same axis the lanes are drawn against
+     (P11-06). One variable, so they can never drift apart. */
+  --hz-qlbl: 140px; --hz-qgap: 12px;
+  position: relative;
+  min-width: 520px; display: flex; flex-direction: column; gap: 16px; scroll-snap-align: start;
+}
+.hz-q-lane {
+  display: grid; grid-template-columns: var(--hz-qlbl) 1fr; column-gap: var(--hz-qgap);
+  row-gap: 6px; align-items: center;
+}
+.hz-q-title {
+  grid-row: 1; font-family: var(--sans); font-size: 12px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hz-q-axis {
+  position: relative; height: 26px; border-radius: 999px;
+  border: 1px solid var(--line);
+  background: linear-gradient(90deg, rgba(var(--glow-rgb), 0.10), rgba(var(--glow-rgb), 0.03));
+}
+/* the dated ruler over the lanes: the quarter's answer to the week's hour
+   axis, on the very same gutter + track geometry */
+.hz-q-ruler {
+  display: grid; grid-template-columns: var(--hz-qlbl) 1fr; column-gap: var(--hz-qgap);
+  align-items: end;
+}
+.hz-q-rbar { position: relative; height: 16px; border-bottom: 1px solid var(--line); }
+.hz-q-rtick {
+  position: absolute; bottom: 0; transform: translateX(-50%);
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; color: var(--faint);
+  padding-bottom: 3px; white-space: nowrap;
+}
+.hz-q-rtick::after {
+  content: ""; position: absolute; left: 50%; bottom: -4px; width: 1px; height: 4px;
+  background: var(--line);
+}
+.hz-q-rnow {
+  position: absolute; bottom: 0; transform: translateX(-50%); padding-bottom: 3px;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
+  color: var(--accent); white-space: nowrap;
+}
+/* ONE now-column down every lane, not a tick repeated per lane. It sits over
+   the track half of the grid, so it uses the same gutter variable. */
+.hz-q-lanes.has-now::before {
+  content: ""; position: absolute; top: 14px; bottom: 0; width: 1px; z-index: 1;
+  left: calc(var(--hz-qlbl) + var(--hz-qgap) +
+             (100% - var(--hz-qlbl) - var(--hz-qgap)) * var(--hz-qnow, 0));
+  background: var(--accent); opacity: 0.55; pointer-events: none;
+}
+/* the milestone diamond: a rotated square, radial-filled by progress */
+.hz-q-dia {
+  position: absolute; top: 50%; width: 12px; height: 12px;
+  transform: translate(-50%, -50%) rotate(45deg);
+  border: 1px solid var(--accent); border-radius: 2px; background-color: var(--surface);
+  background-image: radial-gradient(circle closest-side, var(--accent) var(--fill, 0%), transparent calc(var(--fill, 0%) + 2%));
+  cursor: default; z-index: 2;
+}
+.hz-q-dia:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* the commitment deadline: a small warm flag on the lane */
+.hz-q-flag { position: absolute; top: -7px; bottom: -3px; width: 2px; background: var(--warm); }
+.hz-q-flag::after {
+  content: ""; position: absolute; top: 0; left: 2px;
+  border: 4px solid transparent; border-left-color: var(--warm);
+}
+.hz-q-more { font-family: var(--mono); font-size: 11px; color: var(--faint); margin: 0 0 0 152px; }
+
+/* ---- the measured strip (P11-06): the spine's three states at the wide
+   levels. The rail IS the outline — time placed with nothing recorded
+   against it. A solid share is what the timer measured, a hatched share is
+   what you told me about, and a commitment with nothing placed gets no strip
+   at all rather than an empty rail. Shared by quarter lanes and year runs so
+   the two levels can never say it differently. ---- */
+.hz-ms { grid-column: 2; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.hz-ms-bar {
+  flex: 0 0 auto; width: 84px; height: 4px; border-radius: 999px;
+  border: 1px solid var(--line); background: transparent;
+  display: flex; overflow: hidden;
+}
+.hz-ms-fill { height: 100%; }
+.hz-ms-words {
+  font-family: var(--sans); font-size: 11.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hz-q-ms { grid-row: 2; }
+
+/* the pacing sentence — the money shot reads in the serif voice */
+.hz-q-pacebox { display: flex; flex-direction: column; gap: 10px; }
+/* P11-06: with more than one lane the sentence is about all of them, so it
+   says so instead of looking like a caption for the last lane */
+.hz-q-pacefor {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--faint); margin: 0;
+}
+.hz-q-pace { font-family: var(--serif); font-size: 17px; line-height: 1.5; color: var(--text); margin: 0; }
+/* P11-04: the evidence under it — measured, reported, and still assumed.
+   Deliberately quieter than the sentence it explains. */
+.hz-q-evidence {
+  font-family: var(--sans); font-size: 12.5px; line-height: 1.5;
+  color: var(--muted); margin: -10px 0 0;
+}
+
+/* --- the what-if slider (P9-05): a hypothetical pace under the real one.
+   The real pacing sentence keeps the serif voice above; the what-if line is
+   italic and muted so it always reads as a hypothesis, never the truth. --- */
+.hz-q-whatif { display: flex; flex-direction: column; gap: 8px; margin-top: 2px; }
+.hz-q-wlabel {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;
+  color: var(--muted); cursor: pointer;
+}
+.hz-q-wnum { color: var(--accent); font-weight: 600; }
+.hz-q-wslider {
+  -webkit-appearance: none; appearance: none;
+  width: min(320px, 100%); height: 4px; border-radius: 999px;
+  background: var(--line); cursor: pointer; outline-offset: 4px;
+}
+.hz-q-wslider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; border-radius: 999px;
+  background: var(--accent); border: 2px solid var(--surface);
+  box-shadow: 0 0 8px rgba(var(--glow-rgb), 0.40); cursor: grab;
+}
+.hz-q-wslider::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 999px;
+  background: var(--accent); border: 2px solid var(--surface);
+  box-shadow: 0 0 8px rgba(var(--glow-rgb), 0.40); cursor: grab;
+}
+.hz-q-wslider:focus-visible { outline: 2px solid var(--accent); }
+.hz-q-whatif-line {
+  font-family: var(--serif); font-style: italic; font-size: 15px;
+  line-height: 1.5; color: var(--muted); margin: 0;
+}
+.hz-q-whatif-ms { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.hz-q-wms { display: inline-flex; gap: 6px; font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.hz-q-wms-d { color: var(--muted); }
+/* the number-morph fallback: changed dates slide up into place (GSAP owns
+   the moment when loaded; this keyframe covers the no-GSAP path) */
+@keyframes hz-wmorph { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.hz-morph { animation: hz-wmorph 0.28s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .hz-morph { animation: none; }
+}
+
+/* --- year: one horizontal band — quarter arcs, milestone nodes, the star --- */
+.hz-year { padding: 30px 4px 10px; }
+.hz-y-band { position: relative; height: 72px; }
+.hz-y-track { position: absolute; left: 0; right: 0; top: 30px; display: flex; gap: 6px; }
+.hz-y-track > span { position: relative; flex: 1; height: 6px; border-radius: 999px; background: var(--line); }
+.hz-y-qnow { background: rgba(var(--glow-rgb), 0.45); box-shadow: 0 0 10px rgba(var(--glow-rgb), 0.30); }
+.hz-y-qlbl {
+  position: absolute; top: 13px; left: 50%; transform: translateX(-50%);
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; color: var(--faint);
+}
+.hz-y-nodes { position: absolute; inset: 0; }
+.hz-y-today { position: absolute; top: 22px; height: 22px; width: 1px; background: var(--accent); }
+.hz-y-node {
+  position: absolute; top: 33px; width: 11px; height: 11px;
+  transform: translate(-50%, -50%); border-radius: 999px;
+  border: 1px solid var(--accent); background-color: var(--surface);
+  background-image: radial-gradient(circle closest-side, var(--accent) var(--fill, 0%), transparent calc(var(--fill, 0%) + 2%));
+  box-shadow: 0 0 10px rgba(var(--glow-rgb), 0.35);
+  cursor: default; z-index: 2;
+}
+.hz-y-node:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hz-y-star {
+  position: absolute; top: 33px; transform: translate(-50%, -50%);
+  color: var(--warm); font-size: 15px; line-height: 1;
+  text-shadow: 0 0 10px color-mix(in srgb, var(--warm) 55%, transparent);
+  z-index: 3;
+}
+.hz-y-starlbl {
+  position: absolute; top: 58px; transform: translateX(-50%);
+  font-family: var(--mono); font-size: 10px; color: var(--warm); white-space: nowrap;
+}
+.hz-y-whisper {
+  margin: 30px 0 0; text-align: center;
+  font-family: var(--serif); font-size: 16px; color: var(--muted);
+}
+
+/* --- the year's runs (P11-06): one named run per active commitment, on the
+   same axis as the band above them. This is what keeps the sparsest level
+   intentional: a single commitment with no milestones still draws its own
+   run from where it started to where it ends, instead of an empty band and
+   an apology. Same gutter variable as the quarter's lanes. --- */
+.hz-y-runs {
+  --hz-ylbl: 140px; --hz-ygap: 12px;
+  position: relative; display: flex; flex-direction: column; gap: 14px; margin-top: 22px;
+}
+.hz-y-run {
+  display: grid; grid-template-columns: var(--hz-ylbl) 1fr; column-gap: var(--hz-ygap);
+  row-gap: 6px; align-items: center;
+}
+.hz-y-rlabel {
+  grid-row: 1; font-family: var(--sans); font-size: 12px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hz-y-rtrack {
+  position: relative; height: 18px; border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 45%, transparent);
+}
+.hz-y-rbar {
+  position: absolute; top: 5px; height: 8px; border-radius: 999px;
+  background: linear-gradient(90deg,
+    rgba(var(--glow-rgb), 0.45), rgba(var(--glow-rgb), 0.16));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+/* the end cap: drawn only where the data actually names an end */
+.hz-y-rcap {
+  position: absolute; top: 1px; bottom: 1px; width: 2px;
+  background: var(--faint); border-radius: 999px;
+}
+.hz-y-rdue { background: var(--warm); }
+.hz-y-rnode {
+  position: absolute; top: 50%; width: 10px; height: 10px;
+  transform: translate(-50%, -50%); border-radius: 999px;
+  border: 1px solid var(--accent); background-color: var(--surface);
+  background-image: radial-gradient(circle closest-side, var(--accent) var(--fill, 0%), transparent calc(var(--fill, 0%) + 2%));
+  z-index: 2; cursor: default;
+}
+.hz-y-rnode:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hz-y-ms { grid-row: 2; }
+.hz-y-runs.has-now::before {
+  content: ""; position: absolute; top: -6px; bottom: 0; width: 1px; z-index: 1;
+  left: calc(var(--hz-ylbl) + var(--hz-ygap) +
+             (100% - var(--hz-ylbl) - var(--hz-ygap)) * var(--hz-ynow, 0));
+  background: var(--accent); opacity: 0.5; pointer-events: none;
+}
+.hz-y-more { font-family: var(--mono); font-size: 11px; color: var(--faint); margin: 10px 0 0 152px; }
+
+/* P11-03: at phone width the day label gutter gives ground to the runs. One
+   variable, so all seven runs move together and stay aligned. */
+@media (max-width: 640px) {
+  .hz-week, .hz-dayview { --hz-gutter: 74px; }
+}
+
+/* the wide levels hold at 360px: the month grid compresses, the quarter
+   lanes keep their width and scroll, the year band is % — already fluid */
+@media (max-width: 480px) {
+  .hz-m-row { grid-template-columns: 30px repeat(7, 1fr); gap: 4px; }
+  .hz-m-cell { min-height: 46px; padding: 4px 11px 4px 5px; }
+  .hz-m-glyph { right: 4px; width: 3px; }
+  .hz-m-tick { width: 6px; }
+  /* one variable moves the lanes, the ruler and the now-column together */
+  .hz-q-lanes { --hz-qlbl: 110px; }
+  .hz-y-runs { --hz-ylbl: 110px; }
+  .hz-q-more, .hz-y-more { margin-left: 122px; }
+  .hz-ms-bar { width: 60px; }
+  /* P7-09: the gauge drops below the pills row; the spine tightens */
+  #hz-gauge { width: 100%; }
+  /* P11-03: the gutter narrows so the runs keep most of the width. The
+     runs stay aligned because they all read the same variable. */
+  .hz-week, .hz-dayview { --hz-gutter: 62px; }
+  .hz-dc-date { font-size: 10px; letter-spacing: 0.06em; }
+  .hz-run-big { --hz-run-h: 112px; }
+  /* a phone-width run has no room for two lines inside a span; the hero card
+     above carries the name in full, so the span keeps just its title */
+  .hz-run-big .hz-span-time { display: none; }
+  .hz-run-big .hz-span { padding: 0 6px; }
+  .hz-tick { font-size: 9px; }
+}
+
+/* ============ THE SPINE (P11-03) — week and day on ONE horizontal clock ============
+   Week and day used to share nothing but the accent colour: week was a stack
+   of vertical card lists, day was a vertical hour grid. Nothing taught that
+   they are one plan at two distances.
+
+   Now both draw the SAME object — a RUN: one horizontal stretch of a single
+   day, left edge = the window's first hour, right edge = its last, every
+   position a straight percentage of the window. The window is computed once
+   per render and handed to every run, so seven runs stacked in the week are
+   pixel-aligned and free time reads as a gap straight down the column. Day
+   is that identical run, taller and wider, with hour labels and room for
+   block titles. Three marks mean the same thing at both levels:
+     .hz-open  open time            (accent wash, breathing)
+     .hz-span  a placed session     (solid accent)
+     .hz-busy  committed elsewhere  (hatch)
+   plus .hz-nowline, the marker riding the shared axis.
+   The legend above the canvas names all four in words (#hz-legend). */
+
+/* the gutter: the fixed-width column that carries each run's day label. Its
+   width is the whole reason the runs line up, so it is one variable. */
+.hz-week, .hz-dayview { --hz-gutter: 108px; }
+
+/* ---- the axis header: hour labels over the runs column ---- */
+.hz-axis { display: grid; grid-template-columns: var(--hz-gutter) 1fr; gap: 0; align-items: end; }
+.hz-axis-gut {
+  font-family: var(--sans); font-size: 10px; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--faint); padding-bottom: 6px;
+}
+.hz-ruler { position: relative; height: 17px; }
+.hz-tick {
+  position: absolute; bottom: 0; transform: translateX(-50%);
+  font-family: var(--mono); font-size: 10px; color: var(--faint); white-space: nowrap;
+}
+.hz-tick::after {
+  content: ""; position: absolute; left: 50%; top: 100%;
+  width: 1px; height: 5px; background: var(--line);
+}
+
+/* ---- the run: one day of time, left to right ---- */
+.hz-run {
+  position: relative; height: var(--hz-run-h, 36px);
+  border-radius: 9px; background: var(--control);
+  border: 1px solid var(--line); overflow: hidden;
+}
+.hz-open {
+  position: absolute; top: 0; bottom: 0;
+  /* mixed off the ACCENT, not off --glow-rgb: a face may re-token the glow to
+     a neutral grey (lumen does), and open time is the primary signal here —
+     it must never be able to fade to a tenth of grey (P11-03) */
+  background: color-mix(in srgb, var(--accent) 18%, var(--control));
+  border-left: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  border-right: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  animation: hzBreathe 6s ease-in-out infinite;
+}
+@keyframes hzBreathe {
+  0%, 100% { opacity: 0.7; }
+  50%      { opacity: 1; }
+}
+.hz-busy {
+  position: absolute; top: 0; bottom: 0;
+  background: repeating-linear-gradient(-45deg, transparent 0 5px, var(--faint) 5px 6px);
+  opacity: 0.3;
+}
+/* a placed session. P11-04 made the span itself the PLAN — an outline, its
+   commitment colour on the leading edge — and put what actually happened
+   INSIDE it as a fill. One convention, every level:
+     outline only   placed, nothing recorded against it yet
+     solid fill     minutes the timer measured
+     hatched fill   minutes you told me about yourself
+   The fill's width is the recorded share of the planned span, so a block
+   with no actual has no fill element at all. Nothing here may be drawn from
+   a default: an empty bar would read as "zero measured" when the truth is
+   "not measured", and that is the claim this whole layer exists to avoid. */
+.hz-span {
+  position: absolute; top: 3px; bottom: 3px;
+  display: flex; align-items: center; gap: 6px; min-width: 3px;
+  padding: 0 7px; border-radius: 6px; overflow: hidden;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid var(--accent);
+  border-left: 3px solid var(--span-dot, var(--accent));
+  color: var(--text); font-size: 12px; line-height: 1.2;
+  text-align: left; font-family: var(--sans);
+  z-index: 3;
+}
+/* the recorded fill, behind the label. Solid and hatch are the SAME two
+   paints the legend and the month cells use, so the language cannot drift. */
+.hz-fill {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  pointer-events: none; z-index: 0;
+}
+.hz-fill-timer { background: color-mix(in srgb, var(--accent) 46%, transparent); }
+.hz-fill-reported {
+  background: repeating-linear-gradient(-45deg,
+    color-mix(in srgb, var(--accent) 52%, transparent) 0 3px,
+    transparent 3px 7px);
+}
+/* a session that is running RIGHT NOW: the fill breathes while it grows */
+.hz-span.is-live .hz-fill { animation: hzLiveFill 3.2s ease-in-out infinite; }
+@keyframes hzLiveFill {
+  0%, 100% { opacity: 0.8; }
+  50%      { opacity: 1; }
+}
+.hz-span-title, .hz-span-time { position: relative; z-index: 1; }
+.hz-span-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-weight: 500; }
+.hz-span-time { font-family: var(--mono); font-size: 10px; opacity: 0.78; white-space: nowrap; }
+/* week runs are thin: the labels would only clip, so they stand down and the
+   accessible name on the row carries the detail instead */
+.hz-run:not(.hz-run-big) .hz-span-title,
+.hz-run:not(.hz-run-big) .hz-span-time { display: none; }
+
+button.hz-span { cursor: pointer; }
+/* hover brightens the EDGE, never the body: a hover that filled the span
+   would be a measurement claim made by the mouse (P11-04) */
+button.hz-span:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border-color: var(--accent-bright);
+}
+button.hz-span:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* the tracked line (P11-04): the runs' convention said out loud, under the
+   canvas that proves it. Quiet by design — a fact, not a scoreboard. */
+.hz-tracked {
+  margin: 14px 0 0; font-family: var(--sans); font-size: 12.5px;
+  line-height: 1.5; color: var(--muted);
+}
+.hz-tracked-lead { color: var(--text); }
+.hz-tracked-rest { color: var(--muted); }
+
+/* the now-marker on a single run (day level). It lives INSIDE the run, so
+   the run's overflow clip keeps it on its own day — same mark, same meaning
+   as the week's .hz-nowcol, which rides outside because it crosses all seven. */
+.hz-nowline {
+  position: absolute; top: 0; bottom: 0; width: 2px;
+  transform: translateX(-1px);
+  background: var(--accent); box-shadow: 0 0 8px rgba(var(--glow-rgb), 0.8);
+  z-index: 6; pointer-events: none;
+}
+.hz-nowline::before {
+  content: ""; position: absolute; left: 50%; top: 2px; transform: translateX(-50%);
+  width: 8px; height: 8px; border-radius: 999px; background: var(--accent);
+  box-shadow: 0 0 8px rgba(var(--glow-rgb), 0.8);
+}
+
+/* ---- week: seven runs on the one axis ---- */
+/* the right inset is what keeps the final hour label inside the canvas: the
+   axis and the rows are siblings in this same content box, so insetting the
+   box moves ruler and runs together and they stay aligned to the pixel
+   (the Day track does exactly the same) */
+.hz-week { display: flex; flex-direction: column; gap: 10px; padding-right: 16px; }
+.hz-rows { position: relative; display: flex; flex-direction: column; gap: 8px; }
+.hz-daycard {
+  display: grid; grid-template-columns: var(--hz-gutter) 1fr; gap: 0;
+  align-items: center; width: 100%;
+  padding: 5px 0; margin: 0; border: 0; border-radius: 10px;
+  background: transparent; color: inherit; font: inherit; text-align: left;
+  cursor: pointer; transition: background 0.18s ease;
+}
+button.hz-daycard:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+button.hz-daycard:hover .hz-run { border-color: var(--faint); }
+.hz-daycard:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hz-dc-head { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding-right: 12px; }
+.hz-dc-date {
+  font-family: var(--sans); font-size: 11px; font-weight: 500;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted);
+}
+.hz-today .hz-dc-date { color: var(--accent); }
+.hz-dc-free { font-family: var(--mono); font-size: 10px; color: var(--faint); white-space: nowrap; }
+/* today's run is the lit one — the border says it, no card glow needed */
+.hz-today .hz-run { border-color: rgba(var(--glow-rgb), 0.55); }
+.hz-badge {
+  font-family: var(--sans); font-size: 10px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--warm); color: var(--warm); white-space: nowrap;
+}
+/* the now-marker riding the shared axis: ONE line down every run, drawn in
+   the runs column (the gutter is subtracted, so it lands on the same minute
+   in all seven). --hz-now is the fraction across the window, set inline. */
+.hz-nowcol {
+  position: absolute; top: -2px; bottom: -2px; width: 2px;
+  left: calc(var(--hz-gutter) + (100% - var(--hz-gutter)) * var(--hz-now, 0));
+  transform: translateX(-1px);
+  background: linear-gradient(180deg,
+    rgba(var(--glow-rgb), 0.65), rgba(var(--glow-rgb), 0.22));
+  z-index: 5; pointer-events: none;
+}
+.hz-nowcol::before {
+  content: ""; position: absolute; left: 50%; top: -4px; transform: translateX(-50%);
+  width: 8px; height: 8px; border-radius: 999px; background: var(--accent);
+  box-shadow: 0 0 8px rgba(var(--glow-rgb), 0.8);
+}
+.hz-dot { width: 8px; height: 8px; border-radius: 999px; flex: none; }
+
+/* ---- day: the same run, expanded ---- */
+.hz-dayview { position: relative; }
+.hz-day-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.hz-nav {
+  width: 28px; height: 28px; border-radius: 999px; padding: 0;
+  border: 1px solid var(--line); background: transparent; color: var(--muted);
+  cursor: pointer; font-size: 10px; line-height: 1;
+}
+.hz-nav:hover:not(:disabled) { color: var(--text); border-color: var(--faint); }
+.hz-nav:disabled { opacity: 0.3; cursor: default; }
+.hz-nav:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hz-day-title {
+  font-family: var(--sans); font-size: 12px; font-weight: 500;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted);
+}
+/* the hero: the block you are in, or the one coming next. Only ever drawn
+   when there really is one, so it can never claim a session you don't have. */
+.hz-hero {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 12px; padding: 12px 16px; margin-bottom: 14px;
+  background: var(--control);
+}
+.hz-hero-kicker {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--accent);
+}
+.hz-hero-title { font-family: var(--serif); font-size: 18px; color: var(--text); }
+.hz-hero-time { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-left: auto; }
+/* THE DAY RUN ALWAYS FITS (P11-03). An earlier pass let the run keep a fixed
+   minimum width and scroll sideways; at the horizon's own max-width that
+   clipped BOTH ends of the day and hid the hours around the current block —
+   the exact opposite of the point, which is seeing the shape of your day in
+   one look. So the run is fluid: minutes map to a percentage of whatever
+   width there is, at every viewport, and nothing is ever off-screen. Titles
+   give ground first (they ellipsis), and the hero card above always carries
+   the current session's name in full. */
+.hz-day-scroll { overflow: visible; }
+.hz-day-track { position: relative; display: flex; flex-direction: column; gap: 4px; padding-right: 16px; }
+.hz-day-track .hz-axis { grid-template-columns: 1fr; }
+.hz-run-big { --hz-run-h: 132px; border-radius: 12px; }
+.hz-run-big .hz-span { top: 8px; bottom: 8px; flex-direction: column; align-items: flex-start; justify-content: center; gap: 3px; padding: 0 10px; }
+.hz-run-big .hz-span-time { opacity: 0.85; }
+/* the empty-day line, centred in the open water */
+.hz-whisper {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  margin: 0; padding: 0 24px; text-align: center;
+  font-family: var(--serif); font-size: 17px; color: var(--muted);
+  pointer-events: none; z-index: 4;
+}
+/* the nearest-day offer under an empty today: encouragement with a door */
+.hz-nearest {
+  display: inline-flex; align-items: center; gap: 8px; margin-top: 14px;
+  padding: 8px 16px; border-radius: 999px;
+  border: 1px solid var(--accent); background: transparent;
+  font-family: var(--sans); font-size: 13px; color: var(--accent); cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+.hz-nearest:hover { background: var(--accent); color: var(--ground); }
+.hz-nearest:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* the block popover */
+.hz-pop {
+  position: absolute; z-index: 20; width: min(272px, calc(100% - 68px));
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+  padding: 12px 14px; box-shadow: var(--panel-shadow);
+}
+.hz-pop-title { font-family: var(--serif); font-size: 15px; color: var(--text); margin: 0 0 6px; }
+.hz-pop-row { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); margin: 3px 0; }
+.hz-pop-faint { color: var(--faint); }
+.hz-pop-status {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--faint); margin: 6px 0 0;
+}
+/* "Start now" (P9-07): a planned block's popover offers the Now timer */
+.hz-pop-start {
+  display: block; width: 100%; margin-top: 10px;
+  padding: 7px 12px; border-radius: 999px;
+  font-family: var(--sans); font-size: 13px; font-weight: 600;
+  color: var(--ground); background: var(--accent);
+  border: none; cursor: pointer;
+  transition: background 0.15s ease;
+}
+.hz-pop-start:hover { background: var(--accent-bright); }
+.hz-pop-start:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .hz-layer, .hz-pill, .hz-g-fill, .hz-m-cell,
+  .hz-daycard, .hz-span, .hz-nearest { transition: none !important; }
+  /* P11-05, each guard beside the thing it stands down. The gauge still
+     lands on its true value (the scaleX is set by the renderer either way),
+     the number lands without counting (app.js instant() path), the header
+     swaps its words without the fade, the waiting frame stops breathing but
+     keeps its full paint, and the detail's settle-in never starts. */
+  #h-title, #h-sub, #h-meta { transition: none !important; }
+  #h-title.hz-txt-out, #h-sub.hz-txt-out, #h-meta.hz-txt-out { opacity: 1; transform: none; }
+  .hz-scaffold { animation: none !important; opacity: 0.7; }
+  .hz-layer.hz-settle { opacity: 1; transform: none; }
+  /* the spine's one animation stands down; the open wash keeps its full
+     contrast so the primary signal never gets quieter (P11-03) */
+  .hz-open { animation: none !important; opacity: 1; }
+  /* P11-04: a live session's fill stops breathing but keeps its full paint —
+     the measurement is the point, the pulse was only the flourish */
+  .hz-span.is-live .hz-fill { animation: none !important; opacity: 1; }
+}
+
+/* P11-07: the sleeping / waking / glance rules that used to sit here are
+   FACE identity and now live at the end of face.css; the reduced-motion
+   guards for the face and for the conversation surface moved to face.css and
+   conversation.css beside the animations they stand down. What stays below
+   is horizon.css's own share of that guard. */
+@media (prefers-reduced-motion: reduce) {
+  /* P7-05: the morph is a 150ms opacity swap — the cards land at once */
+  #horizon { transition: opacity 0.15s ease !important; transform: none !important; }
+  #app.viewing #horizon .h-card { animation: none !important; }
+}
+
+
+/* ============ The replan diff (P9-01) ============
+   Ghosts fade out at the cancelled slots, re-placed chips pulse, and a
+   summary chip counts up what moved. Reduced-motion guards live here,
+   beside the animations they stand down (frontend-standards rule). */
+.hz-ghost {
+  opacity: 0.55; border: 1px dashed var(--line); background: transparent;
+  color: var(--faint); text-decoration: line-through; overflow: hidden;
+  transition: opacity 0.9s ease, transform 0.9s ease;
+}
+.hz-ghost-out { opacity: 0; transform: translateY(-4px); }
+
+.hz-moved {
+  animation: hzMovedPulse 1.4s ease-out 2;
+}
+@keyframes hzMovedPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(var(--glow-rgb), 0.45); }
+  70%  { box-shadow: 0 0 0 9px rgba(var(--glow-rgb), 0); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--glow-rgb), 0); }
+}
+
+/* ============ Accountability streak (P9-03b) ============
+   A calm "Day N" counter in the horizon header, derived server-side from
+   block history. Flame-free and static by design (Nocturne-quiet), so no
+   animation and no reduced-motion handling to pair with it. */
+.hz-streak {
+  position: absolute; top: 0; right: 0; margin: 0;
+  font: 500 12px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 7px 12px;
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+}
+
+.hz-diff-chip {
+  grid-column: 1 / -1; justify-self: start; align-self: flex-start;
+  font-family: var(--mono); font-size: 12px; letter-spacing: 0.04em;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 999px; padding: 6px 14px;
+  opacity: 0; transform: translateY(-6px);
+  transition: opacity 0.4s ease, transform 0.4s cubic-bezier(0.34, 1.3, 0.64, 1);
+}
+.hz-diff-chip.show { opacity: 1; transform: translateY(0); }
+
+@media (prefers-reduced-motion: reduce) {
+  .hz-moved { animation: none; box-shadow: 0 0 0 2px rgba(var(--glow-rgb), 0.35); }
+  .hz-ghost, .hz-diff-chip { transition: opacity 0.2s ease; transform: none; }
+}

@@ -1,0 +1,1532 @@
+/* face.css — The face: ambient halo, park/morph rig, capsule eyes, agent states, emotions.
+   Load order is index.html's link order; it preserves the pre-split cascade.
+   Rule: new styles go in the file that owns the feature, never back into one blob.
+
+   FACE-THEME SCOPE (P9-00a): every identity rule here is scoped under
+   :where(html[data-face="capsule"]) — :where() keeps specificity at ZERO, so
+   the cascade behaves exactly as before the scoping. Future faces (lumen,
+   cathode, folio, unit — see P10) add their own :where(html[data-face="…"])
+   blocks (in their own files) and give their keyframes face-prefixed names.
+   tokens.css owns the app-wide Nocturne color tokens; a face may re-token
+   its own ground inside its data-face scope (face identity, not a palette). */
+
+/* ============ Ambient breathing halo behind the face ============ */
+:where(html[data-face="capsule"]) .ambient {
+  position: absolute; left: 50%; top: 40%;
+  width: var(--ambient-size); height: var(--ambient-size);
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle, rgba(var(--glow-rgb), calc(0.16 * var(--glow))) 0%, transparent 62%);
+  filter: blur(12px); pointer-events: none;
+  /* P7-05: translate/scale are the INDEPENDENT properties, so the park ride
+     composes with the haloBreath keyframe transform instead of clobbering it. */
+  transition: opacity 0.6s ease,
+              translate 0.5s cubic-bezier(0.22, 0.9, 0.3, 1) 0.2s,
+              scale 0.5s cubic-bezier(0.22, 0.9, 0.3, 1) 0.2s;
+  animation: haloBreath 7s ease-in-out infinite;
+}
+@keyframes haloBreath {
+  0%, 100% { transform: translate(-50%, -50%) scale(1); }
+  50%      { transform: translate(-50%, -50%) scale(1.08); }
+}
+
+/* ============ Park / morph reveal (P7-05) ============
+   .face-rig is the PARK channel — the only element that ever carries the
+   park transform. (.face keeps the breathe keyframe, .eye the state
+   transforms, .eye-shape the blink/emotion vars, so the parked eyes stay
+   fully alive.) #app.viewing is the state; app.js measures the rig's
+   layout centre and writes --park-rise so the parked pair lands centred
+   in a ~90px top band on any viewport. Open: the rig starts rising at
+   180ms and takes 650ms. Close: it waits 200ms for the horizon to fade
+   out, then eases back over 500ms. */
+:where(html[data-face="capsule"]) .face-rig {
+  position: relative; z-index: 35;
+  transition: transform 0.5s cubic-bezier(0.22, 0.9, 0.3, 1) 0.2s;
+}
+:where(html[data-face="capsule"]) #app.viewing .face-rig {
+  transform: translateY(var(--park-rise, calc(-50vh + 70px))) scale(var(--park-scale));
+  transition: transform 0.65s cubic-bezier(0.22, 0.9, 0.3, 1) 0.18s;
+  cursor: pointer;   /* clicking the parked eyes brings the room back */
+}
+/* the brief spread beat: JS holds .spread for the first 250ms of an open —
+   gap rides .eyes' own gap transition, so there's no transform conflict */
+:where(html[data-face="capsule"]) .eyes.spread { gap: 64px; }
+/* the ambient halo rides along: dims, rises, shrinks (see .ambient above) */
+:where(html[data-face="capsule"]) #app.viewing .ambient {
+  opacity: 0.3;
+  translate: 0 var(--park-rise, -38vh);
+  scale: 0.45;
+  transition: opacity 0.6s ease,
+              translate 0.65s cubic-bezier(0.22, 0.9, 0.3, 1) 0.18s,
+              scale 0.65s cubic-bezier(0.22, 0.9, 0.3, 1) 0.18s;
+}
+
+/* ============ The face — capsule eyes (form is locked) ============ */
+:where(html[data-face="capsule"]) .face {
+  position: relative; display: flex; flex-direction: column; align-items: center;
+  gap: var(--face-gap); animation: breathe 6s ease-in-out infinite;
+}
+@keyframes breathe {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-7px); }
+}
+
+:where(html[data-face="capsule"]) .eyes {
+  display: flex; gap: var(--eyes-gap);
+  /* emotions (P7-03) may rotate the pair (curious) or close the gap (heart) */
+  transition: transform 0.25s ease-out, gap 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+/* .eye is the fixed LAYOUT box; it owns per-state transforms (listening
+   scale, speaking talk). Height never animates, so nothing reflows. */
+:where(html[data-face="capsule"]) .eye {
+  position: relative; width: var(--eye-w); height: var(--eye-h);
+  transform-origin: center;
+  /* margin-left only ever changes for the heart moment (P7-03) */
+  transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1),
+              margin-left 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+/* .eye-shape is the glowing body; it owns the BLINK (fast scaleY) and the
+   thinking SQUINT on its own transform channel — never colliding with the
+   breathing (on .face) or the state transforms (on .eye). This is the fix
+   for the glitchy blink: no height animation, no shared transform.
+
+   P7-03: blink and emotions BOTH want scaleY here, so the transform is a
+   single expression composed from vars — blink owns --blink-sy, emotions own
+   --emo-* — and the two multiply instead of clobbering each other. */
+:where(html[data-face="capsule"]) .eye-shape {
+  position: absolute; inset: 0; border-radius: 40px;
+  background: linear-gradient(180deg, var(--eye-top), var(--eye-mid) 55%, var(--eye-bot));
+  box-shadow:
+    0 0 calc(30px * var(--glow)) rgba(var(--glow-rgb), 0.75),
+    0 0 calc(70px * var(--glow)) rgba(var(--glow-rgb), 0.4),
+    inset 0 -10px 22px rgba(0, 0, 0, 0.28),
+    inset 0 8px 14px rgba(255, 255, 255, 0.28);
+  transform-origin: center;
+  transform: translateY(var(--emo-ty, 0px)) rotate(var(--emo-rot, 0deg))
+             scaleX(var(--emo-sx, 1))
+             scaleY(calc(var(--emo-sy, 1) * var(--blink-sy, 1)));
+  transition: transform 0.12s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.4s ease, filter 0.4s ease;
+}
+:where(html[data-face="capsule"]) .eye .glint {
+  position: absolute; top: 38px; left: 27px; width: 20px; height: 20px; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.85); filter: blur(1px);
+  /* `translate` is the emotion channel (sorry droop) — it composes with the
+     inline `transform` the cursor-tracking JS writes, so neither wins over
+     the other. */
+  transition: transform 0.6s ease, opacity 0.4s ease, translate 0.25s ease-out;
+}
+:where(html[data-face="capsule"]) .eye.blink .eye-shape { --blink-sy: 0.06; }
+
+/* ============ Agent states — one signal drives the whole face ============ */
+:where(html[data-face="capsule"]) [data-state="idle"]      { --glow: 0.5; }
+:where(html[data-face="capsule"]) [data-state="listening"] { --glow: 1; }
+:where(html[data-face="capsule"]) [data-state="thinking"]  { --glow: 0.8; }
+:where(html[data-face="capsule"]) [data-state="speaking"]  { --glow: 0.9; }
+:where(html[data-face="capsule"]) [data-state="asking"]    { --glow: 0.85; }
+
+/* listening: wide, alert, halo ring */
+:where(html[data-face="capsule"]) [data-state="listening"] .eye { transform: scale(1.06); }
+:where(html[data-face="capsule"]) [data-state="listening"] .eye .glint { transform: translate(2px, -3px); }
+:where(html[data-face="capsule"]) [data-state="listening"] .face::after {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 280px; height: 150px;
+  transform: translate(-50%, -50%); pointer-events: none;
+  border-radius: 90px; border: 2px solid rgba(var(--glow-rgb), 0.35);
+  animation: ring 1.9s ease-out infinite;
+}
+@keyframes ring {
+  0%   { opacity: 0.5; transform: translate(-50%, -50%) scale(0.82); }
+  100% { opacity: 0;   transform: translate(-50%, -50%) scale(1.5); }
+}
+
+/* thinking: squint + look around + shimmer (squint on the shape's own channel) */
+:where(html[data-face="capsule"]) [data-state="thinking"] .eyes { animation: lookAround 2.4s ease-in-out infinite; }
+:where(html[data-face="capsule"]) [data-state="thinking"] .eye-shape { --emo-sy: 0.56; filter: brightness(1.02); animation: shimmer 1.3s ease-in-out infinite; }
+:where(html[data-face="capsule"]) [data-state="thinking"] .glint { opacity: 0.3; }
+@keyframes lookAround {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-10px); }
+  55%      { transform: translateX(8px); }
+  80%      { transform: translateX(-3px); }
+}
+@keyframes shimmer {
+  0%, 100% { filter: brightness(1); }
+  50%      { filter: brightness(1.22); }
+}
+
+/* speaking: the eyes move with the voice.
+   - Synced path (P7-01): while reply audio actually plays, app.js adds
+     .talking-live to .eyes and drives --talk-amp per frame — a cheap
+     pseudo-amplitude — so the squash tracks the audio. transition: none
+     lets the per-frame value land without the .eye 0.4s smoothing.
+   - Fallback: no audio -> the original gentle 1.4s talk loop. */
+:where(html[data-face="capsule"]) [data-state="speaking"] .eyes.talking-live .eye {
+  animation: none;
+  transition: none;
+  transform: scaleY(calc(1 - var(--talk-amp, 0.04)));
+}
+:where(html[data-face="capsule"]) [data-state="speaking"] .eyes:not(.talking-live) .eye { animation: talk 1.4s ease-in-out infinite; }
+@keyframes talk {
+  0%, 100% { transform: scaleY(1); }
+  50%      { transform: scaleY(0.92); }
+}
+
+/* asking: curious, one soft look up */
+:where(html[data-face="capsule"]) [data-state="asking"] .glint { transform: translate(0, -5px); }
+
+/* ============ Eye emotions (P7-03, expanded P9-00a) ============
+   Classes on .eyes (added/removed by createEyes().emote()). Every vertical
+   squash rides --emo-sy so a blink (--blink-sy) still composes on top.
+   While an emotion holds (or eases back out via .emote-ease) the shape's
+   transform transition slows from the 0.12s blink speed to a 0.25s ease-out
+   with a slight overshoot; the random blink scheduler is suppressed by JS
+   for the duration, so blink speed itself is never affected. */
+:where(html[data-face="capsule"]) .eyes[class*="emote-"] .eye-shape,
+:where(html[data-face="capsule"]) .eyes.emote-ease .eye-shape {
+  transition: transform 0.25s cubic-bezier(0.34, 1.3, 0.64, 1),
+              border-radius 0.25s ease-out,
+              box-shadow 0.4s ease, filter 0.4s ease;
+}
+
+/* happy — upward crescent squint-arc, a small lift, brighter glints */
+:where(html[data-face="capsule"]) .eyes.emote-happy .eye-shape {
+  --emo-sy: 0.55; --emo-ty: -3px;
+  border-radius: 50% 50% 12% 12% / 62% 62% 6% 6%;
+  filter: brightness(1.1);
+}
+:where(html[data-face="capsule"]) .eyes.emote-happy .glint { opacity: 1; filter: blur(0.5px); }
+
+/* wide — alert open-up on entering listening (relaxes after ~600ms) */
+:where(html[data-face="capsule"]) .eyes.emote-wide .eye-shape { --emo-sy: 1.1; --emo-sx: 1.04; }
+:where(html[data-face="capsule"]) .eyes.emote-wide .glint { opacity: 1; filter: blur(0.5px); }
+
+/* sorry — droop: outer-top corners rounded down, a sag, dimmed glow,
+   glints drop (via `translate`, composing with the cursor-tracking transform) */
+:where(html[data-face="capsule"]) .eyes.emote-sorry { --glow: 0.38; }
+:where(html[data-face="capsule"]) .eyes.emote-sorry .eye-shape { --emo-ty: 4px; }
+:where(html[data-face="capsule"]) .eyes.emote-sorry .eye.left  .eye-shape { border-radius: 55% 45% 45% 45% / 72% 40% 34% 40%; }
+:where(html[data-face="capsule"]) .eyes.emote-sorry .eye.right .eye-shape { border-radius: 45% 55% 45% 45% / 40% 72% 40% 34%; }
+:where(html[data-face="capsule"]) .eyes.emote-sorry .glint { translate: 0 7px; opacity: 0.45; }
+
+/* curious — asymmetric raise + a small head-tilt on the pair */
+:where(html[data-face="capsule"]) .eyes.emote-curious { transform: rotate(2.5deg); }
+:where(html[data-face="capsule"]) .eyes.emote-curious .eye.left  .eye-shape { --emo-sy: 1.08; }
+:where(html[data-face="capsule"]) .eyes.emote-curious .eye.right .eye-shape { --emo-sy: 0.8; }
+
+/* heart (stretch) — classic two-rounded-bars heart: each shape keeps only
+   its top corners round and rotates ±40deg while the pair overlaps (gap
+   collapses + the right eye pulls left), so the lobes sit outer-top and the
+   tips cross at the bottom point. Glints hide for the beat — a dot mid-heart
+   reads as a blemish. The right eye's margin transition lives on .eye's base
+   rule so the ease-back springs too. */
+:where(html[data-face="capsule"]) .eyes.emote-heart { gap: 2px; }
+:where(html[data-face="capsule"]) .eyes.emote-heart .eye.right { margin-left: -26px; }
+:where(html[data-face="capsule"]) .eyes.emote-heart .eye.left .eye-shape { --emo-rot: -40deg; border-radius: 37px 37px 6px 6px; }
+:where(html[data-face="capsule"]) .eyes.emote-heart .eye.right .eye-shape { --emo-rot: 40deg; border-radius: 37px 37px 6px 6px; }
+:where(html[data-face="capsule"]) .eyes.emote-heart .glint { opacity: 0; }
+
+/* ---- P9-00a additions: six more emotions on the same var channels ---- */
+
+/* surprised — a fast open-up, taller and a touch wider, glints sharp.
+   Fired on wake (the "oh — you're here" beat). */
+:where(html[data-face="capsule"]) .eyes.emote-surprised .eye-shape {
+  --emo-sy: 1.16; --emo-sx: 1.06; --emo-ty: -2px;
+  filter: brightness(1.12);
+}
+:where(html[data-face="capsule"]) .eyes.emote-surprised .glint {
+  opacity: 1; filter: blur(0.5px); scale: 0.8;
+}
+
+/* sleepy — heavy lids: a low squash with a sag, dimmed glow, glints sink.
+   The drowsy beat right before the sleep state lands. */
+:where(html[data-face="capsule"]) .eyes.emote-sleepy { --glow: 0.35; }
+:where(html[data-face="capsule"]) .eyes.emote-sleepy .eye-shape {
+  --emo-sy: 0.42; --emo-ty: 5px;
+  border-radius: 26% 26% 45% 45% / 18% 18% 60% 60%;
+}
+:where(html[data-face="capsule"]) .eyes.emote-sleepy .glint { translate: 0 8px; opacity: 0.3; }
+
+/* proud — a warm, softer crescent than happy: the quiet "we did that" for
+   every successful plan after the first (heart owns the first). */
+:where(html[data-face="capsule"]) .eyes.emote-proud .eye-shape {
+  --emo-sy: 0.72; --emo-ty: -2px;
+  border-radius: 48% 48% 22% 22% / 58% 58% 14% 14%;
+  filter: brightness(1.07);
+}
+:where(html[data-face="capsule"]) .eyes.emote-proud .glint { opacity: 0.95; }
+
+/* sheepish — narrow, a small tilt away, glints look aside: the honest-miss
+   beat ("I didn't find a concrete task in that"). */
+:where(html[data-face="capsule"]) .eyes.emote-sheepish { transform: rotate(-2deg); }
+:where(html[data-face="capsule"]) .eyes.emote-sheepish .eye-shape { --emo-sx: 0.85; --emo-ty: 2px; }
+:where(html[data-face="capsule"]) .eyes.emote-sheepish .glint { translate: 7px 3px; opacity: 0.6; }
+
+/* worried — inner-top corners raised (worry brows), slightly closed, dim:
+   the overcommit beat (plan landed but some of it couldn't be placed). */
+:where(html[data-face="capsule"]) .eyes.emote-worried { --glow: 0.5; }
+:where(html[data-face="capsule"]) .eyes.emote-worried .eye-shape { --emo-sy: 0.9; }
+:where(html[data-face="capsule"]) .eyes.emote-worried .eye.left  .eye-shape { border-radius: 45% 55% 48% 48% / 36% 66% 42% 42%; }
+:where(html[data-face="capsule"]) .eyes.emote-worried .eye.right .eye-shape { border-radius: 55% 45% 48% 48% / 66% 36% 42% 42%; }
+:where(html[data-face="capsule"]) .eyes.emote-worried .glint { translate: 0 -3px; opacity: 0.8; }
+
+/* celebrate — the happy crescent plus a two-beat bounce on the pair
+   (calendar sync landed, streak advanced). The bounce animates the pair's
+   transform channel — same channel glance uses, and both are gated so they
+   never run together. */
+:where(html[data-face="capsule"]) .eyes.emote-celebrate { animation: eyesBounce 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) 2; }
+:where(html[data-face="capsule"]) .eyes.emote-celebrate .eye-shape {
+  --emo-sy: 0.55; --emo-ty: -3px;
+  border-radius: 50% 50% 12% 12% / 62% 62% 6% 6%;
+  filter: brightness(1.14);
+}
+:where(html[data-face="capsule"]) .eyes.emote-celebrate .glint { opacity: 1; filter: blur(0.5px); }
+@keyframes eyesBounce {
+  0%, 100% { transform: translateY(0); }
+  40%      { transform: translateY(-10px); }
+  70%      { transform: translateY(2px); }
+}
+/* reduced motion: the celebrate bounce stands down; the crescent still shows */
+@media (prefers-reduced-motion: reduce) {
+  :where(html[data-face="capsule"]) .eyes.emote-celebrate { animation: none; }
+}
+
+/* ============ Capsule's reply ground (P11-01) ============
+   P11-01 unboxed the reply: no panel, no badge, the words set straight on
+   the app ground. Capsule is the one face with a big breathing halo behind
+   them, so it (and only it) paints a scrim — a radial wash of --ground
+   itself, sized so the fade COMPLETES inside the box (x-radius 58% of the
+   width, transparent by 76% of that, well short of the 50% half-width), so
+   there is no edge anywhere and it never reads as an object. The other two
+   faces have light grounds and no halo; a scrim there would show as a pale
+   rectangle, which is exactly the card we just deleted.
+
+   `div.surface` (0,1,1) is deliberate: conversation.css loads AFTER this
+   file, so a zero-specificity :where() scope alone would lose the tie —
+   the same trap `p.said` documents in the lumen and folio blocks. */
+:where(html[data-face="capsule"]) div.surface {
+  background: radial-gradient(58% 128% at 50% 46%,
+    color-mix(in srgb, var(--ground) 82%, transparent) 0%,
+    color-mix(in srgb, var(--ground) 48%, transparent) 44%,
+    transparent 76%);
+}
+
+/* ============ Capsule's reference mark: the sage underglow (P11-08) ============
+   The faces' SECOND expressive channel, after the eyes. A typed inline
+   reference is a run of real words in the reply that the server matched to a
+   real object; capsule marks it the way it marks everything else, with light —
+   a soft sage wash sitting under the words plus one low hairline, both drawn
+   from --glow-rgb/--accent so a palette change carries them along. No
+   underline-as-link, no bold, no markdown: this is a glow, not a hyperlink.
+
+   `.surface p.said` (0,2,1) is required to out-specify conversation.css's
+   `.surface .said .ref` (0,2,0), which loads AFTER face.css — the same trap
+   `p.said` and `div.surface` document above. */
+:where(html[data-face="capsule"]) .surface p.said .ref {
+  background: linear-gradient(to bottom,
+    transparent 0 58%,
+    rgba(var(--glow-rgb), 0.16) 58% 100%);
+  box-shadow: inset 0 -1px 0 rgba(var(--glow-rgb), 0.42);
+  border-radius: 2px;
+  padding: 0 0.12em;
+}
+:where(html[data-face="capsule"]) .surface p.said .ref-act:hover {
+  background: linear-gradient(to bottom,
+    transparent 0 58%,
+    rgba(var(--glow-rgb), 0.3) 58% 100%);
+  box-shadow: inset 0 -1px 0 var(--accent);
+  opacity: 1;
+}
+
+/* ============ Focused ambient state (P9-07 focus sessions) ============
+   While the Now timer runs (#app.now-focused, set by createNow) the face
+   settles into quiet company: the breathe slows (6s -> 10s, same keyframes
+   — no new animation, so the existing reduced-motion handling stands) and
+   the glow dims a touch. An ambient STATE like sleeping, not an emotion:
+   emotions still compose on top (the satisfied blink on complete). */
+:where(html[data-face="capsule"]) #app.now-focused { --glow: 0.38; }
+:where(html[data-face="capsule"]) #app.now-focused .face { animation-duration: 10s; }
+:where(html[data-face="capsule"]) #app.now-focused .ambient { animation-duration: 10s; }
+
+/* =====================================================================
+   LUMEN — Baymax porcelain (P10-01, from the Five Faces study)
+   Second switchable face: near-minimal porcelain ground, two small dark
+   dot eyes joined by a thin line, a tiny soft shadow under the rig,
+   generous emptiness. Same shared contract as capsule: transform channels
+   (.face-rig park / .face breathe / .eye state / .eye-shape blink+emotion
+   via --emo-* × --blink-sy), same thirteen beats, same triggers — only
+   the LOOK changes. Every keyframe here is lumen- prefixed.
+   ===================================================================== */
+
+/* ---- Re-token: Lumen's porcelain ground (face identity, not a palette —
+   the frontend-standards.md theme-roadmap amendment). These custom
+   properties land on the <html> element itself, so this ONE selector is
+   plain `html[data-face="lumen"]` rather than :where(): a zero-specificity
+   :where() could never override :root's declarations of the same
+   properties in tokens.css. Every descendant rule below stays :where()-
+   scoped at zero specificity, exactly like capsule's. ---- */
+html[data-face="lumen"] {
+  /* Baymax vinyl is WHITE-white (user decision 2026-08-27): pure-white
+     ground, every supporting tone strictly neutral or a hair cool —
+     zero yellow cast anywhere in this block. */
+  --ground: #ffffff;
+  --surface: #ffffff;
+  /* porcelain is white, so a control cannot be: --control (P11-02d) is the
+     one tone that separates a chip, a stepper or a picker from the page it
+     sits on. A cool near-white, so the invert-to-ink selected state still
+     reads as the loud one. */
+  --control: #f2f3f4;
+  /* native pickers follow the face, never the tokens.css dark default */
+  color-scheme: light;
+  --text: #37393b;
+  --muted: #74777a;
+  --faint: #9a9da0;
+  --line: #e4e6e8;
+  --accent: #4f7a63;
+  --accent-bright: #3c614e;
+  /* rings/handles across the app read rgba(var(--glow-rgb), …) — on
+     white vinyl that becomes a soft neutral grey, not a green glow */
+  --glow-rgb: 108, 111, 114;
+  --bg-grad: radial-gradient(120% 90% at 50% 38%, #ffffff 0%, var(--ground) 55%, #eff1f3 100%);
+  --panel-bg: rgba(255, 255, 255, 0.78);
+  --panel-border: rgba(55, 57, 59, 0.10);
+  --panel-shadow: 0 18px 44px rgba(55, 57, 59, 0.12);
+
+  /* lumen-only identity tokens */
+  --lumen-ink: #2b2a27;                    /* the dots + the connecting line */
+  --lumen-ink-dim: #8b8e91;                /* dim states: dots grey out but stay OPAQUE */
+  --lumen-heart: #d97b6c;                  /* coral heart lobes */
+  --lumen-shadow: rgba(55, 57, 59, 0.16);  /* the tiny soft shadow, neutral grey */
+
+  /* geometry: two BIG soft dots, wide apart (the Baymax read is the
+     contrast between the large dots and the hairline that joins them) */
+  --eye-w: 100px;
+  --eye-h: 100px;
+  --eyes-gap: 120px;
+  --face-gap: 40px;
+  --park-scale: 0.45;   /* ~45px dots in the parked top band, like capsule's */
+}
+
+/* ---- Park / morph: same channel contract as capsule, restated in-scope
+   (the rig must still park when the horizon opens) ---- */
+:where(html[data-face="lumen"]) .face-rig {
+  position: relative; z-index: 35;
+  transition: transform 0.5s cubic-bezier(0.22, 0.9, 0.3, 1) 0.2s;
+}
+:where(html[data-face="lumen"]) #app.viewing .face-rig {
+  transform: translateY(var(--park-rise, calc(-50vh + 70px))) scale(var(--park-scale));
+  transition: transform 0.65s cubic-bezier(0.22, 0.9, 0.3, 1) 0.18s;
+  cursor: pointer;
+}
+/* porcelain wants shadow, not glow: the capsule halo stands down entirely.
+   display:none also keeps the unstyled div out of the stage's grid flow. */
+:where(html[data-face="lumen"]) .ambient { display: none; }
+
+/* ---- The face: a slower, smaller breathe; the soft shadow rides the rig ---- */
+:where(html[data-face="lumen"]) .face {
+  position: relative; display: flex; flex-direction: column; align-items: center;
+  gap: var(--face-gap); animation: lumen-breathe 7s ease-in-out infinite;
+}
+@keyframes lumen-breathe {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-4px); }
+}
+:where(html[data-face="lumen"]) .face::before {
+  content: ""; position: absolute; left: 50%; top: calc(100% + 34px);
+  width: 300px; height: 48px; transform: translateX(-50%);
+  background: radial-gradient(ellipse at center, var(--lumen-shadow) 0%, transparent 68%);
+  filter: blur(7px); pointer-events: none;
+}
+
+/* ---- The eyes: two dots + the connecting line (the pair's ::before —
+   styled in-scope, no extra markup; outside lumen it doesn't exist) ---- */
+:where(html[data-face="lumen"]) .eyes {
+  position: relative;
+  display: flex; align-items: center; gap: var(--eyes-gap);
+  transition: transform 0.25s ease-out, gap 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+:where(html[data-face="lumen"]) .eyes::before {
+  /* each end runs ~12px UNDER its dot, so no state (drift, tilt, scale,
+     shuffle, transitions in flight) can ever open a gap between line and dot.
+     Safe because lumen dots are always fully OPAQUE (dim states grey the
+     background, never opacity) and the ::before paints beneath the .eye
+     children. left/right are relative to the pair's box, so the span tracks
+     the gap when it animates (worried drift, spread). */
+  content: ""; position: absolute; top: 50%;
+  left: calc(var(--eye-w) - 12px); right: calc(var(--eye-w) - 12px);
+  height: 3px; margin-top: -1.5px; border-radius: 2px;
+  background: var(--lumen-ink);
+  transform-origin: 50% 50%;
+  transition: transform 0.25s ease-out, opacity 0.25s ease-out;
+  /* wake beat, part 2: the line draws between the dots (scaleX from centre).
+     `backwards` holds it at 0 while the dots fade in first. */
+  animation: lumen-wake-line 0.55s cubic-bezier(0.2, 0.8, 0.2, 1) 0.32s backwards;
+}
+:where(html[data-face="lumen"]) .eyes.spread { gap: 160px; }
+
+:where(html[data-face="lumen"]) .eye {
+  position: relative; width: var(--eye-w); height: var(--eye-h);
+  transform-origin: center;
+  transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+:where(html[data-face="lumen"]) .eye-shape {
+  position: absolute; inset: 0; border-radius: 50%;
+  background: var(--lumen-ink);
+  box-shadow: 0 1px 3px var(--lumen-shadow);
+  transform-origin: center;
+  /* the shared composed-var contract: emotions own --emo-*, blink owns
+     --blink-sy, and they multiply — identical to capsule's channel */
+  transform: translateY(var(--emo-ty, 0px)) rotate(var(--emo-rot, 0deg))
+             scaleX(var(--emo-sx, 1))
+             scaleY(calc(var(--emo-sy, 1) * var(--blink-sy, 1)));
+  transition: transform 0.12s cubic-bezier(0.4, 0, 0.2, 1),
+              border-radius 0.25s ease-out, background 0.25s ease-out,
+              opacity 0.25s ease-out;
+  /* wake beat, part 1: the dots fade in */
+  animation: lumen-wake-dots 0.4s ease-out backwards;
+}
+/* no glints on ink dots (the cursor-tracking JS still writes to them —
+   harmless while hidden) */
+:where(html[data-face="lumen"]) .eye .glint { display: none; }
+/* blink still composes: a quick vertical squash of the dots */
+:where(html[data-face="lumen"]) .eye.blink .eye-shape { --blink-sy: 0.12; }
+
+/* ---- Wake moment ----
+   Plays on entering the lumen face (these animation names newly apply)
+   AND on the existing wake trigger: horizon.css's #app.sleeping .eye-shape
+   swaps the dot animation to sleepBreath while asleep, so waking re-applies
+   lumen-wake-dots and the moment replays. The line gets the same swap by
+   hand just below. Reduced motion: instant (see the guard at the end). */
+@keyframes lumen-wake-dots {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes lumen-wake-line {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+:where(html[data-face="lumen"]) #app.sleeping .eyes::before { animation: none; opacity: 0.3; }
+/* sleeping (artifact tile): the dots rest as short rounded pills level
+   with the line — the whole rig one dim flat bar with thicker rounded
+   ends — greyed via BACKGROUND, never opacity (the underlapped line must
+   not show through), breathing a shallow pill-squash without sleepBreath's
+   brightness() filter. The drowsy sleepy beat (same pill geometry, full
+   ink) hands off into this near-seamlessly. The extra .eye in the compound
+   out-specifies horizon.css's #app.sleeping .eye-shape (equal specificity
+   would lose on link order — face.css loads first), and the global
+   reduced-motion guard there still stands the animation down. */
+:where(html[data-face="lumen"]) #app.sleeping .eye .eye-shape {
+  background: var(--lumen-ink-dim);
+  animation: lumen-sleep-breath 4.8s ease-in-out infinite;
+}
+@keyframes lumen-sleep-breath {
+  0%, 100% { transform: scaleY(0.28); }
+  50%      { transform: scaleY(0.20); }
+}
+
+/* ---- Agent states, in Lumen's language ---- */
+/* listening: the dots swell, one quiet grey ring */
+:where(html[data-face="lumen"]) [data-state="listening"] .eye { transform: scale(1.08); }
+:where(html[data-face="lumen"]) [data-state="listening"] .face::after {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 420px; height: 200px;
+  transform: translate(-50%, -50%); pointer-events: none;
+  border-radius: 110px; border: 1.5px solid rgba(var(--glow-rgb), 0.28);
+  animation: lumen-ring 1.9s ease-out infinite;
+}
+@keyframes lumen-ring {
+  0%   { opacity: 0.5; transform: translate(-50%, -50%) scale(0.85); }
+  100% { opacity: 0;   transform: translate(-50%, -50%) scale(1.4); }
+}
+
+/* thinking (the think state): squint-slits + the drift; the line thinks
+   along with a soft pulse */
+:where(html[data-face="lumen"]) [data-state="thinking"] .eyes { animation: lumen-look 2.4s ease-in-out infinite; }
+:where(html[data-face="lumen"]) [data-state="thinking"] .eye-shape { --emo-sy: 0.5; }
+:where(html[data-face="lumen"]) [data-state="thinking"] .eyes::before { animation: lumen-think-line 1.3s ease-in-out infinite; }
+@keyframes lumen-look {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-14px); }
+  55%      { transform: translateX(10px); }
+  80%      { transform: translateX(-4px); }
+}
+@keyframes lumen-think-line {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}
+
+/* speaking: the dots bob with the voice (synced path + fallback, same
+   channels as capsule) */
+:where(html[data-face="lumen"]) [data-state="speaking"] .eyes.talking-live .eye {
+  animation: none;
+  transition: none;
+  transform: scaleY(calc(1 - var(--talk-amp, 0.04)));
+}
+:where(html[data-face="lumen"]) [data-state="speaking"] .eyes:not(.talking-live) .eye { animation: lumen-talk 1.4s ease-in-out infinite; }
+@keyframes lumen-talk {
+  0%, 100% { transform: scaleY(1); }
+  50%      { transform: scaleY(0.88); }
+}
+
+/* ---- Type voice: the agent's reply speaks in the quiet humanist sans
+   (Hanken Grotesk — already loaded; capsule keeps the serif) ---- */
+/* `p.said` (0,2,1 with .surface) is required to out-specify conversation.css's
+   `.surface .said` (0,2,0), which loads AFTER face.css — a zero-specificity
+   :where() scope alone loses that tie. Same trap folio documents below. */
+:where(html[data-face="lumen"]) .surface p.said {
+  font-family: var(--sans); font-weight: 400; letter-spacing: 0.002em;
+}
+/* The margin note (P11-01) speaks lumen's sans too — still italic, still
+   small, so your line and Blink's line never blur together. */
+:where(html[data-face="lumen"]) p.echo { font-family: var(--sans); font-size: 13px; }
+
+/* ---- Reference mark (P11-08): the PRECISE INK UNDERLINE.
+   Lumen draws with a technical pen, so a reference is one exact hairline set
+   a measured distance under the words — no wash, no glow, nothing soft.
+
+   The line is drawn as a BACKGROUND hairline, and that is load-bearing rather
+   than a preference. Two things rule out the obvious alternatives: the reply's
+   word elements are `display: inline-block` (buildWordSpans needs them
+   individually addressable), and `text-decoration` does not cross an
+   inline-block descendant, so the underline never paints at all; and an inset
+   box-shadow on a rounded inline box rings the whole fragment instead of
+   drawing one edge. A no-repeat background stripe does exactly one line,
+   exactly where it is told. Same specificity note as the `p.said` rule
+   above. ---- */
+:where(html[data-face="lumen"]) .surface p.said .ref {
+  background-image: linear-gradient(to bottom,
+    color-mix(in srgb, var(--text) 45%, transparent) 0 100%);
+  background-repeat: no-repeat;
+  background-size: 100% 1px;
+  background-position: 0 calc(100% - 1px);
+  padding-bottom: 3px;
+}
+:where(html[data-face="lumen"]) .surface p.said .ref-count,
+:where(html[data-face="lumen"]) .surface p.said .ref-date {
+  font-weight: 500;
+}
+:where(html[data-face="lumen"]) .surface p.said .ref-act {
+  background-image: linear-gradient(to bottom, var(--accent-bright) 0 100%);
+}
+:where(html[data-face="lumen"]) .surface p.said .ref-act:hover {
+  background-size: 100% 2px;
+  opacity: 1;
+}
+
+/* ---- Emotions: all thirteen beats in Lumen's language ----
+   Same slowed-transition hold while an emotion is up (or easing out). */
+:where(html[data-face="lumen"]) .eyes[class*="emote-"] .eye-shape,
+:where(html[data-face="lumen"]) .eyes.emote-ease .eye-shape {
+  transition: transform 0.25s cubic-bezier(0.34, 1.3, 0.64, 1),
+              border-radius 0.25s ease-out, background 0.25s ease-out,
+              opacity 0.25s ease-out;
+}
+
+/* happy — the dots become small downward arcs (the Baymax smile-eyes) */
+:where(html[data-face="lumen"]) .eyes.emote-happy .eye-shape {
+  --emo-sy: 0.5; --emo-ty: -8px;
+  border-radius: 50% 50% 14% 14% / 68% 68% 10% 10%;
+}
+
+/* wide — alert open-up: the dots swell */
+:where(html[data-face="lumen"]) .eyes.emote-wide .eye-shape { --emo-sy: 1.14; --emo-sx: 1.14; }
+
+/* sorry — the dots sink and fade; the line drops with them */
+:where(html[data-face="lumen"]) .eyes.emote-sorry .eye-shape { --emo-ty: 12px; --emo-sy: 0.78; background: var(--lumen-ink-dim); }
+:where(html[data-face="lumen"]) .eyes.emote-sorry::before { transform: translateY(9px); opacity: 0.5; }
+
+/* curious — head-tilt: the pair tilts, one dot grows, the other shrinks */
+:where(html[data-face="lumen"]) .eyes.emote-curious { transform: rotate(3deg); }
+:where(html[data-face="lumen"]) .eyes.emote-curious .eye.left  .eye-shape { --emo-sy: 1.12; --emo-sx: 1.12; }
+:where(html[data-face="lumen"]) .eyes.emote-curious .eye.right .eye-shape { --emo-sy: 0.84; --emo-sx: 0.84; }
+
+/* heart — each dot becomes a coral heart (rotated square + two lobes on
+   the shape's own pseudos); the connecting line stays and blushes coral */
+:where(html[data-face="lumen"]) .eyes.emote-heart::before { background: var(--lumen-heart); }
+:where(html[data-face="lumen"]) .eyes.emote-heart .eye-shape {
+  --emo-rot: -45deg; --emo-sx: 0.85; --emo-sy: 0.85;
+  border-radius: 0 0 0 12%;
+  background: var(--lumen-heart);
+  box-shadow: none;
+}
+:where(html[data-face="lumen"]) .eyes.emote-heart .eye-shape::before,
+:where(html[data-face="lumen"]) .eyes.emote-heart .eye-shape::after {
+  content: ""; position: absolute; width: 100%; height: 100%;
+  border-radius: 50%; background: inherit;
+}
+:where(html[data-face="lumen"]) .eyes.emote-heart .eye-shape::before { top: -50%; left: 0; }
+:where(html[data-face="lumen"]) .eyes.emote-heart .eye-shape::after  { top: 0; left: 50%; }
+
+/* surprised — a fast pop: the dots jump big, the line contracts a touch */
+:where(html[data-face="lumen"]) .eyes.emote-surprised .eye-shape { --emo-sy: 1.24; --emo-sx: 1.24; --emo-ty: -6px; }
+:where(html[data-face="lumen"]) .eyes.emote-surprised::before { transform: scaleX(0.85); }
+
+/* sleepy — the drowsy beat, per the Five Faces artifact tile: the dots
+   squash to short rounded pills sitting LEVEL WITH the line (no sink —
+   sorry owns the droop), so the whole rig reads as one thin bar with
+   thicker rounded ends. Ink stays full strength here; the grey dim is
+   the sleeping state's. Blink composes — a blink mid-drowse just
+   deepens the squash. */
+:where(html[data-face="lumen"]) .eyes.emote-sleepy .eye-shape { --emo-sy: 0.26; }
+:where(html[data-face="lumen"]) .eyes.emote-sleepy::before { opacity: 0.6; }
+
+/* proud — a softer, rounder arc than happy: the quiet "we did that" */
+:where(html[data-face="lumen"]) .eyes.emote-proud .eye-shape {
+  --emo-sy: 0.66; --emo-ty: -5px;
+  border-radius: 50% 50% 30% 30% / 62% 62% 26% 26%;
+}
+:where(html[data-face="lumen"]) .eyes.emote-proud::before { transform: translateY(-5px); }
+
+/* worried — the dots drift apart and the line sags below centre */
+:where(html[data-face="lumen"]) .eyes.emote-worried { gap: 200px; }
+:where(html[data-face="lumen"]) .eyes.emote-worried .eye-shape { --emo-sy: 0.85; }
+:where(html[data-face="lumen"]) .eyes.emote-worried::before { transform: translateY(18px); opacity: 0.8; }
+
+/* sheepish — a small tilt-and-shuffle aside; the dots shrink, the line shortens */
+:where(html[data-face="lumen"]) .eyes.emote-sheepish { transform: rotate(-3deg) translateX(16px); }
+:where(html[data-face="lumen"]) .eyes.emote-sheepish .eye-shape { --emo-sx: 0.8; --emo-sy: 0.8; }
+:where(html[data-face="lumen"]) .eyes.emote-sheepish::before { opacity: 0.6; }
+
+/* celebrate — the happy arcs plus a small two-beat bounce of the whole pair */
+:where(html[data-face="lumen"]) .eyes.emote-celebrate { animation: lumen-bounce 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) 2; }
+:where(html[data-face="lumen"]) .eyes.emote-celebrate .eye-shape {
+  --emo-sy: 0.5; --emo-ty: -8px;
+  border-radius: 50% 50% 14% 14% / 68% 68% 10% 10%;
+}
+@keyframes lumen-bounce {
+  0%, 100% { transform: translateY(0); }
+  40%      { transform: translateY(-18px); }
+  70%      { transform: translateY(4px); }
+}
+/* (satisfied is procedural — one deliberate slow blink from createEyes —
+   and works unchanged: --blink-sy squashes the dots.) */
+
+/* ---- Focused ambient state (parity with capsule): slower breathe ---- */
+:where(html[data-face="lumen"]) #app.now-focused .face { animation-duration: 12s; }
+
+/* ---- Reduced motion: wake is instant, lumen-only loops stand down
+   (horizon.css's global guard already covers .face, the state loops on
+   .eyes/.eye/.eye-shape, and the listening ring) ---- */
+@media (prefers-reduced-motion: reduce) {
+  :where(html[data-face="lumen"]) .eye-shape,
+  :where(html[data-face="lumen"]) .eyes::before,
+  :where(html[data-face="lumen"]) .eyes.emote-celebrate { animation: none; }
+}
+
+/* =====================================================================
+   FOLIO — ink on paper (P10-02, from the Five Faces study)
+   Third switchable face: warm paper ground with a faint grain, two
+   hand-inked near-black eyes that read as DRAWN — irregular radii and a
+   stop-motion line-boil — a squash-and-stretch blink, a handwritten
+   voice on the reply surface, and a stamped red star for celebrate.
+   Same shared contract as capsule/lumen: transform channels (.face-rig
+   park / .face breathe / .eye state / .eye-shape blink+emotion via
+   --emo-* × --blink-sy), same thirteen beats, same triggers — only the
+   LOOK changes. Every keyframe here is folio- prefixed.
+
+   THE BOIL, mechanically: the .eye-shape transform is the shared
+   composed expression, so the boil never animates transform or
+   border-radius directly. Instead folio-boil steps() through values of
+   three custom props (--boil-a/--boil-b px, --boil-rot deg) that the
+   base border-radius calc()s and the composed rotate() add in. Custom
+   properties animate DISCRETELY, so each keyframe is a held pose — the
+   6-8fps stop-motion wobble — and every emotion keeps boiling for free
+   (its rotate still carries --boil-rot) without one extra keyframe. ---- */
+
+/* ---- Re-token: Folio's paper ground (face identity, not a palette —
+   same documented exception as lumen's porcelain block: these custom
+   properties land on <html>, so this ONE selector is plain
+   `html[data-face="folio"]` because a zero-specificity :where() cannot
+   override :root's declarations in tokens.css. Every descendant rule
+   below stays :where()-scoped at zero specificity. ---- */
+html[data-face="folio"] {
+  --ground: #f2ecdf;
+  --surface: #faf6ec;
+  /* --control (P11-02d): a fresh slip of paper laid on the warm page, so an
+     inked box always has something of its own underneath it. */
+  --control: #fdfaf3;
+  /* native pickers follow the face, never the tokens.css dark default */
+  color-scheme: light;
+  --text: #33291f;
+  --muted: #6f6353;
+  --faint: #998b76;
+  --line: #ddd3c0;
+  --accent: #b3402e;
+  --accent-bright: #8e2f21;
+  /* rings/handles across the app read rgba(var(--glow-rgb), …) — on
+     paper that becomes a soft warm sepia, never a green glow */
+  --glow-rgb: 111, 96, 76;
+  /* the paper GRAIN: two whisper-faint repeating hatch layers over the
+     warm wash — pure CSS gradients, no image files, no network deps */
+  --bg-grad:
+    repeating-linear-gradient(107deg, rgba(74, 58, 38, 0.026) 0 1px, transparent 1px 3px),
+    repeating-linear-gradient(23deg, rgba(74, 58, 38, 0.02) 0 1px, transparent 1px 4px),
+    radial-gradient(120% 90% at 50% 38%, #f8f4ea 0%, var(--ground) 55%, #e9e1cf 100%);
+  --panel-bg: rgba(250, 246, 236, 0.78);
+  --panel-border: rgba(51, 41, 31, 0.14);
+  --panel-shadow: 0 16px 40px rgba(51, 41, 31, 0.16);
+
+  /* folio-only identity tokens */
+  --folio-ink: #29211a;                    /* warm near-black drawing ink */
+  --folio-ink-dim: #9a8d7c;                /* washed-out ink for dim beats:
+                                              dim via COLOR, shapes stay opaque */
+  --folio-red: #b3402e;                    /* the stamp red (hearts + star) */
+  --folio-shadow: rgba(51, 41, 31, 0.16);  /* faint ink-wash under the rig */
+  --folio-hand: "Caveat", "Bradley Hand", "Segoe Script", "Comic Sans MS", cursive;
+
+  /* geometry: two tall hand-inked ovals with real desktop presence */
+  --eye-w: 80px;
+  --eye-h: 96px;
+  --eyes-gap: 88px;
+  --face-gap: 42px;
+  --park-scale: 0.45;   /* ~43px ink marks in the parked top band */
+}
+
+/* ---- Park / morph: same channel contract as capsule, restated in-scope
+   (the rig must still park when the horizon opens) ---- */
+:where(html[data-face="folio"]) .face-rig {
+  position: relative; z-index: 35;
+  transition: transform 0.5s cubic-bezier(0.22, 0.9, 0.3, 1) 0.2s;
+}
+:where(html[data-face="folio"]) #app.viewing .face-rig {
+  transform: translateY(var(--park-rise, calc(-50vh + 70px))) scale(var(--park-scale));
+  transition: transform 0.65s cubic-bezier(0.22, 0.9, 0.3, 1) 0.18s;
+  cursor: pointer;
+}
+/* paper wants an ink wash, not a glow: the capsule halo stands down
+   (display:none also keeps the unstyled div out of the stage's grid flow) */
+:where(html[data-face="folio"]) .ambient { display: none; }
+
+/* ---- The face: a gentle breathe; a faint ink-wash pools under the rig ---- */
+:where(html[data-face="folio"]) .face {
+  position: relative; display: flex; flex-direction: column; align-items: center;
+  gap: var(--face-gap); animation: folio-breathe 7s ease-in-out infinite;
+}
+@keyframes folio-breathe {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-5px); }
+}
+:where(html[data-face="folio"]) .face::before {
+  content: ""; position: absolute; left: 50%; top: calc(100% + 30px);
+  width: 260px; height: 40px; transform: translateX(-50%);
+  background: radial-gradient(ellipse at center, var(--folio-shadow) 0%, transparent 66%);
+  filter: blur(8px); pointer-events: none;
+}
+
+/* ---- The eyes: two hand-inked marks. The pair box is the anchor for the
+   think scribble (::before) and the celebrate stamp (::after). ---- */
+:where(html[data-face="folio"]) .eyes {
+  position: relative;
+  display: flex; align-items: center; gap: var(--eyes-gap);
+  transition: transform 0.25s ease-out, gap 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+:where(html[data-face="folio"]) .eyes.spread { gap: 120px; }
+
+:where(html[data-face="folio"]) .eye {
+  position: relative; width: var(--eye-w); height: var(--eye-h);
+  transform-origin: center;
+  transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+:where(html[data-face="folio"]) .eye-shape {
+  position: absolute; inset: 0;
+  background: var(--folio-ink);
+  /* a drawn mark, not a die-cut: slightly irregular corners, and the boil
+     vars nudge each corner so the outline never sits perfectly still */
+  border-radius:
+    calc(48% + var(--boil-a, 0px)) calc(52% - var(--boil-a, 0px))
+    calc(50% + var(--boil-b, 0px)) calc(50% - var(--boil-b, 0px)) /
+    calc(53% - var(--boil-b, 0px)) calc(47% + var(--boil-b, 0px))
+    calc(52% + var(--boil-a, 0px)) calc(48% - var(--boil-a, 0px));
+  transform-origin: center;
+  /* the shared composed-var contract, folio-extended: emotions own
+     --emo-*, blink owns --blink-sy (and, folio-only, --blink-sx for the
+     squash-and-stretch widen), the boil owns --boil-rot — all multiply/
+     add in ONE expression, so nothing ever clobbers anything */
+  transform: translateY(var(--emo-ty, 0px))
+             rotate(calc(var(--emo-rot, 0deg) + var(--boil-rot, 0deg)))
+             scaleX(calc(var(--emo-sx, 1) * var(--blink-sx, 1)))
+             scaleY(calc(var(--emo-sy, 1) * var(--blink-sy, 1)));
+  transition: transform 0.12s cubic-bezier(0.4, 0, 0.2, 1),
+              background 0.25s ease-out, filter 0.25s ease-out,
+              opacity 0.25s ease-out;
+  /* wake draw-on first (see below), then the boil loops forever:
+     steps(1, end) holds each keyframe pose — the stop-motion wobble */
+  animation: folio-wake-draw 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) backwards,
+             folio-boil 0.42s steps(1, end) infinite;
+}
+/* no glints on ink (the cursor-tracking JS still writes to them — harmless
+   while hidden) */
+:where(html[data-face="folio"]) .eye .glint { display: none; }
+/* the line-boil: three held poses of the corner/rotation vars (~7fps).
+   Discrete custom-prop animation IS the mechanism — see the header note. */
+@keyframes folio-boil {
+  0%, 100% { --boil-a: 0px;  --boil-b: 2px;  --boil-rot: 0deg; }
+  33%      { --boil-a: 3px;  --boil-b: -1px; --boil-rot: 0.9deg; }
+  66%      { --boil-a: -2px; --boil-b: 1px;  --boil-rot: -0.8deg; }
+}
+/* blink, squash-and-stretch: the squash rides --blink-sy as everywhere,
+   and folio adds the cartoon widen on --blink-sx (same composed expression) */
+:where(html[data-face="folio"]) .eye.blink .eye-shape { --blink-sy: 0.08; --blink-sx: 1.3; }
+
+/* ---- Wake moment: the eyes DRAW ON — a top-to-bottom ink-spread reveal
+   with a small overshoot past the baseline. Plays on entering the folio
+   face (the animation name newly applies) AND on real wake: horizon.css's
+   #app.sleeping .eye-shape swaps the animation to sleepBreath while
+   asleep (folio re-swaps it just below), so waking re-applies
+   folio-wake-draw and the moment replays. Reduced motion: instant. ---- */
+@keyframes folio-wake-draw {
+  0%   { clip-path: inset(0 0 100% 0); }
+  72%  { clip-path: inset(0 0 -6% 0); }
+  100% { clip-path: inset(-4% -4% -4% -4%); }
+}
+/* sleeping: the ink washes out but stays OPAQUE (background, not opacity)
+   and breathes without sleepBreath's brightness() filter — brightness on
+   near-black ink over paper goes muddy. The extra .eye in the compound
+   out-specifies horizon.css's #app.sleeping .eye-shape (equal specificity
+   would lose on link order — face.css loads first); the global
+   reduced-motion guard there still stands the animation down. */
+:where(html[data-face="folio"]) #app.sleeping .eye .eye-shape {
+  background: var(--folio-ink-dim);
+  animation: folio-sleep-breath 4.8s ease-in-out infinite;
+}
+@keyframes folio-sleep-breath {
+  0%, 100% { transform: scaleY(0.92); }
+  50%      { transform: scaleY(0.84); }
+}
+
+/* ---- Agent states, in Folio's language ---- */
+/* listening: the marks swell; one hand-drawn dashed ring breathes out */
+:where(html[data-face="folio"]) [data-state="listening"] .eye { transform: scale(1.07); }
+:where(html[data-face="folio"]) [data-state="listening"] .face::after {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 330px; height: 180px;
+  transform: translate(-50%, -50%); pointer-events: none;
+  border-radius: 46% 54% 48% 52% / 55% 45% 55% 45%;   /* drawn, not die-cut */
+  border: 2px dashed rgba(var(--glow-rgb), 0.45);
+  animation: folio-ring 1.9s ease-out infinite;
+}
+@keyframes folio-ring {
+  0%   { opacity: 0.55; transform: translate(-50%, -50%) scale(0.85); }
+  100% { opacity: 0;    transform: translate(-50%, -50%) scale(1.35); }
+}
+
+/* thinking (the think state): a squint, the drift, and the SCRIBBLED LOOP —
+   a small dashed ink circle turning above the eyes, like a thought being
+   worked out in the margin. ::before on the pair (folio has no connecting
+   line, so the slot is free; celebrate owns ::after). */
+:where(html[data-face="folio"]) [data-state="thinking"] .eyes { animation: folio-look 2.4s ease-in-out infinite; }
+:where(html[data-face="folio"]) [data-state="thinking"] .eye-shape { --emo-sy: 0.52; }
+:where(html[data-face="folio"]) [data-state="thinking"] .eyes::before {
+  content: ""; position: absolute; left: 50%; top: -54px;
+  width: 38px; height: 30px; margin-left: -19px;
+  border: 2.5px dashed var(--folio-ink);
+  border-radius: 58% 42% 55% 45% / 48% 62% 38% 52%;
+  opacity: 0.75; pointer-events: none;
+  animation: folio-scribble 1.15s steps(6, end) infinite;
+}
+@keyframes folio-scribble {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes folio-look {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-12px); }
+  55%      { transform: translateX(9px); }
+  80%      { transform: translateX(-4px); }
+}
+
+/* speaking: the marks bob with the voice (synced path + fallback, same
+   channels as capsule) */
+:where(html[data-face="folio"]) [data-state="speaking"] .eyes.talking-live .eye {
+  animation: none;
+  transition: none;
+  transform: scaleY(calc(1 - var(--talk-amp, 0.04)));
+}
+:where(html[data-face="folio"]) [data-state="speaking"] .eyes:not(.talking-live) .eye { animation: folio-talk 1.4s ease-in-out infinite; }
+@keyframes folio-talk {
+  0%, 100% { transform: scaleY(1); }
+  50%      { transform: scaleY(0.9); }
+}
+
+/* ---- Type voice: the agent's reply is HANDWRITTEN (Caveat, added to the
+   existing Google Fonts link). Sized up — script faces run small against
+   the serif's 20px. UI chrome stays in the app sans. The scope stays a
+   zero-specificity :where(); the `p.said` inside it (0,1,1 -> 0,2,1 with
+   .surface) out-specifies conversation.css's `.surface .said` (0,2,0),
+   which loads later and would otherwise win the tie. ---- */
+/* P11-01 ruled the reply itself with a hairline gradient pinned to the
+   baselines. It was removed on user request (2026-08-27): because the rules
+   only ever spanned the text block, they read as an underline under every
+   line rather than as a sheet of ruled paper. The paper GRAIN on the folio
+   ground stays — that is the face's re-token block above, and it is not what
+   was objected to. With the rules gone the pitch contract goes with them, so
+   the line-height below is now chosen for READING comfort in the hand
+   (Caveat runs tight; 1.35 gives the ascenders and descenders air) and is
+   free to change without re-deriving anything. */
+:where(html[data-face="folio"]) .surface p.said {
+  font-family: var(--folio-hand);
+  font-size: 28px; line-height: 1.35; letter-spacing: 0.01em;
+}
+
+/* ---- Reference mark (P11-08): the RED PENCIL UNDERLINE.
+   Folio is a page someone has been working on, so a reference is marked the
+   way you mark your own paper: a hand-drawn wobbling line scored under the
+   words in the stamp red. The wobble is a repeating gradient with a slight
+   skew, not an image — it reads as drawn rather than typeset. An ACTIONABLE
+   reference gets the pencil CIRCLE instead: an ink-red rounded ring, the
+   lopsided radii doing the work the eyes' hand-inked ovals do.
+
+   Same specificity note as the `p.said` type-voice rule above: `.surface
+   p.said` (0,2,1) out-specifies conversation.css's `.surface .said .ref`. ---- */
+:where(html[data-face="folio"]) .surface p.said .ref {
+  background-image: repeating-linear-gradient(97deg,
+    var(--folio-red) 0 3px,
+    color-mix(in srgb, var(--folio-red) 45%, transparent) 3px 5px);
+  background-repeat: no-repeat;
+  background-position: 0 92%;
+  background-size: 100% 2px;
+  padding: 0 0.06em;
+}
+:where(html[data-face="folio"]) .surface p.said .ref-act {
+  background-image: none;
+  border: 2px solid var(--folio-red);
+  border-radius: 54% 46% 58% 42% / 60% 56% 44% 40%;   /* drawn, not die-cut */
+  padding: 0 0.3em;
+  color: inherit;
+}
+:where(html[data-face="folio"]) .surface p.said .ref-act:hover {
+  background-color: color-mix(in srgb, var(--folio-red) 12%, transparent);
+  opacity: 1;
+}
+
+/* Folio's margin note (P11-01) is written in the same hand, smaller and
+   lighter, the way you'd pencil something beside your own page. */
+:where(html[data-face="folio"]) p.echo {
+  font-family: var(--folio-hand); font-style: normal;
+  font-size: 19px; line-height: 1.2;
+}
+
+/* ---- Emotions: all thirteen beats in ink ----
+   Same slowed-transition hold while an emotion is up (or easing out).
+   Every emotion keeps the boil: the composed rotate carries --boil-rot
+   even when a class overrides border-radius outright. */
+:where(html[data-face="folio"]) .eyes[class*="emote-"] .eye-shape,
+:where(html[data-face="folio"]) .eyes.emote-ease .eye-shape {
+  transition: transform 0.25s cubic-bezier(0.34, 1.3, 0.64, 1),
+              border-radius 0.25s ease-out, background 0.25s ease-out,
+              filter 0.25s ease-out, opacity 0.25s ease-out;
+}
+
+/* happy — two drawn smile-arcs, brush-heavy on top */
+:where(html[data-face="folio"]) .eyes.emote-happy .eye-shape {
+  --emo-sy: 0.48; --emo-ty: -7px;
+  border-radius: 50% 50% 16% 14% / 68% 72% 8% 10%;
+}
+
+/* wide — bigger, rounder blots (alert open-up) */
+:where(html[data-face="folio"]) .eyes.emote-wide .eye-shape {
+  --emo-sy: 1.1; --emo-sx: 1.16;
+  border-radius: 50% 48% 52% 50% / 52% 50% 48% 50%;
+}
+
+/* sorry — the SMUDGE: the marks droop, wash toward grey, and blur a hair
+   like a thumb dragged through wet ink. Dim rides COLOR (and a filter),
+   never opacity — the shapes stay solid. */
+:where(html[data-face="folio"]) .eyes.emote-sorry .eye-shape {
+  --emo-ty: 10px; --emo-sy: 0.78;
+  background: var(--folio-ink-dim);
+  filter: blur(1.4px);
+}
+:where(html[data-face="folio"]) .eyes.emote-sorry .eye.left  .eye-shape { border-radius: 58% 42% 46% 50% / 74% 40% 34% 44%; }
+:where(html[data-face="folio"]) .eyes.emote-sorry .eye.right .eye-shape { border-radius: 42% 58% 50% 46% / 40% 74% 44% 34%; }
+
+/* curious — one eye cocked: the left lifts and grows, the right narrows */
+:where(html[data-face="folio"]) .eyes.emote-curious { transform: rotate(3deg); }
+:where(html[data-face="folio"]) .eyes.emote-curious .eye.left  .eye-shape { --emo-sy: 1.12; --emo-sx: 1.06; --emo-ty: -6px; }
+:where(html[data-face="folio"]) .eyes.emote-curious .eye.right .eye-shape { --emo-sy: 0.76; --emo-ty: 3px; }
+
+/* heart — two inked hearts in the study's red (rotated body + two round
+   lobes on the shape's own pseudos; the boil rot keeps them hand-held) */
+:where(html[data-face="folio"]) .eyes.emote-heart .eye-shape {
+  --emo-rot: -45deg; --emo-sx: 0.78; --emo-sy: 0.66;
+  border-radius: 0 0 0 12%;
+  background: var(--folio-red);
+}
+:where(html[data-face="folio"]) .eyes.emote-heart .eye-shape::before,
+:where(html[data-face="folio"]) .eyes.emote-heart .eye-shape::after {
+  content: ""; position: absolute; width: 100%; height: 100%;
+  border-radius: 50%; background: inherit;
+}
+:where(html[data-face="folio"]) .eyes.emote-heart .eye-shape::before { top: -50%; left: 0; }
+:where(html[data-face="folio"]) .eyes.emote-heart .eye-shape::after  { top: 0; left: 50%; }
+
+/* surprised — the scale POP: the marks snap to tiny round dots and jump
+   up (the cartoon shock take; wide above is the big-blot open-up) */
+:where(html[data-face="folio"]) .eyes.emote-surprised .eye-shape {
+  --emo-sx: 0.6; --emo-sy: 0.52; --emo-ty: -12px;
+  border-radius: 50%;
+}
+
+/* sleepy — heavy-lidded slits, ink washed toward grey (color, not opacity) */
+:where(html[data-face="folio"]) .eyes.emote-sleepy .eye-shape {
+  --emo-sy: 0.3; --emo-ty: 12px;
+  background: var(--folio-ink-dim);
+  border-radius: 42% 42% 50% 50% / 22% 22% 74% 74%;
+}
+
+/* proud — lifted round arcs, fuller than happy's crescents */
+:where(html[data-face="folio"]) .eyes.emote-proud .eye-shape {
+  --emo-sy: 0.6; --emo-ty: -9px;
+  border-radius: 50% 50% 32% 30% / 62% 64% 26% 24%;
+}
+
+/* worried — the marks knit INWARD (inner-top corners lean toward each
+   other) with a faster, harder tremble: its own steps() jitter replaces
+   the base boil for the hold */
+:where(html[data-face="folio"]) .eyes.emote-worried .eye.left  .eye-shape {
+  --emo-rot: 9deg;
+  border-radius: 62% 24% 50% 52% / 70% 26% 46% 50%;
+}
+:where(html[data-face="folio"]) .eyes.emote-worried .eye.right .eye-shape {
+  --emo-rot: -9deg;
+  border-radius: 24% 62% 52% 50% / 26% 70% 50% 46%;
+}
+:where(html[data-face="folio"]) .eyes.emote-worried .eye-shape {
+  --emo-sy: 0.8; --emo-ty: 3px;
+  animation: folio-tremble 0.26s steps(1, end) infinite;
+}
+@keyframes folio-tremble {
+  0%, 100% { --boil-a: 2px;  --boil-b: -1px; --boil-rot: 1.6deg; }
+  33%      { --boil-a: -2px; --boil-b: 2px;  --boil-rot: -1.4deg; }
+  66%      { --boil-a: 1px;  --boil-b: -2px; --boil-rot: 0.6deg; }
+}
+
+/* sheepish — the WAVY squint: low, wobbly-edged slits and a small lean
+   away (the irregular radii + the boil read as an embarrassed squiggle) */
+:where(html[data-face="folio"]) .eyes.emote-sheepish { transform: rotate(-2.5deg) translateX(10px); }
+:where(html[data-face="folio"]) .eyes.emote-sheepish .eye.left  .eye-shape { border-radius: 62% 38% 55% 45% / 70% 52% 30% 48%; }
+:where(html[data-face="folio"]) .eyes.emote-sheepish .eye.right .eye-shape { border-radius: 38% 62% 45% 55% / 52% 70% 48% 30%; }
+:where(html[data-face="folio"]) .eyes.emote-sheepish .eye-shape { --emo-sy: 0.42; --emo-ty: 3px; }
+
+/* celebrate — the STAMPED RED STAR: the eyes go to happy arcs and a
+   five-pointed star thunks down above them like a rubber stamp —
+   steps(2) so it lands in two hard poses, a hair of settle rotation.
+   ::after on the pair; opaque red over paper, nothing beneath it. */
+:where(html[data-face="folio"]) .eyes.emote-celebrate .eye-shape {
+  --emo-sy: 0.48; --emo-ty: -7px;
+  border-radius: 50% 50% 16% 14% / 68% 72% 8% 10%;
+}
+:where(html[data-face="folio"]) .eyes.emote-celebrate::after {
+  content: ""; position: absolute; left: 50%; top: -84px;
+  width: 58px; height: 58px; margin-left: -29px;
+  background: var(--folio-red);
+  clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%,
+                     50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
+  pointer-events: none;
+  animation: folio-stamp 0.32s steps(2, end) both;
+}
+@keyframes folio-stamp {
+  0%   { transform: scale(2.1) rotate(-14deg); opacity: 0; }
+  100% { transform: scale(1) rotate(-4deg); opacity: 1; }
+}
+/* (satisfied is procedural — one deliberate slow blink from createEyes —
+   and works unchanged: --blink-sy × --blink-sx squash-and-stretch the ink.) */
+
+/* ---- Focused ambient state (parity with capsule): slower breathe ---- */
+:where(html[data-face="folio"]) #app.now-focused .face { animation-duration: 12s; }
+
+/* ---- Reduced motion: the boil stills (the drawn irregular radius keeps
+   the hand-inked read), wake is instant, the scribble/tremble stand down,
+   the star appears instantly (base ::after is the landed pose — killing
+   the animation leaves it visible). horizon.css's global guard already
+   covers .face, the state loops on .eyes/.eye, and the listening ring. ---- */
+@media (prefers-reduced-motion: reduce) {
+  :where(html[data-face="folio"]) .eye-shape,
+  :where(html[data-face="folio"]) [data-state="thinking"] .eyes::before,
+  :where(html[data-face="folio"]) .eyes.emote-worried .eye-shape,
+  :where(html[data-face="folio"]) .eyes.emote-celebrate::after { animation: none; }
+  :where(html[data-face="folio"]) .eyes.emote-celebrate::after { transform: rotate(-4deg); }
+}
+
+/* =====================================================================
+   THE INPUT LAYER, PER FACE (P11-02c)
+   Until now the fourteen clarify controls had ZERO face awareness: the same
+   sage chips and the same rounded steppers turned up on porcelain and on
+   paper, because clarify.css owns the kit and clarify.css is faceless by
+   design. It still is. What a control DOES and where it sits stays there;
+   what a control IS made of is face identity, so it lives here, in each
+   face's own scope, exactly like the eyes and the reply's hand.
+
+   Three verbs, one per face:
+     capsule  IGNITES  — the chosen option lights up and springs, the way
+                         the halo and the capsule eyes carry light.
+     lumen    PRESSES  — squared vinyl cards under a soft shadow; choosing
+                         pushes one IN and inverts it to ink.
+     folio    STAMPS   — hand-inked boxes in Caveat that boil like the eyes,
+                         and the chosen one lands in --folio-red with the
+                         same two-step thunk as the celebrate star.
+
+   SPECIFICITY NOTE (the same trap `p.said` and `div.surface` document
+   above): face.css loads BEFORE clarify.css and conversation.css, so a
+   zero-specificity :where() scope alone LOSES every tie. Every rule below
+   therefore names the element too — `span.chip` (0,2,1) beats `.clarify
+   .chip` (0,2,0), `span.chip.on` (0,3,1) beats `.clarify .chip.on` (0,3,0)
+   — while the scope itself stays weightless so no face can leak.
+   ===================================================================== */
+
+/* ---------------------------------------------------------------- capsule */
+/* Capsule's kit is the Nocturne baseline, so this scope adds the one thing
+   the baseline can't express: the moment of CHOOSING. The chosen control
+   ignites — accent fill (already), plus a glow bloom and a short spring. */
+:where(html[data-face="capsule"]) .clarify span.chip.on,
+:where(html[data-face="capsule"]) .clarify button.day.on,
+:where(html[data-face="capsule"]) .clarify span.dot.on {
+  box-shadow: 0 0 0 3px rgba(var(--glow-rgb), 0.18),
+              0 6px 20px rgba(var(--glow-rgb), 0.30);
+  animation: capsule-ignite 0.34s cubic-bezier(0.34, 1.5, 0.44, 1) backwards;
+}
+@keyframes capsule-ignite {
+  0%   { transform: scale(0.92); }
+  55%  { transform: scale(1.07); }
+  100% { transform: scale(1); }
+}
+/* the field's rule glows like everything else that carries light here */
+:where(html[data-face="capsule"]) textarea.field:focus,
+:where(html[data-face="capsule"]) input.field:focus {
+  box-shadow: 0 6px 18px -12px rgba(var(--glow-rgb), 0.55);
+}
+
+/* ------------------------------------------------------------------ lumen */
+/* Vinyl, not glass: every control is a small squared card with a soft
+   neutral shadow, sitting on --control so it is never white-on-white. */
+:where(html[data-face="lumen"]) .clarify span.chip,
+:where(html[data-face="lumen"]) .clarify button.day,
+:where(html[data-face="lumen"]) .clarify span.dot,
+:where(html[data-face="lumen"]) .clarify div.stepper,
+:where(html[data-face="lumen"]) .clarify input.nat,
+:where(html[data-face="lumen"]) .clarify label.course-card {
+  border-radius: 9px;
+  background: var(--control);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--lumen-shadow) 50%, transparent),
+              0 3px 10px color-mix(in srgb, var(--lumen-shadow) 28%, transparent);
+}
+:where(html[data-face="lumen"]) .clarify span.chip { padding: 10px 15px; }
+:where(html[data-face="lumen"]) .clarify span.dot { width: 32px; height: 32px; }
+:where(html[data-face="lumen"]) .clarify p.clarify-ask {
+  font-family: var(--sans); font-weight: 500; font-size: 19px;
+}
+/* hovering lifts the card off the porcelain a little further */
+:where(html[data-face="lumen"]) .clarify span.chip:hover,
+:where(html[data-face="lumen"]) .clarify button.day:hover,
+:where(html[data-face="lumen"]) .clarify label.course-card:hover {
+  box-shadow: 0 2px 4px color-mix(in srgb, var(--lumen-shadow) 55%, transparent),
+              0 8px 20px color-mix(in srgb, var(--lumen-shadow) 34%, transparent);
+}
+/* choosing PRESSES IN: the card inverts to ink, drops a hair, and swaps its
+   drop shadow for an inset one, so the selected option reads as depressed
+   rather than lit. --ground is porcelain white here, so it is the on-ink
+   text colour (the same var the base kit uses for on-accent text). */
+:where(html[data-face="lumen"]) .clarify span.chip.on,
+:where(html[data-face="lumen"]) .clarify button.day.on,
+:where(html[data-face="lumen"]) .clarify span.dot.on {
+  background: var(--lumen-ink); border-color: var(--lumen-ink); color: var(--ground);
+  transform: translateY(1px);
+  box-shadow: inset 0 2px 5px color-mix(in srgb, var(--lumen-shadow) 90%, transparent);
+  animation: lumen-press 0.2s cubic-bezier(0.4, 0, 0.2, 1) backwards;
+}
+@keyframes lumen-press {
+  0%   { transform: translateY(-1px); }
+  100% { transform: translateY(1px); }
+}
+/* the field: a firmer ink rule, because porcelain swallows a hairline */
+:where(html[data-face="lumen"]) textarea.field,
+:where(html[data-face="lumen"]) input.field {
+  border-bottom-color: color-mix(in srgb, var(--lumen-ink) 22%, transparent);
+  background-image: linear-gradient(var(--lumen-ink), var(--lumen-ink));
+}
+
+/* ------------------------------------------------------------------ folio */
+/* Drawn boxes, not manufactured ones: 2px ink outlines whose corners BOIL on
+   the same three held poses as the eyes (folio-boil, declared above, animates
+   --boil-a/--boil-b discretely), lettered in the hand. Nothing rotates: the
+   wobble is all in the outline, so the words stay flat and readable. */
+:where(html[data-face="folio"]) .clarify span.chip,
+:where(html[data-face="folio"]) .clarify button.day,
+:where(html[data-face="folio"]) .clarify span.dot,
+:where(html[data-face="folio"]) .clarify div.stepper,
+:where(html[data-face="folio"]) .clarify input.nat,
+:where(html[data-face="folio"]) .clarify label.course-card {
+  font-family: var(--folio-hand);
+  background: var(--control);
+  border: 2px solid var(--folio-ink);
+  color: var(--text);
+  border-radius:
+    calc(14px + var(--boil-a, 0px)) calc(11px - var(--boil-a, 0px))
+    calc(13px + var(--boil-b, 0px)) calc(12px - var(--boil-b, 0px)) /
+    calc(12px - var(--boil-b, 0px)) calc(14px + var(--boil-b, 0px))
+    calc(11px + var(--boil-a, 0px)) calc(13px - var(--boil-a, 0px));
+  animation: folio-boil 0.42s steps(1, end) infinite;
+}
+:where(html[data-face="folio"]) .clarify span.chip { font-size: 19px; padding: 6px 15px 5px; }
+:where(html[data-face="folio"]) .clarify span.dot { font-size: 17px; width: 34px; height: 34px; }
+:where(html[data-face="folio"]) .clarify button.day { font-size: 18px; }
+:where(html[data-face="folio"]) .clarify p.clarify-ask {
+  font-family: var(--folio-hand); font-size: 26px; line-height: 1.25;
+}
+/* the readout is a pencilled note under the drawn boxes */
+:where(html[data-face="folio"]) .clarify div.clarify-readout { font-family: var(--folio-hand); font-size: 16px; }
+/* the chosen one is STAMPED: opaque red, and the two-pose thunk the
+   celebrate star lands with. The animation holds its settled tilt (fill
+   `both`), which is deliberate — a stamped mark has landed and does not
+   hover-lift any more. */
+:where(html[data-face="folio"]) .clarify span.chip.on,
+:where(html[data-face="folio"]) .clarify button.day.on,
+:where(html[data-face="folio"]) .clarify span.dot.on {
+  background: var(--folio-red); border-color: var(--folio-red); color: var(--surface);
+  animation: folio-boil 0.42s steps(1, end) infinite,
+             folio-kit-stamp 0.32s steps(2, end) both;
+}
+@keyframes folio-kit-stamp {
+  0%   { transform: scale(1.55) rotate(-7deg); opacity: 0.35; }
+  100% { transform: scale(1) rotate(-1.6deg); opacity: 1; }
+}
+/* you answer in the same hand you are answered in */
+:where(html[data-face="folio"]) textarea.field,
+:where(html[data-face="folio"]) input.field {
+  font-family: var(--folio-hand); font-size: 21px;
+  border-bottom-color: color-mix(in srgb, var(--folio-ink) 42%, transparent);
+  background-image: linear-gradient(var(--folio-ink), var(--folio-ink));
+}
+
+/* Reduced motion, all three faces: the choosing beats stop travelling but
+   the chosen state is still unmistakable (fill, invert, stamp red all come
+   from the static rules above). Folio's boil stills into its drawn
+   irregular corners, exactly as the eyes do. */
+@media (prefers-reduced-motion: reduce) {
+  :where(html[data-face="capsule"]) .clarify span.chip.on,
+  :where(html[data-face="capsule"]) .clarify button.day.on,
+  :where(html[data-face="capsule"]) .clarify span.dot.on,
+  :where(html[data-face="lumen"]) .clarify span.chip.on,
+  :where(html[data-face="lumen"]) .clarify button.day.on,
+  :where(html[data-face="lumen"]) .clarify span.dot.on,
+  :where(html[data-face="folio"]) .clarify span.chip,
+  :where(html[data-face="folio"]) .clarify button.day,
+  :where(html[data-face="folio"]) .clarify span.dot,
+  :where(html[data-face="folio"]) .clarify div.stepper,
+  :where(html[data-face="folio"]) .clarify input.nat,
+  :where(html[data-face="folio"]) .clarify label.course-card { animation: none; }
+  :where(html[data-face="folio"]) .clarify span.chip.on,
+  :where(html[data-face="folio"]) .clarify button.day.on,
+  :where(html[data-face="folio"]) .clarify span.dot.on {
+    animation: none; transform: rotate(-1.6deg);
+  }
+}
+
+/* =====================================================================
+   P11-03 — THE SPINE, PER FACE
+
+   horizon.css draws the shared clock in the app's own vocabulary: the run
+   ground is --control, open time is a rgba(--glow-rgb) wash, the now-marker
+   glows. That vocabulary was written for Nocturne and it does not survive a
+   face that re-tokens its ground:
+
+   - LUMEN's --ground and --surface are BOTH #ffffff, and its --glow-rgb is a
+     neutral grey, so the open-time wash — the day level's primary signal —
+     fell to about a tenth of grey on white, and every card, popover and chip
+     was white on white with one hairline to tell them apart.
+   - FOLIO's --accent is stamp red while --warm and --alert were never
+     re-tokened, so the CALM gauge state shouted louder than the alert one.
+     Both are re-tokened here, and the spine borrows folio's own logic: on
+     paper, open time is the sheet left CLEAN and busy time is where the ink
+     went, so the wash inverts rather than tinting.
+
+   Specificity: face.css loads BEFORE horizon.css, so a zero-specificity
+   :where() scope alone would lose to horizon.css's own single-class rules.
+   Each selector below names its ELEMENT to win by one, exactly the pattern
+   P11-02 documented. The scope itself stays in :where(), at zero.
+   ===================================================================== */
+
+/* ---- Lumen: porcelain needs a real ground and a real wash ---- */
+html[data-face="lumen"] {
+  /* face-identity tokens for the spine, declared beside lumen's own others.
+     --lumen-open is the open-time wash: a soft mint that reads as ROOM on
+     white, where a grey glow at 10% simply did not. */
+  --lumen-open: #dcece3;
+  --lumen-open-edge: #a9cbb9;
+}
+/* the run's own ground: --control (#f2f3f4), never the white --surface */
+:where(html[data-face="lumen"]) div.hz-run { background: var(--control); border-color: #dfe1e3; }
+:where(html[data-face="lumen"]) div.hz-open {
+  background: var(--lumen-open);
+  border-left-color: var(--lumen-open-edge);
+  border-right-color: var(--lumen-open-edge);
+}
+:where(html[data-face="lumen"]) span.hz-lg-open {
+  background: var(--lumen-open); border-color: var(--lumen-open-edge);
+}
+/* the hatch reads as pencil on porcelain, not as a smudge */
+:where(html[data-face="lumen"]) div.hz-busy { opacity: 0.45; }
+/* the now-marker is the one thing that must never go grey */
+:where(html[data-face="lumen"]) div.hz-nowcol {
+  background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 35%, transparent));
+}
+:where(html[data-face="lumen"]) div.hz-nowline,
+:where(html[data-face="lumen"]) div.hz-nowcol::before,
+:where(html[data-face="lumen"]) div.hz-nowline::before,
+:where(html[data-face="lumen"]) span.hz-lg-now {
+  background: var(--accent); box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9);
+}
+/* everything that used to fill with the white --surface gets the control
+   ground instead, so nothing in the horizon is white on white */
+:where(html[data-face="lumen"]) div.hz-hero,
+:where(html[data-face="lumen"]) div.hz-empty,
+:where(html[data-face="lumen"]) div.hz-pop,
+:where(html[data-face="lumen"]) div#hz-unplaced,
+:where(html[data-face="lumen"]) button.hz-m-cell,
+:where(html[data-face="lumen"]) div.hz-m-cell { background: var(--control); }
+:where(html[data-face="lumen"]) p.hz-streak { background: var(--control); }
+:where(html[data-face="lumen"]) button.hz-daycard:hover { background: #eef2f0; }
+/* porcelain wants shadow where Nocturne wants glow */
+:where(html[data-face="lumen"]) button.hz-daycard.hz-today div.hz-run {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* ---- Folio: paper. Open time is the clean sheet; ink is what is taken. ---- */
+html[data-face="folio"] {
+  /* THE FIX the item names: --warm and --alert were still the Nocturne pair,
+     which sit LIGHTER on paper than folio's stamp-red accent (#b3402e) — so
+     the calm gauge read louder than the alert one. Re-tokened here as ink:
+     warm is ochre, alert is a deep oxblood that is unmistakably heavier than
+     the accent, because on paper "louder" means DARKER, not brighter. */
+  --warm: #a8710f;
+  --alert: #781408;
+  /* the clean sheet, a shade brighter than the page it sits on */
+  --folio-open: #fffdf6;
+  --folio-open-edge: #cbbb9c;
+}
+:where(html[data-face="folio"]) div.hz-run {
+  background: color-mix(in srgb, var(--folio-ink) 7%, var(--control));
+  border-color: color-mix(in srgb, var(--folio-ink) 26%, transparent);
+}
+:where(html[data-face="folio"]) div.hz-open {
+  background: var(--folio-open);
+  border-left-color: var(--folio-open-edge);
+  border-right-color: var(--folio-open-edge);
+}
+:where(html[data-face="folio"]) span.hz-lg-open {
+  background: var(--folio-open); border-color: var(--folio-open-edge);
+}
+/* the hatch is real pen-work here, so it earns full ink */
+:where(html[data-face="folio"]) div.hz-busy {
+  background: repeating-linear-gradient(-45deg, transparent 0 5px, var(--folio-ink) 5px 6px);
+  opacity: 0.34;
+}
+:where(html[data-face="folio"]) span.hz-lg-busy {
+  background: repeating-linear-gradient(-45deg, transparent 0 4px, var(--folio-ink) 4px 5px);
+}
+/* the stamp: a placed session is ruled onto the sheet in red. P11-04 made
+   the ruled box the PLAN and the ink inside it what was actually recorded —
+   solid red for hours the timer measured, hatched red for hours you told me
+   about, bare paper for a session nobody has recorded anything against. */
+:where(html[data-face="folio"]) div.hz-span,
+:where(html[data-face="folio"]) button.hz-span {
+  background: color-mix(in srgb, var(--folio-red) 8%, transparent);
+  border-color: var(--folio-red);
+  color: var(--text); border-radius: 3px;
+}
+:where(html[data-face="folio"]) button.hz-span:hover {
+  background: color-mix(in srgb, var(--folio-red) 16%, transparent);
+  border-color: var(--folio-red);
+}
+:where(html[data-face="folio"]) span.hz-fill-timer,
+:where(html[data-face="folio"]) span.hz-lg-timer {
+  background: color-mix(in srgb, var(--folio-red) 42%, transparent);
+}
+:where(html[data-face="folio"]) span.hz-fill-reported,
+:where(html[data-face="folio"]) span.hz-lg-reported {
+  background: repeating-linear-gradient(-45deg,
+    color-mix(in srgb, var(--folio-red) 55%, transparent) 0 3px,
+    transparent 3px 7px);
+}
+:where(html[data-face="folio"]) span.hz-lg-planned {
+  background: color-mix(in srgb, var(--folio-red) 8%, transparent);
+}
+:where(html[data-face="folio"]) span.hz-lg-planned,
+:where(html[data-face="folio"]) span.hz-lg-timer,
+:where(html[data-face="folio"]) span.hz-lg-reported {
+  border-color: var(--folio-red); border-left-color: var(--folio-red); border-radius: 2px;
+}
+/* now is a ruled ink line, not a glow */
+:where(html[data-face="folio"]) div.hz-nowcol {
+  background: linear-gradient(180deg, var(--folio-ink), color-mix(in srgb, var(--folio-ink) 30%, transparent));
+}
+:where(html[data-face="folio"]) div.hz-nowline,
+:where(html[data-face="folio"]) div.hz-nowcol::before,
+:where(html[data-face="folio"]) div.hz-nowline::before,
+:where(html[data-face="folio"]) span.hz-lg-now {
+  background: var(--folio-ink); box-shadow: none;
+}
+/* the day labels and the headline speak in folio's own hand */
+:where(html[data-face="folio"]) span.hz-dc-date,
+:where(html[data-face="folio"]) span.hz-day-title {
+  font-family: var(--folio-hand); font-size: 15px;
+  letter-spacing: 0.02em; text-transform: none; color: var(--text);
+}
+:where(html[data-face="folio"]) button.hz-daycard:hover {
+  background: color-mix(in srgb, var(--folio-ink) 5%, transparent);
+}
+:where(html[data-face="folio"]) button.hz-daycard.hz-today div.hz-run {
+  border-color: var(--folio-ink);
+}
+
+/* =====================================================================
+   Agent rest states + the face's reduced-motion guard (moved here P11-07)
+   These lived at the tail of horizon.css, which owned none of them. They
+   are face identity — the presence dimming down, warming back up, and the
+   idle glance — so they belong beside the rig they animate. They sit at
+   the END of this file on purpose: that keeps their order relative to
+   every other face rule exactly as it was when they loaded later, so
+   nothing about the cascade changes with the address.
+   ===================================================================== */
+
+/* sleeping (dim breathing): after a stretch of no interaction the presence
+   rests — the eyes keep their shape but dim right down and breathe slowly,
+   like low-power standby. Any interaction wakes them (warm brighten + a
+   double-blink from JS). */
+#app.sleeping { --glow: 0.14; }
+#app.sleeping .eye-shape {
+  animation: sleepBreath 4.8s ease-in-out infinite;
+  transition: transform 0.9s ease, filter 0.9s ease, box-shadow 0.9s ease;
+}
+@keyframes sleepBreath {
+  0%, 100% { transform: scaleY(0.90); filter: brightness(0.50); }
+  50%      { transform: scaleY(0.82); filter: brightness(0.36); }
+}
+#app.sleeping .glint { opacity: 0.12; }
+#app.sleeping .ambient { opacity: 0.28; }
+#app.sleeping .face { animation-play-state: paused; }
+
+/* waking: a brief warm brighten as the eyes come back (with a double blink in JS) */
+#app.waking .eye-shape { filter: brightness(1.18); transition: filter 0.6s ease; }
+
+/* glance: an occasional slow drift-and-settle while idle, like a passing thought */
+.eyes.glance { animation: glance 2.4s ease-in-out; }
+@keyframes glance {
+  0%   { transform: translateX(0); }
+  28%  { transform: translateX(-7px); }
+  58%  { transform: translateX(5px); }
+  100% { transform: translateX(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .face, .ambient,
+  [data-state="thinking"] .eyes, [data-state="thinking"] .eye-shape,
+  [data-state="speaking"] .eye,
+  [data-state="listening"] .face::after,
+  #app.sleeping .eye-shape, .eyes.glance { animation: none !important; }
+  /* P7-03: emotions land instantly and never rotate/tilt */
+  .eyes, .eyes[class*="emote-"] .eye-shape, .eyes.emote-ease .eye-shape,
+  .eye .glint { transition: none !important; }
+  .eye { transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); }
+  .eyes.emote-curious { transform: none; }
+  .eyes.emote-heart .eye.left .eye-shape,
+  .eyes.emote-heart .eye.right .eye-shape { --emo-rot: 0deg; }
+  /* P7-05: the rig jumps to its parked position (same end state, no travel) */
+  .face-rig, .ambient { transition: none !important; }
+}

@@ -1,0 +1,284 @@
+<!doctype html>
+<!--
+  Focus Agent — app shell (P3-01)
+  Nocturne design system — the only palette (P10-00 removed Tide light mode).
+  The Eyes presence is the home/conversation state; the plan lives on the
+  SAME stage (P7-05): the eyes park into a slim top band and #horizon
+  materializes in the space they vacate. One continuous room, fully
+  reversible via the peek handle / wheel / Esc / the parked eyes.
+
+  Stack note: Tailwind via the Play CDN is intentional here — this is a
+  server-served page (served at / by src/api/server.py), not an artifact,
+  so the CDN is the fast path. Design tokens are declared once in the
+  tailwind.config below AND mirrored as CSS variables in tokens.css; the
+  config maps each Tailwind color name to its var() so utilities like
+  `bg-surface text-muted border-line` read the Nocturne values. darkMode:
+  'class' and the `dark:` utilities in markup are load-bearing, so <html>
+  keeps class="dark" PERMANENTLY — nothing may remove it (P10-00).
+-->
+<!-- data-face names the active face identity (P9-00a); face.css scopes each
+     face's rig under it (capsule default, lumen since P10-01, folio since
+     P10-02) so a face swap changes the whole identity without touching
+     component files. -->
+<html lang="en" class="dark" data-face="capsule">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blink</title>
+
+  <script>
+    // P10-01: apply the persisted face BEFORE the stylesheets load so there is
+    // no capsule flash. FocusSettings (app.js) owns the setting from then on;
+    // only known face names are honored — junk falls back to the markup default.
+    (function () {
+      try {
+        var s = JSON.parse(localStorage.getItem("focus.settings") || "null");
+        if (s && (s.face === "lumen" || s.face === "folio")) document.documentElement.setAttribute("data-face", s.face);
+      } catch (_) { /* unavailable/corrupt storage — keep the capsule default */ }
+    })();
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=IBM+Plex+Mono:wght@400;500&family=Caveat:wght@500;600&display=swap">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Token color names, each mapped to the CSS variable tokens.css declares
+    // on :root (Nocturne — the only palette). darkMode:'class' stays because
+    // markup carries `dark:` utilities; <html class="dark"> is permanent.
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            ground: 'var(--ground)',
+            surface: 'var(--surface)',
+            text: 'var(--text)',
+            muted: 'var(--muted)',
+            faint: 'var(--faint)',
+            line: 'var(--line)',
+            accent: 'var(--accent)',
+            'accent-bright': 'var(--accent-bright)',
+          },
+          fontFamily: {
+            sans: ['"Hanken Grotesk"', 'system-ui', '-apple-system', 'sans-serif'],
+            serif: ['Newsreader', 'Georgia', 'serif'],
+            mono: ['"IBM Plex Mono"', 'ui-monospace', 'monospace'],
+          },
+        },
+      },
+    };
+  </script>
+
+  <!-- Design system, split by ownership (P8 maintainability pass). ORDER MATTERS:
+       it reproduces the pre-split cascade. New styles go in the owning file. -->
+  <link rel="stylesheet" href="/static/css/tokens.css">
+  <link rel="stylesheet" href="/static/css/face.css">
+  <link rel="stylesheet" href="/static/css/conversation.css">
+  <link rel="stylesheet" href="/static/css/chrome.css">
+  <link rel="stylesheet" href="/static/css/horizon.css">
+  <link rel="stylesheet" href="/static/css/responsive.css">
+  <link rel="stylesheet" href="/static/css/clarify.css">
+  <!-- now.css (P9-07): the Now focus-session surface — a NEW feature area,
+       so it gets its own ownership-scoped file, appended after clarify.css. -->
+  <link rel="stylesheet" href="/static/css/now.css">
+</head>
+
+<body>
+  <!-- ==================== HOME / CONVERSATION: the Eyes presence ==================== -->
+  <div id="app" data-state="idle" class="fixed inset-0 grid grid-rows-[1fr_auto]">
+
+    <!-- top chrome -->
+    <div class="fixed left-5 top-4 z-[10] font-sans text-[12px] font-medium tracking-[0.14em] uppercase text-faint select-none">
+      Blink
+    </div>
+    <div class="fixed right-4 top-4 z-[10] flex items-center gap-2">
+      <button id="settings-btn" class="chip-btn chip-icon" aria-label="Settings" aria-haspopup="dialog">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+             stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+      </button>
+    </div>
+
+    <!-- stage: halo + capsule eyes (upper) + conversation surface (lower) -->
+    <div class="stage relative grid place-items-center">
+      <div class="ambient"></div>
+
+      <!-- face-rig (P7-05): the PARK transform channel and nothing else.
+           .face keeps the breathe keyframe, .eye the state transforms,
+           .eye-shape the blink/emotion vars — so the parked eyes stay alive. -->
+      <div class="face-rig">
+        <div class="face">
+          <div class="eyes">
+            <div class="eye left"><span class="eye-shape"><span class="glint"></span></span></div>
+            <div class="eye right"><span class="eye-shape"><span class="glint"></span></span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- The horizon (P7-06): the zoomable plan view that fades up in the
+           space the parked eyes vacate. Five levels (day … year) on one
+           canvas; week + day are fully built, the wider levels are the
+           "coming into focus" placeholders until P7-08. Two stacked layers
+           give the 260ms shared-axis cross-fade between levels.
+           Body rendered by createHorizon in app.js. -->
+      <div id="horizon" role="region" aria-label="Your plan" tabindex="-1">
+        <div class="max-w-[1000px] mx-auto relative">
+          <p class="font-sans text-[12px] font-medium tracking-[0.18em] uppercase text-accent mb-2">Your plan</p>
+          <!-- Accountability streak (P9-03b): a calm "Day N" counter, derived
+               server-side from block history. Hidden at zero. -->
+          <p id="hz-streak" class="hz-streak" hidden></p>
+          <h1 id="h-title" class="font-serif font-medium text-[clamp(24px,3.6vw,34px)] leading-none tracking-tight text-text m-0">
+            The next seven days
+          </h1>
+          <p class="text-muted mt-3 max-w-[54ch]" id="h-sub">Calm, at a glance. The blocks Blink has placed, and the room you have left.</p>
+
+          <!-- level pills (tablist, arrow-key nav) + the utilization gauge -->
+          <div id="hz-controls" class="mt-6">
+            <div id="hz-pills" role="tablist" aria-label="Zoom level"></div>
+            <div id="hz-gauge" aria-live="polite"></div>
+          </div>
+          <div id="hz-unplaced" hidden></div>
+
+          <!-- The legend (P11-03): the key to what the canvas draws, in
+               words, always on screen. Filled per level by app.js, and only
+               with the marks that level actually drew. -->
+          <div id="hz-legend" aria-label="What the marks mean" hidden></div>
+
+          <!-- the canvas: two layers so level swaps can cross-fade -->
+          <div id="hz-canvas" class="mt-5">
+            <div class="hz-layer" data-layer="a"></div>
+            <div class="hz-layer hz-hidden" data-layer="b"></div>
+          </div>
+          <p class="mt-8 text-[12px] text-faint font-mono" id="h-meta"></p>
+        </div>
+      </div>
+
+      <!-- One-turn echo (P7-02): a quiet right-aligned line of what you just
+           said or answered, above the surface. Dims when the reply starts
+           rendering; replaced on the next turn. Filled by app.js. -->
+      <p class="echo" id="echo" role="status"></p>
+
+      <!-- The Now (P9-07): the focus-session surface. Hidden until a session
+           starts; then the stage becomes the current task — title, commitment
+           dot, a calm mono timer, pause/stop, and the idle-honesty prompt.
+           Behaviour owned by createNow in app.js; styles in now.css. -->
+      <div id="now" hidden>
+        <p class="now-label">Now</p>
+        <p class="now-task"><span class="now-dot" id="now-dot"></span><span id="now-title"></span></p>
+        <p class="now-timer" id="now-timer" aria-live="off">00:00</p>
+        <p class="now-meta" id="now-meta"></p>
+        <div class="now-controls">
+          <button id="now-pause" class="btn" type="button">Pause</button>
+          <button id="now-stop" class="btn go" type="button">Stop &amp; record</button>
+        </div>
+        <div class="now-prompt" id="now-prompt" hidden>
+          <p class="now-prompt-q">Still on this? The clock paused while you were away.</p>
+          <div class="now-prompt-btns">
+            <button id="now-yes" class="btn go" type="button">Yes, keep going</button>
+            <button id="now-no" class="btn" type="button">No, stop here</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Conversation surface: UNBOXED (P11-01). No panel, no border, no name
+           badge. The words set straight onto the ground, below the eyes and
+           never overlapping them; #p-said carries the live-region announcement
+           on its own, so there is no speaker label to render. Holds the
+           typed/transcribed text + rendered input components. Markup filled by
+           the Surface component. -->
+      <!-- Conversation scrim (P11-03): while the plan is open, a reply, a
+           clarify question or the compose field has to be readable OVER the
+           plan. This is that legibility, as atmosphere rather than an object:
+           a feathered wash of the ground plus a backdrop blur, masked so it
+           fades out completely at every edge. It never draws a card, and it
+           only turns on when there is something to read. -->
+      <div class="convo-scrim" id="convo-scrim" aria-hidden="true"></div>
+
+      <div class="surface" id="surface">
+        <p class="said" id="p-said" aria-live="polite"></p>
+        <p class="why" id="p-why"></p>
+        <div id="p-extra"></div>
+      </div>
+    </div>
+
+    <!-- dock: the input trio (keyboard / mic / attach) + hint.
+         P11-02a: the hint used to name a way in ("or type") that had no door
+         on screen. Now every way in is a control you can see and press, and
+         all three are the same circle: keyboard opens the field, the mic
+         holds to speak, "+" adds a photo. The mic reads as the primary one
+         through colour and weight, not through size. -->
+    <div class="relative z-[5] flex flex-col items-center gap-3.5 pb-11 pt-2" id="dock">
+      <div class="dock-trio">
+        <button class="dock-btn" id="keys" type="button"
+                aria-label="Type your message" title="Type instead">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="2" y="6" width="20" height="12" rx="2.5"></rect>
+            <line x1="6" y1="10" x2="6" y2="10"></line>
+            <line x1="10" y1="10" x2="10" y2="10"></line>
+            <line x1="14" y1="10" x2="14" y2="10"></line>
+            <line x1="18" y1="10" x2="18" y2="10"></line>
+            <line x1="8" y1="14.5" x2="16" y2="14.5"></line>
+          </svg>
+        </button>
+        <button class="mic" id="mic" aria-label="Hold to speak, or press Enter to type">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="9" y="2" width="6" height="12" rx="3"></rect>
+            <path d="M5 11a7 7 0 0 0 14 0"></path>
+            <line x1="12" y1="18" x2="12" y2="22"></line>
+          </svg>
+        </button>
+        <button class="dock-btn" id="attach" type="button"
+                aria-label="Add a photo of a syllabus or timetable" title="Add a photo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+        </button>
+        <input type="file" id="attach-file" accept="image/*" hidden>
+      </div>
+      <div class="font-sans text-[13px] tracking-[0.04em] text-faint min-h-[16px] transition-colors" id="hint" aria-live="polite">
+        Hold the mic to talk, or tap the keyboard to type
+      </div>
+    </div>
+
+    <!-- Peek handle (P7-05): the one quiet manual affordance for the horizon —
+         a thin glowing line at the bottom edge. Click toggles; wheel-down /
+         swipe-up / typed intent open too. Replaces the old "Your week" button. -->
+    <button id="peek-handle" class="peek" aria-label="Show your plan" aria-expanded="false">
+      <span class="peek-line" aria-hidden="true"></span>
+      <!-- P11-03: with the plan open this is the visible way out, so it stops
+           being an unlabelled hairline and says what it does. -->
+      <span class="peek-word" aria-hidden="true">Pull down to close</span>
+    </button>
+  </div>
+
+  <!-- GSAP core + plugins (P7-01): vendored locally, no CDN. Loaded before
+       components.js/app.js so they can feature-detect window.gsap. Every use
+       in app code is guarded, so a failed load degrades to the CSS paths. -->
+  <script src="/static/vendor/gsap.min.js"></script>
+  <script src="/static/vendor/Flip.min.js"></script>
+  <script src="/static/vendor/SplitText.min.js"></script>
+  <script>
+    (function () {
+      if (!window.gsap || !window.gsap.registerPlugin) return;
+      var plugins = [];
+      if (window.SplitText) plugins.push(window.SplitText);
+      if (window.Flip) plugins.push(window.Flip);
+      if (plugins.length) window.gsap.registerPlugin.apply(window.gsap, plugins);
+    })();
+  </script>
+
+  <!-- Response-component library (P3-02): exposes window.FocusComponents.renderClarifyQuestion
+       for the clarify-answer loop wired in P3-04. Loaded before app.js so it's available. -->
+  <script src="/static/components.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

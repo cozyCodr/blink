@@ -1,0 +1,57 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: warden-api
+  labels:
+    cloud.google.com/location: us-central1
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+        run.googleapis.com/cpu-throttling: "true"
+        run.googleapis.com/startup-cpu-boost: "true"
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      serviceAccountName: warden-agent-sa@PROJECT_ID.iam.gserviceaccount.com
+      containers:
+      - image: gcr.io/PROJECT_ID/warden-api:latest
+        ports:
+        - name: http1
+          containerPort: 8080
+        resources:
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+        # Reference only. `deployment/deploy.sh` is the deploy path that actually
+        # runs; keep the two in step. No secret value is ever baked into the
+        # image: the only real secret is the OAuth client secret, mounted from
+        # Secret Manager and read by the runtime service account.
+        env:
+        - name: GOOGLE_GENAI_USE_VERTEXAI
+          value: "TRUE"
+        - name: BLINK_FIRESTORE
+          value: "1"
+        - name: FIRESTORE_DATABASE
+          value: "blink"
+        - name: GOOGLE_OAUTH_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: blink-oauth-client-secret
+        # Health route is /_health, not /healthz: Google's frontend reserves
+        # /healthz and answers it with its own 404 before Cloud Run sees it.
+        startupProbe:
+          httpGet:
+            path: /_health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /_health
+            port: 8080
+          periodSeconds: 15

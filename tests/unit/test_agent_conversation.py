@@ -1,0 +1,132 @@
+"""Day-2 units: voice scrubbing, the clarify-question fallback, and the agent tools.
+All offline: the LLM is either forced to the deterministic fallback or not called."""
+import unittest
+
+from src.agent import voice, conversation, llm
+from src.agent import workspace_registry as reg
+from src.agent.tools import (
+    get_capacity, propose_schedule_for_workspace, validate_plan, list_open_questions,
+)
+from src.types.entities import Commitment, Task, Constraint, Question, QuestionOption
+
+
+class _RaisingClient:
+    class _Models:
+        def generate_content(self, *a, **k):
+            raise RuntimeError("offline")
+    models = _Models()
+
+
+class TestVoice(unittest.TestCase):
+    def test_scrub_removes_dashes(self):
+        cleaned = voice.scrub("Let's plan the week — starting today")
+        self.assertNotIn("—", cleaned)
+        self.assertEqual(voice.find_tells(cleaned), [])
+
+    def test_find_tells_flags_ai_patterns(self):
+        tells = voice.find_tells("Certainly! It's not just a plan, it's a system — really.")
+        self.assertIn("dash", tells)
+        self.assertIn("antithesis", tells)
+        self.assertIn("certainly", tells)
+
+    def test_system_instruction_has_persona_and_rules(self):
+        from datetime import datetime
+        s = voice.build_system_instruction(datetime(2026, 8, 25, 9, 0), extra_context="Ready tasks: 3.")
+        self.assertIn("Blink", s)
+        self.assertIn("NEVER", s)
+        self.assertIn("Ready tasks: 3.", s)
+
+
+class TestClarifyAndTools(unittest.TestCase):
+    def setUp(self):
+        reg.stores.clear()
+        llm.set_client(_RaisingClient())  # force deterministic fallback
+        self.ws = "ws_day2"
+        self.store = reg.get_or_create_store(self.ws)
+
+    def tearDown(self):
+        llm.set_client(None)
+        reg.stores.clear()
+
+    def _seed(self):
+        self.store.add_commitment(Commitment(id="c1", workspace_id=self.ws, title="Report",
+                                             kind="client", stake=4))
+        self.store.add_task(Task(id="t1", workspace_id=self.ws, commitment_id="c1",
+                                title="Write intro", estimate_minutes=60, status="ready"))
+        self.store.add_constraint(Constraint(id="k1", workspace_id=self.ws, title="Standup",
+                                            kind="one_off",
+                                            starts_at="2026-08-25T09:00:00", ends_at="2026-08-25T09:30:00"))
+
+    def test_tools_report_success(self):
+        self._seed()
+        cap = get_capacity(self.ws)
+        self.assertEqual(cap["status"], "success")
+        self.assertGreater(cap["total_available_hours"], 0)
+
+        sched = propose_schedule_for_workspace(self.ws)
+        self.assertEqual(sched["status"], "success")
+        self.assertGreaterEqual(len(sched["blocks"]), 1)
+
+        val = validate_plan(self.ws)
+        self.assertEqual(val["status"], "success")
+
+    def test_ask_next_clarification_falls_back_deterministically(self):
+        # A stored missing-estimate question with options.
+        self.store.questions["q1"] = Question(
+            id="q1", workspace_id=self.ws, type="MISSING_ESTIMATE",
+            entity_ref={"task_id": "t1", "field": "estimate_minutes"},
+            prompt='How long will "Write intro" take?',
+            options=[QuestionOption(id="30m", label="30 min", value=30),
+                     QuestionOption(id="60m", label="1 hour", value=60),
+                     QuestionOption(id="split", label="Bigger", value="split")],
+            blocking=False,
+        )
+        out = conversation.ask_next_clarification(self.ws)
+        self.assertIsNotNone(out)
+        self.assertEqual(out["type"], "question")
+        self.assertEqual(out["question_id"], "q1")
+        # MISSING_ESTIMATE maps to a duration slider, options preserved.
+        self.assertEqual(out["input_type"], "duration")
+        self.assertIsNotNone(out["config"])
+        self.assertEqual(out["config"]["step"], 15)
+        self.assertEqual(out["config"]["unit"], "minutes")
+        self.assertTrue(out["allow_free_text"])          # the "split" option opens free text
+        self.assertEqual(len(out["options"]), 3)
+
+    def test_missing_deadline_maps_to_date(self):
+        self.store.questions["q2"] = Question(
+            id="q2", workspace_id=self.ws, type="MISSING_DEADLINE",
+            entity_ref={"task_id": "t1", "field": "deadline"},
+            prompt='When is "Write intro" due?',
+            options=[],
+            blocking=False,
+        )
+        out = conversation.ask_next_clarification(self.ws)
+        self.assertIsNotNone(out)
+        self.assertEqual(out["input_type"], "date")
+        self.assertIsNone(out["config"])
+
+    def test_overload_yes_no_maps_to_confirm(self):
+        self.store.questions["q3"] = Question(
+            id="q3", workspace_id=self.ws, type="OVERLOAD",
+            entity_ref={},
+            prompt="Should I drop the lowest-stake task this week?",
+            options=[],
+            blocking=False,
+        )
+        out = conversation.ask_next_clarification(self.ws)
+        self.assertIsNotNone(out)
+        self.assertEqual(out["input_type"], "confirm")
+
+    def test_ask_next_clarification_none_when_empty(self):
+        self.assertIsNone(conversation.ask_next_clarification(self.ws))
+
+    def test_respond_degrades_without_llm(self):
+        self._seed()
+        out = conversation.respond(self.ws, "what should I do today?")
+        self.assertEqual(out["type"], "message")
+        self.assertIn("state", out["text"].lower())
+
+
+if __name__ == "__main__":
+    unittest.main()

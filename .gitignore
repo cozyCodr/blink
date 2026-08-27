@@ -1,0 +1,65 @@
+# ── Secrets & local environment — NEVER commit ───────────────────
+.env
+.env.*
+!.env.example
+.secrets/
+*-sa.json
+*service_account*.json
+*service-account*.json
+*oauth-client*.json
+*client_secret*.json
+*.pem
+*.p12
+*.key
+
+# ── Python ───────────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ── Local databases & logs ───────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# ── Node / frontend ──────────────────────────────────────────────
+node_modules/
+
+# ── macOS / editor / local tooling ───────────────────────────────
+.DS_Store
+.vscode/
+.idea/
+.claude/settings.local.json
+
+# ── Private working docs — kept local, never published ───────────
+# The public repo ships code, architecture, and what the hackathon
+# rubric requires. Planning, strategy, research and any copy written
+# for the submission itself stay on this machine.
+/development-planner.md
+/AGENT.md
+/CLAUDE.md
+docs/WINNING_STRATEGY.md
+docs/ROADMAP.md
+docs/UI_RESEARCH.md
+docs/DEMO_SCRIPT.md
+docs/SUBMISSION.md
+docs/DEVPOST.md
+docs/BLOG_POST.md
+docs/SOCIAL_POST.md
+
+# ── Scratch ──────────────────────────────────────────────────────
+scratchpad/
+scratch/
+tmp/

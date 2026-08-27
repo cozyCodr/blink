@@ -1,0 +1,85 @@
+/* tokens.css — Design tokens (Nocturne palette) + base element styles. Loads FIRST.
+   Load order is index.html's link order; it preserves the pre-split cascade.
+   Rule: new styles go in the file that owns the feature, never back into one blob. */
+/* =====================================================================
+   Focus Agent — Nocturne design system
+   Ported from the focus-presence + focus-design prototypes.
+
+   Tokens live here (kept in sync with the tailwind.config in index.html)
+   so the CSS the utilities can't express — the capsule-eye glow keyframes
+   and the frosted BlurPanel — reads off the same variables.
+
+   Blink is Nocturne-only (P10-00): the Tide light palette was removed.
+   <html class="dark"> is PERMANENT — Tailwind's darkMode:'class' and the
+   `dark:` utilities in markup key off it, so it must never be removed.
+   ===================================================================== */
+
+/* ---- Nocturne (the only palette) ---- */
+:root {
+  --ground: #14181d;
+  --surface: #1d232b;
+  --text: #cad2d9;
+  --muted: #97a1aa;
+  --faint: #6c757e;
+  --line: #2a323b;
+  /* --control (P11-02d): the ground an INPUT CONTROL sits on. The kit used
+     to fill with --surface/--ground, which is fine on Nocturne but collapses
+     on a face whose ground IS white (lumen) — white chips on a white page,
+     told apart by one hairline. Every face re-declares this inside its own
+     data-face block in face.css, so a control always has a real ground of
+     its own. Declared here, per the tokens-live-in-tokens.css rule. */
+  --control: #232a33;
+  --accent: #8fbba3;
+  --accent-bright: #cdeeda;
+  /* the two "watch this" tones (P7-06: utilization gauge) */
+  --warm: #d9a05b;
+  --alert: #d07a63;
+
+  /* capsule-eye gradient + glow */
+  --eye-top: #cdeeda;
+  --eye-mid: #8fbba3;
+  --eye-bot: #6fa088;
+  --glow-rgb: 143, 187, 163;
+
+  /* page background wash */
+  --bg-grad: radial-gradient(120% 90% at 50% 38%, #1a2129 0%, var(--ground) 55%, #0f1216 100%);
+  --panel-bg: rgba(29, 35, 43, 0.62);
+  --panel-border: rgba(143, 187, 163, 0.18);
+  --panel-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+
+  --sans: "Hanken Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --serif: "Newsreader", Georgia, "Times New Roman", serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --glow: 0.55;      /* driven by [data-state] */
+
+  /* sizing (P7-09): the fixed sizes ride vars so the 640px breakpoint can
+     scale the whole presence for phones without touching layout rules */
+  --eye-w: 74px;
+  --eye-h: 108px;
+  --eyes-gap: 46px;
+  --face-gap: 46px;
+  --ambient-size: 640px;
+  --mic-size: 68px;
+  --park-scale: 0.42;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+/* Native widgets (date/time pickers, scrollbars, autofill) follow the FACE,
+   not a hardcode (P11-02d): Nocturne/capsule is the dark default here, and
+   lumen + folio each flip this to `light` inside their own data-face block
+   in face.css. Before P11-02 clarify.css pinned `color-scheme: dark` on the
+   picker inputs, so a light face opened a black calendar. */
+:root { color-scheme: dark; }
+
+body {
+  margin: 0;
+  background: var(--bg-grad);
+  color: var(--text);
+  font-family: var(--sans);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  transition: background 0.5s ease, color 0.4s ease;
+}
+

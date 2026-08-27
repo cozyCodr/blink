@@ -1,0 +1,85 @@
+/* responsive.css — Mobile breakpoint + accessibility overrides. Loads AFTER the sections it adjusts.
+   Load order is index.html's link order; it preserves the pre-split cascade.
+   Rule: new styles go in the file that owns the feature, never back into one blob. */
+/* ============ Mobile pass (P7-09) ============
+   The presence scales down through the sizing vars declared in :root, so
+   every rule that reads them (eyes, ambient, mic, park) adapts at once.
+   The stage rhythm tightens too, so eyes / surface / dock never overlap
+   at phone heights (375x667). measureRise() reads layout at runtime, so
+   the park lands correctly at the smaller scale without JS changes. */
+@media (max-width: 640px) {
+  :root {
+    --eye-w: 56px;
+    --eye-h: 84px;
+    --eyes-gap: 32px;
+    --face-gap: 34px;
+    --ambient-size: 70vw;
+    --mic-size: 56px;
+    --park-scale: 0.5;   /* 84px * .5 still reads clearly in the top band */
+  }
+  /* the glint and the fixed-size flourishes track the smaller capsule
+     (face-identity rules carry the capsule scope — see face.css P9-00a) */
+  :where(html[data-face="capsule"]) .eye .glint { top: 29px; left: 20px; width: 16px; height: 16px; }
+  .mic svg { width: 22px; height: 22px; }
+  :where(html[data-face="capsule"]) .eyes.spread { gap: 44px; }
+  :where(html[data-face="capsule"]) .eyes.emote-heart .eye.right { margin-left: -20px; }
+  :where(html[data-face="capsule"]) [data-state="listening"] .face::after { width: 220px; height: 120px; }
+  /* lumen (P10-01): the 16px dots stay, but the wide pair and its emotion
+     spreads tighten so the rig fits a phone. Plain html[...] on the var
+     override for the same reason as lumen's re-token block in face.css —
+     it must out-specify the :root override above. */
+  html[data-face="lumen"] {
+    --eye-w: 60px;
+    --eye-h: 60px;
+    --eyes-gap: 76px;
+    --park-scale: 0.55;
+  }
+  :where(html[data-face="lumen"]) .eyes.spread { gap: 100px; }
+  :where(html[data-face="lumen"]) .eyes.emote-worried { gap: 128px; }
+  :where(html[data-face="lumen"]) [data-state="listening"] .face::after { width: 270px; height: 130px; }
+  :where(html[data-face="lumen"]) .face::before { width: 200px; height: 34px; top: calc(100% + 24px); }
+  /* folio (P10-02): the ink marks tighten to phone scale; the fixed-size
+     flourishes (ink wash, listening ring, stamp, scribble) track them.
+     Plain html[...] on the var override for the same reason as lumen's. */
+  html[data-face="folio"] {
+    --eye-w: 58px;
+    --eye-h: 70px;
+    --eyes-gap: 62px;
+    --park-scale: 0.55;
+  }
+  :where(html[data-face="folio"]) .eyes.spread { gap: 82px; }
+  :where(html[data-face="folio"]) [data-state="listening"] .face::after { width: 240px; height: 132px; }
+  :where(html[data-face="folio"]) .face::before { width: 190px; height: 30px; top: calc(100% + 22px); }
+  :where(html[data-face="folio"]) .eyes.emote-celebrate::after { width: 46px; height: 46px; top: -64px; margin-left: -23px; }
+  :where(html[data-face="folio"]) [data-state="thinking"] .eyes::before { top: -42px; width: 32px; height: 25px; margin-left: -16px; }
+  /* stage rhythm: a shorter lower band, tighter surface, echo rides along */
+  .stage { padding-bottom: min(34vh, 300px); }
+  .surface { bottom: 14px; max-height: min(34vh, 300px); padding: 8px 2px 12px; }
+  .surface .said { font-size: 18px; }
+  .echo { bottom: calc(14px + min(34vh, 300px) + 10px); font-size: 13px; }
+  /* folio's hand comes down a size on a narrow screen. The line-height it
+     inherits from face.css is unitless, so it scales with the font on its
+     own — the old pinned 32px only existed to match the ruled-line pitch,
+     which was removed with the rules themselves (2026-08-27). */
+  :where(html[data-face="folio"]) .surface p.said { font-size: 24px; }
+  #horizon { padding-top: 88px; }
+}
+
+/* ============ Accessibility pass (P7-09) ============ */
+/* consistent focus rings on the controls that lacked one — the rest of the
+   kit (chips, pills, segs, switches) already carries its own ring */
+.mic:focus-visible, .btn:focus-visible, .peek:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+/* reduced transparency: the frosted surfaces get solid-enough grounds.
+   The conversation surface dropped out of this list with P11-01: it has no
+   frost left to reduce. Capsule's scrim behind the words is opaque ground
+   colour feathered to nothing, so reduced transparency has nothing to fix. */
+@media (prefers-reduced-transparency: reduce) {
+  .modal-overlay {
+    background: rgba(8, 12, 16, 0.72);
+    backdrop-filter: none; -webkit-backdrop-filter: none;
+  }
+  .chip-btn { background: var(--surface); backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+

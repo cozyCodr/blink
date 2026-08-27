@@ -1,0 +1,29 @@
+{
+  "name": "warden",
+  "version": "0.1.0",
+  "description": "Autonomous long-horizon goal and time arbitration agent",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/**/*.test.js",
+    "test:ts": "tsx --test tests/**/*.test.ts src/**/*.test.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "keywords": [
+    "agent",
+    "scheduling",
+    "gemini",
+    "hackathon"
+  ],
+  "author": "Bright",
+  "license": "MIT",
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.4",
+    "tsx": "^4.19.0"
+  }
+}

@@ -1,0 +1,90 @@
+/* now.css — The Now (P9-07): focus-session surface. Loads LAST (after clarify.css).
+   Load order is index.html's link order; it preserves the cascade.
+   Rule: new styles go in the file that owns the feature, never back into one blob.
+
+   Owns: the #now surface (task title + commitment dot + the calm mono timer +
+   pause/stop + the idle-honesty prompt). The eyes' `focused` ambient state is
+   FACE identity and lives in face.css under the capsule scope, not here.
+   Design intent: Nocturne-quiet. Mono numerals, muted color, no red, no
+   alarms — a clock that keeps you company, not one that watches you. */
+
+#now {
+  position: absolute; left: 50%; bottom: 48px;
+  transform: translateX(-50%);
+  width: min(560px, 92vw);
+  z-index: 6;
+  text-align: center;
+  font-family: var(--sans);
+}
+
+#now .now-label {
+  margin: 0 0 6px;
+  font-size: 12px; font-weight: 600;
+  letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--accent);
+}
+
+#now .now-task {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: clamp(18px, 2.6vw, 24px);
+  color: var(--text);
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+}
+#now .now-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--faint); flex: none;
+}
+
+/* The timer: big, mono, calm. Tabular numerals so the digits don't shuffle. */
+#now .now-timer {
+  margin: 10px 0 2px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: clamp(44px, 8vw, 64px);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  animation: nowBreathe 6s ease-in-out infinite;   /* the quiet "alive" tick */
+}
+@keyframes nowBreathe {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.82; }
+}
+/* paused (user pause, or the idle question is up): the clock visibly rests */
+#now.paused .now-timer { animation: none; opacity: 0.45; }
+
+#now .now-meta {
+  margin: 0 0 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--faint);
+  min-height: 15px;
+}
+
+#now .now-controls {
+  display: flex; justify-content: center; gap: 10px;
+}
+
+/* Idle honesty (gap > 5 min): a gentle question, never an accusation. */
+#now .now-prompt { margin-top: 16px; }
+#now .now-prompt-q {
+  margin: 0 0 10px;
+  font-size: 14px;
+  color: var(--muted);
+}
+#now .now-prompt-btns {
+  display: flex; justify-content: center; gap: 10px;
+}
+
+/* Reduced motion: the breathe stands down; the numerals still update each
+   second (createNow's 1s interval carries the text-only path). */
+@media (prefers-reduced-motion: reduce) {
+  #now .now-timer { animation: none; }
+}
+
+/* Phones (mirrors the 640px pass in responsive.css): tighter lower band. */
+@media (max-width: 640px) {
+  #now { bottom: 28px; }
+  #now .now-timer { font-size: clamp(38px, 12vw, 52px); }
+}

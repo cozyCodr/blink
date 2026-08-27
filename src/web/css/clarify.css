@@ -1,0 +1,266 @@
+/* clarify.css — Clarify component kit (the 14 input types). Loads seventh of
+   the eight, after responsive.css and before now.css (P11-07: it used to say
+   "loads LAST", which stopped being true the day now.css was appended).
+   Load order is index.html's link order; it preserves the pre-split cascade.
+   Rule: new styles go in the file that owns the feature, never back into one blob. */
+/* =====================================================================
+   Response-component library (P3-02)
+   Ported from the focus-design study into the app tokens, so every control
+   reads off the same Nocturne variables. Consumed by components.js via
+   renderClarifyQuestion(). Selected controls use var(--ground) for
+   on-accent text — the same trick as .btn.go — which stays legible on the
+   sage accent (dark ground on light sage).
+   ===================================================================== */
+
+.clarify { display: flex; flex-direction: column; gap: 12px; }
+.clarify-ask {
+  font-family: var(--serif); font-size: 18px; line-height: 1.35;
+  color: var(--text); margin: 0;
+}
+.clarify-why { font-size: 12px; color: var(--faint); margin: -4px 0 2px; }
+.clarify-control { display: flex; flex-direction: column; gap: 14px; }
+.clarify-readout {
+  font: 500 12px/1.5 var(--mono); color: var(--muted); min-height: 17px;
+  padding-top: 12px; border-top: 1px dashed var(--line);
+}
+.clarify-readout b { color: var(--accent); font-weight: 600; }
+
+/* ---- chips (single / multi / duration / time_bucket) ---- */
+.clarify .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.clarify .chip {
+  font: 500 13px/1 var(--sans); padding: 9px 14px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--control); color: var(--text);
+  cursor: pointer; user-select: none;
+  transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease, transform 0.16s ease;
+}
+.clarify .chip:hover { border-color: var(--accent); transform: translateY(-1px); }
+.clarify .chip:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(var(--glow-rgb), 0.20); }
+.clarify .chip.on { background: var(--accent); color: var(--ground); border-color: var(--accent); }
+.clarify .chip .chk { display: none; margin-right: 5px; }
+.clarify .chip.on .chk { display: inline; }
+
+/* ---- rows + connectors ---- */
+.clarify .rowflex { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.clarify .conj { color: var(--faint); font-size: 13px; }
+
+/* ---- stepper (duration + duration_range) ---- */
+.clarify .stepper {
+  display: inline-flex; align-items: center; border: 1px solid var(--line);
+  border-radius: 10px; overflow: hidden; background: var(--control);
+}
+.clarify .stepper button {
+  border: 0; background: transparent; color: var(--text);
+  width: 40px; height: 42px; font-size: 20px; cursor: pointer; transition: background 0.15s;
+}
+.clarify .stepper button:hover { background: rgba(var(--glow-rgb), 0.14); }
+.clarify .stepper .val { min-width: 92px; text-align: center; font: 500 15px/1 var(--mono); color: var(--text); }
+
+/* ---- scale dots (scale_1_5) ---- */
+.clarify .scale { display: flex; gap: 10px; align-items: center; }
+.clarify .dot {
+  width: 30px; height: 30px; border-radius: 50%; border: 1.5px solid var(--line);
+  cursor: pointer; display: grid; place-items: center; background: transparent;
+  font: 600 12px/1 var(--sans); color: var(--faint); transition: all 0.14s;
+}
+.clarify .dot:hover { border-color: var(--accent); }
+.clarify .dot:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(var(--glow-rgb), 0.20); }
+.clarify .dot.on { background: var(--accent); border-color: var(--accent); color: var(--ground); }
+
+/* ---- weekday pills (recurrence) ---- */
+.clarify .week { display: flex; gap: 6px; }
+.clarify .day {
+  width: 38px; height: 38px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--control); cursor: pointer; font: 600 12px/1 var(--sans);
+  color: var(--muted); transition: all 0.14s;
+}
+.clarify .day:hover { border-color: var(--accent); }
+.clarify .day:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(var(--glow-rgb), 0.20); }
+.clarify .day.on { background: var(--accent); border-color: var(--accent); color: var(--ground); }
+
+/* ---- native date/time fields ---- */
+.clarify .nat {
+  font: 400 14px/1 var(--sans); color: var(--text); background: var(--control);
+  border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+}
+.clarify .nat:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(var(--glow-rgb), 0.18); }
+/* P11-02d fixed the black-picker bug: `color-scheme: dark` used to be
+   hardcoded here, so a native date/time picker opened as a black widget on
+   lumen's white and folio's paper. color-scheme now rides the FACE (a dark
+   default in tokens.css, flipped to light inside lumen's and folio's own
+   data-face blocks in face.css), so the picker always matches the page. */
+
+/* ---- range slider (number) ---- */
+.clarify input[type="range"] {
+  -webkit-appearance: none; appearance: none; width: 100%; height: 4px;
+  border-radius: 4px; background: var(--line); outline: none;
+}
+.clarify input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%;
+  background: var(--accent); cursor: pointer; border: 3px solid var(--control);
+  box-shadow: var(--panel-shadow); transition: transform 0.12s;
+}
+.clarify input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.12); }
+.clarify input[type="range"]::-moz-range-thumb {
+  width: 20px; height: 20px; border-radius: 50%; background: var(--accent);
+  cursor: pointer; border: 3px solid var(--control);
+}
+
+/* ---- confirm buttons: reuse .btn / .btn.go / .btn.ghost from above ---- */
+.clarify .confirm { display: flex; gap: 10px; }
+
+/* ---- reveal (exact-time / opens_free_text) ---- */
+.clarify .reveal { display: none; margin-top: 2px; }
+.clarify .reveal.show { display: flex; gap: 10px; align-items: center; }
+.clarify .reveal .field { flex: 1; }
+
+/* ---- course cards (P9-04 "Blink found these", input_type: courses) ----
+   Owned here because the cards are a clarify input control: they render in
+   the ask panel via renderClarifyQuestion and share the kit's chip/readout
+   language. Card text is live-search data; links open in a new tab. */
+.clarify .courses-label {
+  font: 600 11px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--faint);
+}
+.clarify .courses { display: flex; flex-direction: column; gap: 10px; }
+.clarify .course-card {
+  display: flex; gap: 12px; align-items: flex-start; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px;
+  background: var(--control);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.clarify .course-card:hover { border-color: var(--accent); }
+.clarify .course-card:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--glow-rgb), 0.20);
+}
+.clarify .course-card:has(input:checked) { border-color: var(--accent); }
+.clarify .course-card input[type="checkbox"] {
+  margin-top: 3px; width: 16px; height: 16px; flex: 0 0 auto;
+  accent-color: var(--accent); cursor: pointer;
+}
+.clarify .course-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.clarify .course-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.clarify .course-title { font: 600 14px/1.35 var(--sans); color: var(--text); }
+.clarify .course-provider { font: 500 12px/1 var(--sans); color: var(--muted); }
+.clarify .course-desc { font: 400 13px/1.45 var(--sans); color: var(--muted); margin: 0; }
+.clarify .course-cite {
+  display: flex; gap: 10px; align-items: baseline;
+  font: 500 11px/1.4 var(--mono); color: var(--faint);
+}
+.clarify .course-link { color: var(--accent); text-decoration: none; }
+.clarify .course-link:hover { text-decoration: underline; }
+.clarify .course-link:focus-visible {
+  outline: none; border-radius: 4px;
+  box-shadow: 0 0 0 3px rgba(var(--glow-rgb), 0.20);
+}
+
+/* =====================================================================
+   The centred column (user request, 2026-08-27)
+   The reply and its why-line centre (conversation.css), and the kit centres
+   with them so one exchange reads as ONE centred column rather than centred
+   prose sitting on top of a left-flushed form.
+
+   The rule is: centre the GROUPS, never the words inside a control that has
+   its own layout. `.clarify` is already a flex column, so `align-items:
+   center` centres each group as a block, and the row-level containers get
+   `justify-content: center` so a chip row centres as a ROW and still wraps
+   normally at narrow widths. Everything that owns real internal alignment —
+   a course card, anything you type into — is reset back to left below.
+   ===================================================================== */
+.clarify { align-items: center; text-align: center; }
+.clarify > * { max-width: 100%; }
+/* the control block keeps the column's full width and centres its rows
+   inside it, so the dashed divider below spans the column instead of
+   shrink-wrapping to whichever row happened to be widest */
+.clarify-control { align-items: center; align-self: stretch; }
+
+/* the dashed rule keeps spanning the column: shrunk to its own text width it
+   read as a stray underline, and its job here is to divide. */
+.clarify-readout { align-self: stretch; text-align: center; }
+
+/* rows centre as rows; each item inside them is untouched */
+.clarify .chips,
+.clarify .rowflex,
+.clarify .scale,
+.clarify .week,
+.clarify .confirm { justify-content: center; }
+
+/* the free-text reveal keeps the column's width so the field stays a line to
+   write on, not a stub sized to its placeholder */
+.clarify .reveal.show { align-self: stretch; justify-content: center; }
+
+/* the slider is a full-width track, not a group to centre */
+.clarify input[type="range"] { align-self: stretch; }
+
+/* WHAT YOU TYPE STAYS LEFT. Inputs inherit text-align, so every writable
+   control has to opt out or your own words would drift as you type. */
+.clarify .field,
+.clarify .nat,
+.clarify textarea,
+.clarify input[type="text"],
+.clarify input[type="number"] { text-align: left; }
+
+/* Course cards (P9-04): the STACK spans the column and each card keeps its
+   own left-aligned title / provider / description. A card is a small
+   document, and centring three ragged lines inside a bordered box is how you
+   make a search result unreadable. */
+.clarify .courses { align-self: stretch; }
+.clarify .course-card { text-align: left; }
+
+/* =====================================================================
+   Kit motion (P11-02e) — SHARED choreography, no face identity here.
+   Each face skins what a control looks like (face.css); the beats below
+   are the same in all three, so the kit always moves like one thing:
+
+     1. the prompt writes on   (typeInto, app.js)
+     2. the control fades UP   (the #p-extra veil, conversation.css, +120ms)
+     3. the options DEAL IN    (here: 40ms apart, in reading order)
+     4. answering COLLAPSES    (here: the kit folds toward the margin note)
+
+   Step 4 is the one that fixes a real wart: before this, answering left the
+   spent widget sitting there until the next mode swapped it out, so for a
+   beat you were looking at a dead control you could no longer use.
+   ===================================================================== */
+/* fill-mode is `backwards`, NOT `both`, and that is load-bearing: the deal
+   needs the hidden pose during its stagger delay, but must let go of
+   transform the instant it lands, or the frozen final frame would out-rank
+   every :hover lift in the kit for the rest of the question's life. */
+.clarify :is(.chips, .week, .scale, .courses, .confirm) > * {
+  animation: clarifyDeal 0.26s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+.clarify :is(.chips, .week, .scale, .courses, .confirm) > :nth-child(1)  { animation-delay: 0ms; }
+.clarify :is(.chips, .week, .scale, .courses, .confirm) > :nth-child(2)  { animation-delay: 40ms; }
+.clarify :is(.chips, .week, .scale, .courses, .confirm) > :nth-child(3)  { animation-delay: 80ms; }
+.clarify :is(.chips, .week, .scale, .courses, .confirm) > :nth-child(4)  { animation-delay: 120ms; }
+.clarify :is(.chips, .week, .scale, .courses, .confirm) > :nth-child(5)  { animation-delay: 160ms; }
+.clarify :is(.chips, .week, .scale, .courses, .confirm) > :nth-child(6)  { animation-delay: 200ms; }
+.clarify :is(.chips, .week, .scale, .courses, .confirm) > :nth-child(7)  { animation-delay: 240ms; }
+.clarify :is(.chips, .week, .scale, .courses, .confirm) > :nth-child(n+8) { animation-delay: 280ms; }
+@keyframes clarifyDeal {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* The collapse: app.js marks the wrapper .answered the moment a value is
+   committed, and the kit folds up and to the right, toward the margin note
+   where the answer is already appearing. Purely visual: the request is
+   already on its way, and pointer-events go first so nothing can be
+   half-clicked on the way out. */
+.clarify.answered {
+  pointer-events: none;
+  transform-origin: 100% 0;
+  animation: clarifyCollapse 0.26s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+@keyframes clarifyCollapse {
+  from { opacity: 1; transform: translate(0, 0) scale(1); }
+  to   { opacity: 0; transform: translate(16px, -12px) scale(0.94); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .clarify .chip, .clarify .dot, .clarify .day, .clarify .course-card,
+  .clarify input[type="range"]::-webkit-slider-thumb { transition: none !important; }
+  /* the beats still HAPPEN, they just don't travel: options land at once,
+     and an answered kit disappears instead of flying off. */
+  .clarify :is(.chips, .week, .scale, .courses, .confirm) > * { animation: none; }
+  .clarify.answered { animation: none; opacity: 0; }
+}

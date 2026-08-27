@@ -1,0 +1,11 @@
+google-adk
+google-genai
+google-cloud-texttospeech
+google-cloud-firestore
+pydantic
+pydantic-settings
+fastapi
+uvicorn
+python-dotenv
+pytest
+pytest-asyncio

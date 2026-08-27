@@ -1,0 +1,34 @@
+# What NOT to upload to Cloud Build. Critical: keep secrets and local env out.
+# (The Dockerfile only COPYs pyproject.toml, requirements.txt, src/, docs/.)
+
+# Secrets & local environment — never upload
+.secrets/
+.env
+.env.local
+*-sa.json
+*service_account*.json
+
+# Python / dev cruft
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Node / frontend build cruft
+node_modules/
+dist/
+build/
+
+# VCS / editor / OS
+.git/
+.gitignore
+.gitattributes
+.vscode/
+.DS_Store
+
+# Not needed inside the container image
+tests/
+scratchpad/
