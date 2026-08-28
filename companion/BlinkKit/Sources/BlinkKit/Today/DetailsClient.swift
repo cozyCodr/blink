@@ -63,6 +63,40 @@ public struct CheckinResolveResponse: Decodable, Sendable, Equatable {
     }
 }
 
+/// What `POST /blocks/{id}/log-time` answers with. Decode-only, for the same
+/// reason `CheckinResolveResponse` is: it is the only shape a `RecordedOutcome`
+/// can be read from, and a decode-only value cannot be forged from a literal.
+///
+/// `totalMinutes` is the ACCUMULATED measured total the server now holds on the
+/// block (`accumulate_timed_minutes`, src/core/progress.py), not the delta this
+/// device just sent. It is the number the focus screen shows as "saved", and it
+/// is the server's number by construction: the app copies it, never computes it.
+public struct LogTimeResponse: Decodable, Sendable, Equatable {
+    public let blockID: String
+    /// The measured minutes on the block AFTER this write. Server-authoritative.
+    public let totalMinutes: Int
+    /// The planned span of the block, in minutes.
+    public let plannedMinutes: Int
+    /// Whether this write asked the server to RESOLVE the block. A progress
+    /// write (`false`) accumulates minutes and leaves the status `planned`.
+    public let complete: Bool
+    /// The block's status after the write. `planned` for a progress write;
+    /// `done`/`partial` for a completion, resolved by arithmetic server-side.
+    public let blockStatus: BlockStatus
+    /// Always `.timer` on this endpoint: these are measured minutes, and a
+    /// measured actual beats any later self-report.
+    public let source: ActualSource
+
+    enum CodingKeys: String, CodingKey {
+        case blockID = "block_id"
+        case totalMinutes = "total_minutes"
+        case plannedMinutes = "planned_minutes"
+        case complete
+        case blockStatus = "block_status"
+        case source
+    }
+}
+
 public protocol DetailsReading: Sendable {
     func details(for session: BlinkSession) async throws -> WorkspaceDetails
     func resolve(
@@ -70,6 +104,18 @@ public protocol DetailsReading: Sendable {
         as outcome: CheckinOutcome,
         for session: BlinkSession
     ) async throws -> CheckinResolveResponse
+    /// Write one measured stint of timer minutes against a block. `elapsedMinutes`
+    /// is the DELTA since the last successful write, because the server
+    /// accumulates on top of the timer total it already holds. `complete: true`
+    /// asks the server to resolve the block done/partial. See FocusController for
+    /// how the delta is kept in step with the server's echoed total so the two
+    /// cannot drift.
+    func logTime(
+        block blockID: String,
+        elapsedMinutes: Int,
+        complete: Bool,
+        for session: BlinkSession
+    ) async throws -> LogTimeResponse
 }
 
 /// `GET /v1/workspaces/{id}/details` and `POST …/checkin/resolve`, both with
@@ -139,6 +185,39 @@ public struct BlinkDetailsClient: DetailsReading {
             return try JSONDecoder().decode(CheckinResolveResponse.self, from: data)
         } catch {
             detailsLog("checkin/resolve: 200 but undecodable")
+            throw DetailsError.refused(status: 200)
+        }
+    }
+
+    public func logTime(
+        block blockID: String,
+        elapsedMinutes: Int,
+        complete: Bool,
+        for session: BlinkSession
+    ) async throws -> LogTimeResponse {
+        let url = baseURL
+            .appendingPathComponent("v1/workspaces")
+            .appendingPathComponent(session.workspaceID)
+            .appendingPathComponent("blocks")
+            .appendingPathComponent(blockID)
+            .appendingPathComponent("log-time")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(session.token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 15
+        // The field is `elapsed_minutes` (LogTimeRequest, src/api/server.py:246),
+        // never below zero. `complete` resolves the block when the session ends.
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "elapsed_minutes": max(0, elapsedMinutes),
+            "complete": complete
+        ])
+
+        let data = try await send(request, label: "log-time")
+        do {
+            return try JSONDecoder().decode(LogTimeResponse.self, from: data)
+        } catch {
+            detailsLog("log-time: 200 but undecodable")
             throw DetailsError.refused(status: 200)
         }
     }

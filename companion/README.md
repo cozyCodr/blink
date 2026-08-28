@@ -6,20 +6,69 @@ are kept. Spec: `docs/COMPANION_ARCHITECTURE.md` and `docs/COMPANION_SCREENS.md`
 Planner item P15-01 built the skeleton: the Xcode project, the shared BlinkKit
 package, and the face token layer. P15-02 added the eyes and the whole emotion
 vocabulary. P15-03 put sign-in in front of everything (screen S7). P15-04 put
-the real product behind the gate: **S1 Today** and **S5 Celebration**. The
-rehearsal screen is still one tap away, behind the DEBUG-only "beats" door in
-Today's top-right corner.
+the real product behind the gate: **S1 Today** and **S5 Celebration**. P15-05
+added the notification layer (S2). P15-06 built the focus timer, its Live
+Activity and both Dynamic Island presentations (**S3**), and added the real
+"Start focus session" button to Today. The rehearsal screen is still one tap
+away, behind the DEBUG-only "beats" door in Today's top-right corner.
 
 ## Layout
 
 ```
 companion/
-├── BlinkCompanion.xcodeproj     the app project (one target: Blink)
+├── BlinkCompanion.xcodeproj     the app project (targets: Blink, BlinkActivity)
 ├── Blink/                       the iOS app sources
+├── BlinkActivity/               WidgetKit/ActivityKit extension: the Live Activity (P15-06)
 └── BlinkKit/                    local Swift package: tokens, motion, models
     ├── Sources/BlinkKit/Eyes/   the eye rig (P15-02)
-    └── Sources/BlinkKit/Today/  the clock, the payload, the state (P15-04)
+    ├── Sources/BlinkKit/Today/  the clock, the payload, the state (P15-04)
+    └── Sources/BlinkKit/Focus/  the timer source of truth + Live Activity (P15-06)
 ```
+
+## The focus session (P15-06)
+
+```
+BlinkKit/Sources/BlinkKit/Focus/
+├── FocusController.swift            the timer source of truth: one elapsed, one persisted total
+├── LogTimeClient.swift              (in Today/DetailsClient.swift) POST /blocks/{id}/log-time
+├── FocusActivityAttributes.swift    the ActivityKit ContentState both surfaces read
+├── FocusLiveActivityController.swift start / update / end the Live Activity (device-driven)
+├── FocusHandoff.swift               the lock-screen Done button's channel back into the app
+└── FocusIntents.swift               EndFocusIntent (LiveActivityIntent, runs in the app process)
+
+Blink/FocusScreen.swift              S3 in-app: elapsed, ring, Pause/Done, idle "Still going?"
+BlinkActivity/BlinkFocusLiveActivity.swift  lock screen + Dynamic Island (compact + expanded)
+```
+
+**The number shown is the number written.** The live elapsed is a CLOCK and is
+only ever presented as one. The only "saved" number either the app or the Live
+Activity shows is `FocusController.savedMinutes`, and its ONLY writer is
+`applyWriteResult`, which copies `total_minutes` off a `log-time` response. No
+line sets a saved total from the local clock. A failed write puts `persist` into
+`.unsaved`, the screen says the minutes are not saved yet, and it retries; it
+never shows a total it has not persisted. S5 is reached only through the third
+`RecordedOutcome.recorded(from: LogTimeResponse)` factory, which requires the
+server to have resolved the block (`complete: true`, `block_status` done/partial).
+
+**Idle never counts silently.** Past the planned end with no interaction for the
+grace window, the controller freezes accrual (capped at the planned span, so the
+silent overrun is never credited) and asks "Still going?". Yes resumes; I stopped
+finishes with the capped, measured minutes.
+
+**Reconcile before showing a number.** Re-opening a running block hands the
+controller the block's server-held `actual_minutes` (timer source) as the floor;
+it starts a fresh measured segment on top and never presents a locally-guessed
+elapsed from a run it did not witness.
+
+The ActivityKit extension is target `BlinkActivity`
+(`com.apple.product-type.app-extension`, embedded in the app's PlugIns). The app
+declares `NSSupportsLiveActivities` via `INFOPLIST_KEY_NSSupportsLiveActivities`.
+Updates are device-driven only; **push tokens are out of scope** (architecture
+§4, Gap 4). The lock screen and Dynamic Island render in the iOS 26.4 simulator.
+
+DEBUG doors, for exercising S3 without waiting out a real span:
+`-blinkFocusIdleGraceSeconds N`, `-blinkFocusDebugPlannedSeconds N`,
+`-blinkFocusFailNextWrite YES`.
 
 ## Today and the celebration (P15-04)
 

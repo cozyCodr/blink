@@ -8,7 +8,8 @@ import Foundation
 // dated by the clock the server published.
 
 /// One planned session, ready to render.
-public struct SessionCard: Equatable, Sendable {
+public struct SessionCard: Equatable, Sendable, Identifiable {
+    public var id: String { blockID }
     public let blockID: String
     /// The task's title. Nil-safe at the source: a block whose task is missing
     /// from the payload renders without a title rather than with an invented
@@ -18,6 +19,12 @@ public struct SessionCard: Equatable, Sendable {
     public let startsAt: Date
     public let endsAt: Date
     public let plannedMinutes: Int
+    /// The measured minutes the SERVER already holds for this block, when the
+    /// source is the timer. This is the reconcile floor a re-opened session
+    /// starts from (S3 "Backgrounded / killed"): the device never guesses an
+    /// elapsed from a run it did not witness. nil when the block has no timer
+    /// minutes yet, or when its actual came from a self-report.
+    public let resumedTimerMinutes: Int?
 }
 
 /// A block that has ended with no answer yet.
@@ -180,7 +187,8 @@ public struct TodayState: Equatable, Sendable {
             commitment: details.commitment(for: block)?.title,
             startsAt: block.startsAt,
             endsAt: block.endsAt,
-            plannedMinutes: block.plannedMinutes
+            plannedMinutes: block.plannedMinutes,
+            resumedTimerMinutes: block.actualSource == .timer ? block.actualMinutes : nil
         )
     }
 }

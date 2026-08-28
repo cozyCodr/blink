@@ -8,15 +8,53 @@
 
 /* Begin PBXBuildFile section */
 		A1B2C3D40000000000000012 /* BlinkKit in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D40000000000000011 /* BlinkKit */; };
+		A1B2C3D40000000000000028 /* BlinkKit in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D40000000000000027 /* BlinkKit */; };
+		A1B2C3D40000000000000029 /* BlinkActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000000000000020 /* BlinkActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A1B2C3D4000000000000002C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1B2C3D40000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A1B2C3D40000000000000022;
+			remoteInfo = BlinkActivity;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A1B2C3D4000000000000002A /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				A1B2C3D40000000000000029 /* BlinkActivity.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		A1B2C3D40000000000000004 /* Blink.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Blink.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1B2C3D40000000000000020 /* BlinkActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BlinkActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A1B2C3D4000000000000000F /* Blink */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = Blink; sourceTree = "<group>"; };
+		A1B2C3D40000000000000021 /* BlinkActivity */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (A1B2C3D4000000000000002F /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = BlinkActivity; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		A1B2C3D4000000000000002F /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A1B2C3D40000000000000022 /* BlinkActivity */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A1B2C3D40000000000000007 /* Frameworks */ = {
@@ -27,6 +65,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A1B2C3D40000000000000025 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1B2C3D40000000000000028 /* BlinkKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -34,6 +80,7 @@
 			isa = PBXGroup;
 			children = (
 				A1B2C3D4000000000000000F /* Blink */,
+				A1B2C3D40000000000000021 /* BlinkActivity */,
 				A1B2C3D40000000000000013 /* BlinkKit */,
 				A1B2C3D40000000000000003 /* Products */,
 			);
@@ -43,6 +90,7 @@
 			isa = PBXGroup;
 			children = (
 				A1B2C3D40000000000000004 /* Blink.app */,
+				A1B2C3D40000000000000020 /* BlinkActivity.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -64,10 +112,12 @@
 				A1B2C3D40000000000000006 /* Sources */,
 				A1B2C3D40000000000000007 /* Frameworks */,
 				A1B2C3D40000000000000008 /* Resources */,
+				A1B2C3D4000000000000002A /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				A1B2C3D4000000000000002B /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				A1B2C3D4000000000000000F /* Blink */,
@@ -80,6 +130,29 @@
 			productReference = A1B2C3D40000000000000004 /* Blink.app */;
 			productType = "com.apple.product-type.application";
 		};
+		A1B2C3D40000000000000022 /* BlinkActivity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1B2C3D40000000000000023 /* Build configuration list for PBXNativeTarget "BlinkActivity" */;
+			buildPhases = (
+				A1B2C3D40000000000000024 /* Sources */,
+				A1B2C3D40000000000000025 /* Frameworks */,
+				A1B2C3D40000000000000026 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				A1B2C3D40000000000000021 /* BlinkActivity */,
+			);
+			name = BlinkActivity;
+			packageProductDependencies = (
+				A1B2C3D40000000000000027 /* BlinkKit */,
+			);
+			productName = BlinkActivity;
+			productReference = A1B2C3D40000000000000020 /* BlinkActivity.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -91,6 +164,9 @@
 				LastUpgradeCheck = 2640;
 				TargetAttributes = {
 					A1B2C3D40000000000000005 = {
+						CreatedOnToolsVersion = 26.4;
+					};
+					A1B2C3D40000000000000022 = {
 						CreatedOnToolsVersion = 26.4;
 					};
 				};
@@ -113,6 +189,7 @@
 			projectRoot = "";
 			targets = (
 				A1B2C3D40000000000000005 /* Blink */,
+				A1B2C3D40000000000000022 /* BlinkActivity */,
 			);
 		};
 /* End PBXProject section */
@@ -125,10 +202,32 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A1B2C3D40000000000000026 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A1B2C3D4000000000000002B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A1B2C3D40000000000000022 /* BlinkActivity */;
+			targetProxy = A1B2C3D4000000000000002C /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin PBXSourcesBuildPhase section */
 		A1B2C3D40000000000000006 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1B2C3D40000000000000024 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -197,6 +296,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -222,6 +322,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -235,6 +336,58 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.oapps.blink.companion;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		A1B2C3D4000000000000002D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = BlinkActivity/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = BlinkActivity;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.oapps.blink.companion.BlinkActivity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A1B2C3D4000000000000002E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = BlinkActivity/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = BlinkActivity;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.oapps.blink.companion.BlinkActivity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
@@ -260,6 +413,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		A1B2C3D40000000000000023 /* Build configuration list for PBXNativeTarget "BlinkActivity" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1B2C3D4000000000000002D /* Debug */,
+				A1B2C3D4000000000000002E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -271,6 +433,10 @@
 
 /* Begin XCSwiftPackageProductDependency section */
 		A1B2C3D40000000000000011 /* BlinkKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = BlinkKit;
+		};
+		A1B2C3D40000000000000027 /* BlinkKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = BlinkKit;
 		};

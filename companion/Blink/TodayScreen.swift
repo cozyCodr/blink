@@ -42,6 +42,9 @@ struct TodayScreen: View {
     /// APNs, which is what makes P15-10's remote implementation a swap at the
     /// root rather than an edit here.
     @State private var notifications = NotificationsController()
+    /// The session S1 is about to run, or nil. Set by the Start button and
+    /// cleared when S3 closes; presenting it is what opens the focus timer.
+    @State private var focusTarget: SessionCard?
     @State private var showingRehearsal = false
     #if DEBUG
     @State private var showingSignals = false
@@ -114,6 +117,31 @@ struct TodayScreen: View {
             CelebrationScreen(outcome: outcome, rig: rig) { store.dismissCelebration() }
                 .face(face)
         }
+        // S3 · Focus session, over Today. Its own controller owns the timer and
+        // the write; Today re-reads on dismissal so its numbers stay the
+        // server's numbers.
+        .fullScreenCover(item: $focusTarget) { target in
+            FocusScreen(
+                controller: FocusController(
+                    blockID: target.blockID,
+                    title: target.title,
+                    plannedMinutes: target.plannedMinutes,
+                    resumedMinutes: target.resumedTimerMinutes,
+                    session: session
+                ),
+                rig: rig,
+                streakDays: store.state?.streakDays ?? 0,
+                onClose: {
+                    focusTarget = nil
+                    Task { await store.refresh() }
+                },
+                onSignedOut: {
+                    focusTarget = nil
+                    onSignedOut()
+                }
+            )
+            .face(face)
+        }
         #if DEBUG
         .sheet(isPresented: $showingRehearsal) {
             DebugEmotionRehearsalScreen()
@@ -172,7 +200,7 @@ struct TodayScreen: View {
                     Text("\(state.clock.clockTime(session.startsAt)) · \(DurationText.spoken(session.plannedMinutes))")
                         .font(face.metaFont)
                         .foregroundStyle(face.muted)
-                    timerNotYet
+                    startButton(session, title: "Start focus session")
                 }
 
             case .sessionRunning(let session):
@@ -182,7 +210,9 @@ struct TodayScreen: View {
                     Text("Started \(state.clock.clockTime(session.startsAt)). \(DurationText.spoken(session.plannedMinutes)) planned.")
                         .font(face.metaFont)
                         .foregroundStyle(face.muted)
-                    timerNotYet
+                    // "Open session" reconciles against the server's measured
+                    // floor rather than resuming a locally-guessed elapsed.
+                    startButton(session, title: session.resumedTimerMinutes != nil ? "Open session" : "Start focus session")
                 }
 
             case .checkIn(let pending):
@@ -264,17 +294,25 @@ struct TodayScreen: View {
         }
     }
 
-    /// S1 asks for a "Start focus session" button here. The timer, the Live
-    /// Activity and the write that records its minutes are ALL P15-06, so
-    /// there is nothing behind that button yet and a control that does nothing
-    /// is worse than no control. This says where the timer actually is.
-    private var timerNotYet: some View {
-        VStack(alignment: .leading, spacing: face.layout.tightGap) {
-            Text("The timer runs on the web for now.")
-                .font(face.secondaryFont)
-                .foregroundStyle(face.muted)
-            webButton("Open Blink on the web", prominent: false)
+    /// S1's primary action: start (or re-open) the focus session. The timer,
+    /// the Live Activity and the write that records the measured minutes are
+    /// S3, presented over Today. On dismissal Today re-reads, so the number it
+    /// shows is the server's number.
+    private func startButton(_ session: SessionCard, title: String) -> some View {
+        Button {
+            focusTarget = session
+        } label: {
+            Text(title)
+                .font(face.bodyFont)
+                .foregroundStyle(face.ground)
+                .frame(maxWidth: .infinity, minHeight: face.layout.minTapTarget)
+                .background(
+                    RoundedRectangle(cornerRadius: face.cornerStyle.nominalRadius, style: .continuous)
+                        .fill(face.accent)
+                )
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Start a focus session for \(session.title ?? "your next session")")
     }
 
     @ViewBuilder
