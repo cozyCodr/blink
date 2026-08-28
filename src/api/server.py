@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import secrets
+import time
 import urllib.parse
 import uuid
 from datetime import datetime, timezone
@@ -52,6 +53,7 @@ from src.agent.triggers import (
 )
 from src.agent.reconcile import execute_evening_reconcile
 from src.agent import conversation
+from src.agent import decision_log
 from src.agent import tts
 from src.agent import auth as blink_auth
 from src.agent import google_calendar as gcal
@@ -554,13 +556,21 @@ async def _ingest_unstructured_text(
         {"commitment_id": comm.id, "tasks": len(decomp.tasks), "questions": len(decomp.questions)}
     )
 
-    return {
+    res = {
         "status": "accepted",
         "commitment_id": comm.id,
         "tasks_extracted": len(decomp.tasks),
         "questions_raised": len(decomp.questions),
         "blocks_scheduled": blocks_scheduled
     }
+    # P16-01: the ingest decision, counts from the response itself.
+    decision_log.decision(
+        "plan", workspace_id,
+        f"ingested commitment={res['commitment_id']}: "
+        f"extracted {res['tasks_extracted']} tasks, "
+        f"raised {res['questions_raised']} questions, "
+        f"placed {res['blocks_scheduled']} blocks")
+    return res
 
 # --- Commitment naming, off the critical path (P12-03a) ---------------------
 
@@ -1328,14 +1338,22 @@ def turn(workspace_id: str, payload: TurnRequest):
     outcome check and required-token check runs identically in both modes.
     """
     with llm.mode_scope(payload.mode):
+        # P16-01: the decision trace. One legible stdout line per turn,
+        # composed from the SAME response dict the reply is built on.
+        started = time.monotonic()
+        trace: Dict[str, Any] = {}
+        res = _turn(workspace_id, payload, trace)
+        decision_log.decision(
+            "turn", workspace_id,
+            decision_log.turn_summary(
+                trace.get("intent"), res,
+                int((time.monotonic() - started) * 1000)))
         # P13: one append per turn, on the endpoint, whatever branch replied.
-        return _log_exchange(
-            get_or_create_store(workspace_id), payload.message,
-            _turn(workspace_id, payload),
-        )
+        return _log_exchange(get_or_create_store(workspace_id), payload.message, res)
 
 
-def _turn(workspace_id: str, payload: TurnRequest):
+def _turn(workspace_id: str, payload: TurnRequest,
+          trace: Optional[Dict[str, Any]] = None):
     """The turn itself. See `turn` for the profile scope wrapped around it."""
     store = get_or_create_store(workspace_id)
     now = _now()
@@ -1347,6 +1365,8 @@ def _turn(workspace_id: str, payload: TurnRequest):
     # `_is_question`/`classify_goal` gates remain below as secondary signals but
     # no longer decide routing on their own.
     intent = classify_intent(message)
+    if trace is not None:
+        trace["intent"] = intent.label  # P16-01: id-level only, never content
 
     if intent.label == "checkin":
         # P9-03 evening check-in: hand back today's unresolved blocks so the
@@ -1665,7 +1685,7 @@ def checkin_resolve(workspace_id: str, payload: CheckinResolveRequest):
     # survives a later self-report (the report may still set the status).
     store.log_outcome(payload.block_id, status_value, actual, source=payload.source)  # type: ignore[arg-type]
     now = _now()
-    return {
+    res = {
         "status": "resolved",
         "block_id": payload.block_id,
         "outcome": payload.outcome,
@@ -1673,6 +1693,13 @@ def checkin_resolve(workspace_id: str, payload: CheckinResolveRequest):
         "source": block.actual_source,
         "remaining": len(_today_unresolved_blocks(store, now)),
     }
+    # P16-01: narrate the resolution from the response itself (same source
+    # as the reply): block id, outcome, source, how many are left today.
+    decision_log.decision(
+        "checkin", workspace_id,
+        f"resolved block={res['block_id']} outcome={res['outcome']} "
+        f"source={res['source']} remaining={res['remaining']}")
+    return res
 
 
 # --- Focus sessions: the Now timer (P9-07) ---------------------------------
@@ -1829,6 +1856,8 @@ def checkin_summary(workspace_id: str):
         empty_day_insight = _strongest_insight_payload(store)
         if empty_day_insight is not None:
             res["insight"] = empty_day_insight
+        decision_log.decision(
+            "checkin", workspace_id, decision_log.checkin_close_summary(res))
         # P13: the close is button-driven (no typed user line), so only the
         # reply half lands in the log.
         return _log_exchange(store, None, res)
@@ -1918,6 +1947,9 @@ def checkin_summary(workspace_id: str):
     insight = _strongest_insight_payload(store)
     if insight is not None:
         result["insight"] = insight
+    # P16-01: one line for the close, counts read off the response dict.
+    decision_log.decision(
+        "checkin", workspace_id, decision_log.checkin_close_summary(result))
     # P13: same seam as the empty-day return above; no typed user line here.
     return _log_exchange(store, None, result)
 
@@ -1937,6 +1969,12 @@ def onboarding_answer(workspace_id: str, payload: OnboardingAnswerRequest):
         elif payload.step == "insight_response":
             accepted = bool(isinstance(payload.value, dict) and payload.value.get("accept"))
             echo = "Adapt" if accepted else "Leave it"
+            # P16-01: the consent verdict is a decision — id and verdict only.
+            _iid = (payload.value.get("insight_id")
+                    if isinstance(payload.value, dict) else None)
+            decision_log.decision(
+                "insight", workspace_id,
+                f"consent id={_iid} verdict={'accepted' if accepted else 'declined'}")
         elif payload.step == "start":
             echo = ""
         else:
@@ -1970,11 +2008,17 @@ def elicit_answer(workspace_id: str, payload: ElicitAnswerRequest):
     synthesis, which is the deepest reasoning Blink runs.
     """
     with llm.mode_scope(payload.mode):
+        started = time.monotonic()
+        res = _elicit_answer(workspace_id, payload)
+        # P16-01: one line per elicitation step — next question, a course
+        # offer, or the synthesis outcome, from the response's own counts.
+        decision_log.decision(
+            "plan", workspace_id,
+            decision_log.turn_summary(
+                "elicit_answer", res, int((time.monotonic() - started) * 1000)))
         # P13: the user half is the answer as the client echoes it.
         return _log_exchange(
-            get_or_create_store(workspace_id), _answer_echo(payload.value),
-            _elicit_answer(workspace_id, payload),
-        )
+            get_or_create_store(workspace_id), _answer_echo(payload.value), res)
 
 
 def _elicit_answer(workspace_id: str, payload: ElicitAnswerRequest):
@@ -2018,10 +2062,13 @@ def elicit_courses(workspace_id: str, payload: CoursePickRequest):
         n = len(payload.courses or [])
         echo = (f"Build around {n} " + ("course" if n == 1 else "courses")
                 if n else "Skip those, plan without them")
-        return _log_exchange(
-            get_or_create_store(workspace_id), echo,
-            _elicit_courses(workspace_id, payload),
-        )
+        started = time.monotonic()
+        res = _elicit_courses(workspace_id, payload)
+        decision_log.decision(
+            "plan", workspace_id,
+            decision_log.turn_summary(
+                "elicit_courses", res, int((time.monotonic() - started) * 1000)))
+        return _log_exchange(get_or_create_store(workspace_id), echo, res)
 
 
 def _elicit_courses(workspace_id: str, payload: CoursePickRequest):

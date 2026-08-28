@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
 
 from src.sim.fake_store import FakeStore
+from src.agent import decision_log
 from src.agent import persistence
 from src.core.capacity.capacity_ledger import build_capacity_ledger, CapacityLedger
 from src.core.calendar.calendar_sync import constraints_to_intervals
@@ -104,6 +105,12 @@ def flush(workspace_id: str) -> List[str]:
     if backend.save(workspace_id, sections, only=changed):
         _saved_digests.setdefault(workspace_id, {}).update({n: digests[n] for n in changed})
         last_flush_ms = (time.perf_counter() - started) * 1000.0
+        # P16-01: the persistence decision on stdout — section NAMES only
+        # (never their content), demonstrating the dirty-section tracking.
+        decision_log.decision(
+            "persist", workspace_id,
+            f"wrote {','.join(changed)} ({len(changed)} dirty of {len(digests)}) "
+            f"in {last_flush_ms:.0f}ms")
         return changed
     return []
 
