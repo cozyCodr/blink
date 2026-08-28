@@ -221,7 +221,16 @@ def exchange_code(code: str) -> Dict[str, Any]:
         },
     )
     if status < 200 or status >= 300 or not body.get("access_token"):
-        raise CalendarUnavailable(f"Token exchange failed (status {status}).")
+        # Carry Google's OWN error code. Without it a failed exchange is an
+        # opaque "it did not work", and the three causes need different fixes:
+        # invalid_grant is a reused/expired code or a redirect_uri mismatch,
+        # invalid_client is a wrong client secret, and redirect_uri_mismatch is
+        # a console misconfiguration. The code and the description are safe to
+        # record; the token bundle and the auth code are not, and are not here.
+        detail = body.get("error") or "no_error_field"
+        raise CalendarUnavailable(
+            f"Token exchange failed (status {status}, error {detail})."
+        )
     tokens = _token_bundle(body)
     tokens["email"] = _fetch_email(tokens["access_token"])
     # P14: the openid scope makes Google return an id_token here. It rides the

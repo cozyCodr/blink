@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import secrets
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
@@ -28,6 +29,7 @@ from src.core.progress import (
     accrue_milestone_hours, compute_streak,
     timed_block_status, accumulate_timed_minutes
 )
+from src.core.localtime import is_known_zone, local_date, local_today, resolve_zone, same_local_day
 from src.core.pacing import project_finish, project_milestones, pace_delta_days
 from src.core.insights import mine_insights, insight_texts
 from src.core.annotate import decorate, make_candidate
@@ -80,6 +82,17 @@ from src.agent.workspace_registry import stores, get_or_create_store, ledger_for
 from src.agent.workspace_registry import now_naive as _now
 
 
+def _tz(store):
+    """The workspace's timezone, for questions about the user's DAY BOUNDARY.
+
+    `_now()` stays naive UTC everywhere; this only answers "which local day is
+    that instant on". Unknown or unset resolves to UTC, which is the behaviour
+    every one of these call sites had before timezones were wired up, so a
+    workspace that has never reported a zone behaves exactly as it used to.
+    """
+    return resolve_zone(store.get_profile().timezone)
+
+
 @app.middleware("http")
 async def _persist_touched_workspaces(request, call_next):
     """P2-01: after the response is handed back, write any workspace whose state
@@ -91,6 +104,21 @@ async def _persist_touched_workspaces(request, call_next):
     return response
 
 
+def _bound_workspace(request: Request) -> Optional[str]:
+    """The workspace this request carries a valid session for, or None.
+
+    Two credential shapes, one verification: the browser's HttpOnly cookie and
+    the companion's `Authorization: Bearer …`. The cookie is checked first so
+    the web flow behaves exactly as it did before P15-03.
+    """
+    bound = blink_auth.read_session_cookie(
+        request.cookies.get(blink_auth.SESSION_COOKIE)
+    )
+    if bound:
+        return bound
+    return blink_auth.read_authorization_header(request.headers.get("authorization"))
+
+
 @app.middleware("http")
 async def _gate_signed_in_workspaces(request: Request, call_next):
     """P14 route-boundary check: a signed-in user's workspace (id prefix "u_")
@@ -98,15 +126,18 @@ async def _gate_signed_in_workspaces(request: Request, call_next):
     demo workspaces stay reachable by id; their protection is that guest ids
     are crypto-random and unguessable. This is deliberately NOT full
     authorization middleware, just the one cheap boundary that keeps a
-    signed-in user's data from being read by bare workspace id."""
+    signed-in user's data from being read by bare workspace id.
+
+    P15-03 adds ONE extra credential source, not a second rule: the companion
+    apps cannot hold a cookie, so `Authorization: Bearer …` is accepted here
+    too. The bearer is the same signed value, verified by the same code, so it
+    can never open a workspace the cookie path would refuse."""
     path = request.url.path
     if path.startswith("/v1/workspaces/"):
         parts = path.split("/")
         workspace_id = parts[3] if len(parts) > 3 else ""
         if workspace_id.startswith(blink_auth.USER_WS_PREFIX):
-            bound = blink_auth.read_session_cookie(
-                request.cookies.get(blink_auth.SESSION_COOKIE)
-            )
+            bound = _bound_workspace(request)
             if bound != workspace_id:
                 return JSONResponse(
                     {"detail": "This workspace belongs to a signed-in account. "
@@ -345,8 +376,16 @@ def get_workspace_details(
         # is not UTC, so the client must anchor on the server's clock, not its
         # own. These two fields are that clock, published beside the data they
         # date. Naive ISO, same shape as every other datetime here.
-        "today": now.date().isoformat(),
+        #
+        # P15-00: `today` is now the USER'S local day, resolved from their
+        # stored timezone, so it agrees with what the check-in and the brief
+        # call today. `now` stays naive UTC, because it is an instant and every
+        # other datetime in this payload is naive UTC too. `timezone` is
+        # published so the client can see which zone the server used and
+        # correct it if the browser disagrees.
+        "today": local_today(now, _tz(store)).isoformat(),
         "now": now.isoformat(timespec="seconds"),
+        "timezone": store.get_profile().timezone,
         "profile": store.get_profile().model_dump(mode="json"),
         "commitments": [c.model_dump(mode="json") for c in store.commitments.values()],
         "tasks": [t.model_dump(mode="json") for t in store.tasks.values()],
@@ -375,7 +414,7 @@ def get_workspace_details(
         "schedule_report": store.last_schedule_report,
         # P9-03 accountability: derived at read time from block history, never
         # a stored counter (mirrors accrue_milestone_hours).
-        "streak": compute_streak(list(store.blocks.values()), now),
+        "streak": compute_streak(list(store.blocks.values()), now, _tz(store)),
         # P9-08 life memory + first-run gate.
         "zones": [z.model_dump(mode="json") for z in store.zones.values()],
         "key_points": list(store.key_points),
@@ -1560,23 +1599,34 @@ def _turn(workspace_id: str, payload: TurnRequest):
 # --- Evening check-in (P9-03) ----------------------------------------------
 
 def _today_unresolved_blocks(store, now: datetime) -> List[Block]:
-    """Today's blocks still awaiting an outcome, in start order. 'Today' is the
-    naive-UTC calendar day the whole deterministic core runs on."""
+    """Today's blocks still awaiting an outcome, in start order.
+
+    'Today' is the user's LOCAL calendar day, not the UTC one. This function is
+    what the evening check-in asks about, and the check-in runs after 5pm; in
+    any zone west of UTC the UTC date has already advanced by then, so comparing
+    UTC days here returned an empty list and the check-in silently asked
+    nothing. See `src/core/localtime.py`."""
+    tz = _tz(store)
     return sorted(
         (b for b in store.blocks.values()
-         if b.status == "planned" and b.starts_at.date() == now.date()),
+         if b.status == "planned" and same_local_day(b.starts_at, now, tz)),
         key=lambda b: b.starts_at,
     )
 
 
 def _today_timer_measured_blocks(store, now: datetime) -> List[Block]:
     """Today's blocks the Now timer already resolved (P9-07): measured fact,
-    so the evening check-in confirms them instead of asking."""
+    so the evening check-in confirms them instead of asking.
+
+    Same local-day rule as `_today_unresolved_blocks`: these two must agree on
+    what "today" is, or the check-in would ask about a block it had already
+    confirmed."""
+    tz = _tz(store)
     return sorted(
         (b for b in store.blocks.values()
          if b.actual_source == "timer"
          and b.status in ("done", "partial")
-         and b.starts_at.date() == now.date()),
+         and same_local_day(b.starts_at, now, tz)),
         key=lambda b: b.starts_at,
     )
 
@@ -1675,7 +1725,7 @@ def _focus_target(store, now: datetime) -> Optional[Block]:
         return min(current, key=lambda b: b.starts_at)
     upcoming = [b for b in store.blocks.values()
                 if b.status == "planned" and b.starts_at >= now
-                and b.starts_at.date() == now.date()]
+                and same_local_day(b.starts_at, now, _tz(store))]
     if upcoming:
         return min(upcoming, key=lambda b: b.starts_at)
     return None
@@ -1762,7 +1812,7 @@ def checkin_summary(workspace_id: str):
     now = _now()
 
     todays = [b for b in store.blocks.values()
-              if b.starts_at.date() == now.date() and b.status != "cancelled"]
+              if same_local_day(b.starts_at, now, _tz(store)) and b.status != "cancelled"]
     done = len([b for b in todays if b.status == "done"])
     partial = len([b for b in todays if b.status == "partial"])
     skipped = len([b for b in todays if b.status == "missed"])
@@ -1772,7 +1822,7 @@ def checkin_summary(workspace_id: str):
             "type": "message",
             "text": "Nothing was on the plan today.",
             "done": 0, "partial": 0, "skipped": 0, "rescheduled": 0,
-            "streak": compute_streak(list(store.blocks.values()), now),
+            "streak": compute_streak(list(store.blocks.values()), now, _tz(store)),
             "streak_incremented_today": False}
         # P9-09: a check-in close is a natural moment; history may still
         # hold a pattern even when today was empty. Max one; absent = silence.
@@ -1836,7 +1886,7 @@ def checkin_summary(workspace_id: str):
     if required:
         text = conversation.naturalize_outcome(text, required)
 
-    streak = compute_streak(list(store.blocks.values()), now)
+    streak = compute_streak(list(store.blocks.values()), now, _tz(store))
     ended_today = [b for b in todays if b.ends_at <= now]
     streak_incremented_today = bool(
         ended_today
@@ -2018,6 +2068,13 @@ _oauth_states: Dict[str, str] = {}
 # _oauth_states, kept separate so the two flows can never validate each other.
 _signin_states: Dict[str, str] = {}
 
+# P15-03 native sign-in states: nonce -> the ALLOW-LISTED custom-scheme URL the
+# minted bearer goes back to. Same single-use CSRF discipline as the two maps
+# above, and kept separate for the same reason they are separate from each
+# other: a nonce issued for one flow must never validate another. The value is
+# never the caller's own string, only the allow-list entry it matched.
+_native_states: Dict[str, str] = {}
+
 
 def _sync_google_events(store, workspace_id: str) -> Dict[str, Any]:
     """Pull upcoming Google events into the workspace as busy constraints, exactly
@@ -2120,7 +2177,10 @@ def _signin_callback(code: str, state: str):
         return RedirectResponse(url="/?signin=error")
     try:
         tokens = gcal.exchange_code(code)
-    except gcal.CalendarUnavailable:
+    except gcal.CalendarUnavailable as e:
+        # Same blind spot the native path had: without this, a broken web
+        # sign-in looks identical to a user changing their mind.
+        print(f"[web-signin] token exchange failed: {e}", flush=True)
         return RedirectResponse(url="/?signin=error")
     # The id_token is transient: verified here, never stored.
     raw_id_token = tokens.pop("id_token", None)
@@ -2165,11 +2225,14 @@ def _signin_callback(code: str, state: str):
 
 @app.get("/v1/session")
 def session_info(request: Request):
-    """Who this browser is signed in as, if anyone. A guest browser (no or
-    invalid cookie) gets {signed_in: false} and everything keeps working."""
-    workspace_id = blink_auth.read_session_cookie(
-        request.cookies.get(blink_auth.SESSION_COOKIE)
-    )
+    """Who this client is signed in as, if anyone. A guest browser (no or
+    invalid cookie) gets {signed_in: false} and everything keeps working.
+
+    P15-03: a companion app presenting `Authorization: Bearer …` reads exactly
+    the same answer, which is how the sign-in screen gets the greeting it
+    shows. Same verification, so a bearer sees no more than its cookie would.
+    """
+    workspace_id = _bound_workspace(request)
     if not workspace_id:
         return {"signed_in": False}
     store = get_or_create_store(workspace_id)
@@ -2195,18 +2258,144 @@ def session_signout():
     return resp
 
 
+# ---------------------------------------------------------------------------
+# Native sign-in (P15-03): the companion apps reuse the EXISTING consent.
+#
+# The consent screen is configured per GCP project, not per client, so the
+# screen already published for the web covers the phone and the watch with no
+# re-publishing, no second OAuth client, and no new redirect URI. The app never
+# talks to Google and never holds a Google token: it opens this route in an
+# ASWebAuthenticationSession, Google returns to the ALREADY-REGISTERED
+# /oauth/callback, and the callback hands the app a Blink bearer.
+# ---------------------------------------------------------------------------
+
+# The app's own correlator, echoed back untouched so ASWebAuthenticationSession's
+# caller can match the reply to the request it made. Constrained to url-safe
+# characters so nothing the app sends can reshape the redirect it comes back in.
+_CLIENT_STATE_MAX = 128
+_CLIENT_STATE_OK = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+)
+
+
+def _native_error(redirect: str, reason: str, client_state: str = ""):
+    """Send the app back to its own scheme with an honest failure reason.
+
+    `reason` is a short machine token, never a token, a code, or a Google
+    error body. The app phrases the apology; the server never invents one.
+    """
+    params = {"error": reason}
+    if client_state:
+        params["state"] = client_state
+    return RedirectResponse(url=f"{redirect}?{urllib.parse.urlencode(params)}")
+
+
+@app.get("/oauth/connect")
+def oauth_connect(native: Optional[str] = None, state: Optional[str] = None):
+    """Start sign-in for a native client and redirect to the SAME Google
+    consent the web already uses.
+
+    `native` must be one of the allow-listed custom-scheme URLs
+    (blink_auth.NATIVE_REDIRECTS). It is matched exactly and never reflected:
+    handing a freshly minted session to an arbitrary URL would be an open
+    redirect that gives away live sessions.
+
+    503 when sign-in is disabled (no session secret), exactly as the web's
+    /auth/signin already does.
+    """
+    redirect = blink_auth.native_redirect(native)
+    if not redirect:
+        raise HTTPException(
+            status_code=400,
+            detail="That is not a sign-in destination Blink knows about.",
+        )
+    client_state = (state or "")[:_CLIENT_STATE_MAX]
+    if client_state and not set(client_state) <= _CLIENT_STATE_OK:
+        raise HTTPException(status_code=400, detail="That state value isn't usable.")
+    if not blink_auth.session_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Sign-in isn't set up on this server yet. Please try again later.",
+        )
+    nonce = secrets.token_urlsafe(24)
+    _native_states[nonce] = {"redirect": redirect, "client_state": client_state}
+    try:
+        return RedirectResponse(url=gcal.build_auth_url(f"native:{nonce}"))
+    except gcal.CalendarUnavailable as e:
+        _native_states.pop(nonce, None)
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+def _native_callback(code: str, state: str):
+    """Finish native sign-in.
+
+    Everything up to the last line is what the web callback already does:
+    exchange the code, verify the id_token, land on the stable per-user
+    workspace, store the Google tokens and the verified name. The ONE new step
+    is minting a bearer with the same secret and the same HMAC as the cookie
+    and handing it to the app over its allow-listed custom scheme.
+    """
+    _prefix, _, nonce = state.partition(":")
+    pairing = _native_states.pop(nonce, None)  # single use, popped before any work
+    if not pairing:
+        raise HTTPException(status_code=400, detail="Invalid OAuth state.")
+    redirect = pairing["redirect"]
+    client_state = pairing["client_state"]
+
+    if not blink_auth.session_enabled():
+        return _native_error(redirect, "unavailable", client_state)
+    try:
+        tokens = gcal.exchange_code(code)
+    except gcal.CalendarUnavailable as e:
+        # Log WHY. This path previously returned an opaque "exchange_failed" to
+        # the app and recorded nothing, which made a real failure impossible to
+        # diagnose from the outside. The message carries Google's error code and
+        # never the auth code or any token.
+        print(f"[native-signin] token exchange failed: {e}", flush=True)
+        return _native_error(redirect, "exchange_failed", client_state)
+    # The id_token is transient: verified here, never stored, never logged.
+    raw_id_token = tokens.pop("id_token", None)
+    try:
+        claims = blink_auth.verify_id_token(raw_id_token)
+    except blink_auth.SignInUnavailable:
+        return _native_error(redirect, "verification_failed", client_state)
+
+    user_ws = blink_auth.user_workspace_id(claims["sub"])
+    store = get_or_create_store(user_ws)
+    # No guest migration here: the companion has no guest mode (architecture
+    # §4, Gap 1), so there is never a guest workspace to fold in.
+    store.set_google_tokens(tokens)
+    name = claims.get("name") or claims.get("given_name")
+    if name:
+        store.update_profile(name=str(name).strip()[:120])
+
+    token = blink_auth.make_bearer_token(user_ws)
+    if not token:  # secret vanished mid-flight; say so rather than guess
+        return _native_error(redirect, "unavailable", client_state)
+    params = {"token": token, "ws": user_ws}
+    if not gcal.has_calendar_scope(tokens):
+        params["calendar"] = "missing_scope"
+    if client_state:
+        params["state"] = client_state
+    return RedirectResponse(url=f"{redirect}?{urllib.parse.urlencode(params)}")
+
+
 @app.get("/oauth/callback")
 def oauth_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
-    """OAuth redirect target (registered on the GCP client). Two flows share it:
-    P14 sign-in (state "signin:<guest_ws>:<nonce>") and the original
+    """OAuth redirect target (registered on the GCP client). Three flows share
+    it, which is the point: P14 web sign-in (state "signin:<guest_ws>:<nonce>"),
+    P15-03 native sign-in (state "native:<nonce>"), and the original
     calendar-only connect (state "<ws>:<nonce>"). Exchanges the code, stores
-    tokens on the right workspace, then redirects to the app."""
+    tokens on the right workspace, then redirects back to whichever client
+    started the flow. No Google Cloud configuration changed to add the third."""
     if error:
         return RedirectResponse(url="/?calendar=error")
     if not code or not state or ":" not in state:
         raise HTTPException(status_code=400, detail="Missing or malformed OAuth callback parameters.")
     if state.startswith("signin:"):
         return _signin_callback(code, state)
+    if state.startswith("native:"):
+        return _native_callback(code, state)
     workspace_id, _, nonce = state.partition(":")
     # CSRF: the nonce must be one we issued for this workspace.
     if _oauth_states.get(nonce) != workspace_id:
@@ -2215,7 +2404,8 @@ def oauth_callback(code: Optional[str] = None, state: Optional[str] = None, erro
     store = get_or_create_store(workspace_id)
     try:
         tokens = gcal.exchange_code(code)
-    except gcal.CalendarUnavailable:
+    except gcal.CalendarUnavailable as e:
+        print(f"[calendar-connect] token exchange failed: {e}", flush=True)
         return RedirectResponse(url="/?calendar=error")
     # Keep the token either way (identity is still useful), but if the user
     # unchecked the Calendar box during granular consent, tell the frontend so
@@ -2282,6 +2472,46 @@ def calendar_write_event(workspace_id: str, payload: CalendarEventRequest):
 def get_profile(workspace_id: str):
     store = get_or_create_store(workspace_id)
     return store.get_profile().model_dump(mode="json")
+
+
+class TimezoneRequest(BaseModel):
+    timezone: str
+
+
+@app.post("/v1/workspaces/{workspace_id}/profile/timezone")
+def set_timezone(workspace_id: str, payload: TimezoneRequest):
+    """Record the user's IANA timezone, which decides where their day starts.
+
+    The web client posts this on load from
+    `Intl.DateTimeFormat().resolvedOptions().timeZone`. It is deliberately its
+    own endpoint rather than a query parameter on `/details`, because a GET that
+    mutates state is a trap, and because the companion apps (P15) need to report
+    a zone without asking for a payload they are not going to render.
+
+    A zone this runtime cannot load is REJECTED rather than stored, so a garbage
+    value can never become the thing the check-in trusts. Rejection is a 422 and
+    the previously stored zone is left untouched.
+    """
+    store = get_or_create_store(workspace_id)
+    name = (payload.timezone or "").strip()
+    if not is_known_zone(name):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown timezone {name!r}. Expected an IANA name like 'America/Los_Angeles'.",
+        )
+    previous = store.get_profile().timezone
+    # Only write when it actually changed. The web client posts this on EVERY
+    # page load, and `update_profile` unconditionally bumps `updated_at` and
+    # publishes a profile_updated event, which dirties the profile section and
+    # costs a Firestore write. A zone changes approximately never, so writing
+    # every load would be pure write amplification on the persistence path.
+    if previous != name:
+        store.update_profile(timezone=name)
+    return {
+        "timezone": name,
+        "changed": previous != name,
+        "today": local_today(_now(), resolve_zone(name)).isoformat(),
+    }
 
 @app.get("/v1/workspaces/{workspace_id}/milestones")
 def list_milestones(workspace_id: str):
@@ -2385,10 +2615,13 @@ async def trigger_routine(
     brief_payload: Optional[Dict[str, Any]] = None
     if payload.trigger == "morning_brief":
         # P9-03: "today" means today. The brief judges only blocks that start
-        # on the current calendar day, so the spoken counts are real.
+        # on the current calendar day, so the spoken counts are real. That day
+        # is the USER'S day (P15-00) — a morning brief is the one message where
+        # being off by a day boundary is immediately obvious to the listener.
+        tz = _tz(store)
         today_blocks = sorted(
             (b for b in store.blocks.values()
-             if b.status == "planned" and b.starts_at.date() == now.date()),
+             if b.status == "planned" and same_local_day(b.starts_at, now, tz)),
             key=lambda b: b.starts_at,
         )
         brief_res = execute_morning_brief(

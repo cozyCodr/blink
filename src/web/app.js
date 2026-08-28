@@ -77,6 +77,28 @@
     });
   }
 
+  /* P15-00 — tell the server which day the user is living in.
+     Every "today" the server computes (the evening check-in, the morning
+     brief, the streak, the `today` field in /details) is a question about the
+     USER'S calendar day, and the server has no way to know that on its own.
+     Left unset it falls back to UTC, which silently misfires for anyone west
+     of Greenwich: the UTC date advances at 17:00 in Los Angeles, so an evening
+     check-in would look at the wrong day and find nothing to ask about.
+     Fire-and-forget on load. A failure here is not worth bothering the user
+     with, because the server degrades to UTC exactly as it always did. */
+  function reportTimezone() {
+    var tz;
+    try {
+      tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    } catch (e) { return; }
+    if (!tz) return;
+    api("/profile/timezone", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timezone: tz }),
+    }).catch(function () { /* degrade to UTC, never nag */ });
+  }
+
   // Stable commitment colour: djb2-xor over the id picks a hue inside the
   // sage-to-teal band the Nocturne palette lives in (140–219), fixed
   // sat/light so the dot reads against it. Module-scope because the
@@ -5366,6 +5388,7 @@
   }
 
   function main() {
+    reportTimezone();   // P15-00: before anything asks the server what "today" is
     var appEl = document.getElementById("app");
     var hintEl = document.getElementById("hint");
     var history = [];   // [{role, content}] passed to POST /turn (message/planned turns)

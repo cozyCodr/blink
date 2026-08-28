@@ -113,6 +113,60 @@ def read_session_cookie(value: Optional[str]) -> Optional[str]:
     return workspace_id
 
 
+# --- bearer tokens for native clients (P15-03) -------------------------------
+#
+# The companion apps cannot receive an HttpOnly cookie, so the same signed
+# value is handed to them as a bearer token instead. Deliberately the SAME
+# secret, the SAME HMAC and the SAME verification as the cookie: one code path,
+# so a bearer can never reach a workspace a cookie would be refused. No secret
+# means no bearer, exactly as it means no cookie.
+
+BEARER_SCHEME = "bearer"
+
+# The ONLY redirect targets the callback will hand a freshly minted session
+# to. An allow-list, never a reflection of whatever the caller asked for: an
+# arbitrary `native=` URL would be an open redirect that leaks live sessions.
+NATIVE_REDIRECTS = frozenset({"blink://auth"})
+
+
+def make_bearer_token(workspace_id: str) -> Optional[str]:
+    """The bearer a native client stores in its Keychain, or None when sign-in
+    is disabled. Byte-for-byte the cookie's value, signed the same way."""
+    return make_session_cookie(workspace_id)
+
+
+def read_bearer_token(value: Optional[str]) -> Optional[str]:
+    """The workspace id a valid bearer token binds to, or None."""
+    return read_session_cookie(value)
+
+
+def read_authorization_header(header: Optional[str]) -> Optional[str]:
+    """The workspace id an `Authorization: Bearer …` header binds to, or None.
+
+    Anything malformed, wrongly schemed, or tampered with reads as no
+    credential at all, which lands the caller in exactly the same place a
+    missing cookie does.
+    """
+    if not header:
+        return None
+    scheme, _, token = header.partition(" ")
+    if scheme.strip().lower() != BEARER_SCHEME:
+        return None
+    return read_bearer_token(token.strip())
+
+
+def native_redirect(value: Optional[str]) -> Optional[str]:
+    """The allow-listed native redirect matching `value`, or None.
+
+    Exact match against NATIVE_REDIRECTS. Nothing is normalised, appended to,
+    or pattern-matched, because every one of those is a way an attacker talks
+    a redirect into pointing somewhere else.
+    """
+    if not value:
+        return None
+    return value if value in NATIVE_REDIRECTS else None
+
+
 def cookie_secure() -> bool:
     """Whether to mark the session cookie Secure: yes exactly when the app's
     own OAuth redirect runs on https (prod). Local http dev keeps a plain
