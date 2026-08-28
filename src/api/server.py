@@ -2246,6 +2246,10 @@ def session_info(request: Request):
         # One warm line built ONLY from the stored name; null when no name is
         # stored, so the client can never speak an invented greeting.
         "greeting": blink_auth.greeting_line(name),
+        # P15-08: the account's face, or null when no device has picked one.
+        # The companion adopts a non-null value on load, so phone and web
+        # agree without a second request.
+        "face": store.get_profile().face,
     }
 
 
@@ -2512,6 +2516,37 @@ def set_timezone(workspace_id: str, payload: TimezoneRequest):
         "changed": previous != name,
         "today": local_today(_now(), resolve_zone(name)).isoformat(),
     }
+
+
+KNOWN_FACES = ("capsule", "lumen", "folio")
+
+
+class FaceRequest(BaseModel):
+    face: str
+
+
+@app.patch("/v1/workspaces/{workspace_id}/profile/face")
+def set_face(workspace_id: str, payload: FaceRequest):
+    """Record the chosen face, so every surface wears the same skin (P15-08).
+
+    Written by the web's Settings picker and the companion's; read back through
+    the profile GET (and `/v1/session` for the companion). Same contract as the
+    timezone setter above: an unknown value is REJECTED with a 422 rather than
+    stored, and a repeat of the stored value writes nothing, because
+    `update_profile` unconditionally bumps `updated_at` and publishes a
+    profile_updated event, which costs a Firestore write for no new fact.
+    """
+    store = get_or_create_store(workspace_id)
+    name = (payload.face or "").strip().lower()
+    if name not in KNOWN_FACES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown face {name!r}. Expected one of {', '.join(KNOWN_FACES)}.",
+        )
+    previous = store.get_profile().face
+    if previous != name:
+        store.update_profile(face=name)
+    return {"face": name, "changed": previous != name}
 
 @app.get("/v1/workspaces/{workspace_id}/milestones")
 def list_milestones(workspace_id: str):

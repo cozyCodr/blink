@@ -85,7 +85,9 @@ public struct LumenFace: FaceTokens {
         parkScale: 0.45,   // face.css:404  --park-scale
         ambientSize: 0,    // face.css:420  the halo is hidden outright
         glintSize: 0,      // face.css:487  .glint { display: none }
-        glintInset: .zero
+        glintInset: .zero,
+        hairlineThickness: 3,   // face.css:454  height: 3px
+        hairlineUnderlap: 12    // face.css:453  each end runs 12px UNDER its dot
     )
 
     // MARK: Motion
@@ -129,11 +131,11 @@ public struct LumenFace: FaceTokens {
     // MARK: The vocabulary, in Lumen's language
     //
     // The four transform channels and the pair transforms, transcribed from
-    // face.css:620-706. What is NOT here is the parts of lumen's beats that
-    // are not channels: the connecting hairline that droops and pulses, and
-    // the heart's two round lobes drawn on the shape's pseudo-elements. Those
-    // need lumen's eye RENDERER, which is P15-08. The table is honest about
-    // the gap rather than passing off half a beat as a whole one.
+    // face.css:620-706, plus (P15-08) the parts that are not per-eye channels:
+    // what the connecting hairline does during each beat, the dim-by-colour
+    // ink swaps, and the heart's two round lobes. Dim beats grey the INK and
+    // never the opacity (face.css:394), because the underlapped line must not
+    // show through a translucent dot.
     public let emotionPoses = EmotionPoseTable(
         resting: EyePose(both: EyeChannels(corners: .percent((50, 50, 50, 50), (50, 50, 50, 50)))),
         poses: [
@@ -146,37 +148,62 @@ public struct LumenFace: FaceTokens {
             )),
             // face.css:628
             .wide: EyePose(both: EyeChannels(scaleX: 1.14, scaleY: 1.14)),
-            // face.css:631
-            .sorry: EyePose(both: EyeChannels(scaleY: 0.78, translateY: 12)),
+            // face.css:631-632 — the dots sink and grey (colour, not opacity);
+            // the line drops with them and fades
+            .sorry: EyePose(
+                both: EyeChannels(scaleY: 0.78, translateY: 12),
+                ink: .dim,
+                line: HairlineState(offsetY: 9, opacity: 0.5)
+            ),
             // face.css:635-637
             .curious: EyePose(
                 left: EyeChannels(scaleX: 1.12, scaleY: 1.12),
                 right: EyeChannels(scaleX: 0.84, scaleY: 0.84),
                 pairRotation: .degrees(3)
             ),
-            // face.css:641-645 — channels only; the lobes are P15-08
-            .heart: EyePose(both: EyeChannels(
-                scaleX: 0.85, scaleY: 0.85, rotation: .degrees(-45),
-                corners: .percent((0, 0, 0, 12), (0, 0, 0, 12))
-            )),
-            // face.css:656
-            .surprised: EyePose(both: EyeChannels(scaleX: 1.24, scaleY: 1.24, translateY: -6)),
-            // face.css:666
-            .sleepy: EyePose(both: EyeChannels(scaleY: 0.26)),
+            // face.css:641-654 — coral hearts: rotated body + the two lobes,
+            // and the line stays and blushes coral
+            .heart: EyePose(
+                both: EyeChannels(
+                    scaleX: 0.85, scaleY: 0.85, rotation: .degrees(-45),
+                    corners: .percent((0, 0, 0, 12), (0, 0, 0, 12))
+                ),
+                ink: .heart,
+                heartLobes: true,
+                line: HairlineState(ink: .heart)
+            ),
+            // face.css:656-658 — the pop; the line contracts a touch
+            .surprised: EyePose(
+                both: EyeChannels(scaleX: 1.24, scaleY: 1.24, translateY: -6),
+                line: HairlineState(scaleX: 0.85)
+            ),
+            // face.css:666-667 — the pills sit LEVEL with the line, full ink
+            .sleepy: EyePose(
+                both: EyeChannels(scaleY: 0.26),
+                line: HairlineState(opacity: 0.6)
+            ),
             // face.css:670-674
-            .proud: EyePose(both: EyeChannels(
-                scaleY: 0.66, translateY: -5,
-                corners: .percent((50, 50, 30, 30), (62, 62, 26, 26))
-            )),
-            // face.css:684-686
+            .proud: EyePose(
+                both: EyeChannels(
+                    scaleY: 0.66, translateY: -5,
+                    corners: .percent((50, 50, 30, 30), (62, 62, 26, 26))
+                ),
+                line: HairlineState(offsetY: -5)
+            ),
+            // face.css:682-684
             .sheepish: EyePose(
                 both: EyeChannels(scaleX: 0.8, scaleY: 0.8),
                 pairRotation: .degrees(-3),
-                pairOffset: CGSize(width: 16, height: 0)
+                pairOffset: CGSize(width: 16, height: 0),
+                line: HairlineState(opacity: 0.6)
             ),
-            // face.css:679-681 — the dots also drift far apart
-            .worried: EyePose(both: EyeChannels(scaleY: 0.85), gap: 200),
-            // face.css:690-694
+            // face.css:677-679 — the dots drift far apart, the line sags
+            .worried: EyePose(
+                both: EyeChannels(scaleY: 0.85),
+                gap: 200,
+                line: HairlineState(offsetY: 18, opacity: 0.8)
+            ),
+            // face.css:687-694
             .celebrate: EyePose(
                 both: EyeChannels(
                     scaleY: 0.5, translateY: -8,

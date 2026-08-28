@@ -110,6 +110,10 @@ public final class FocusController {
     @ObservationIgnored private let client: any DetailsReading
     @ObservationIgnored private let session: BlinkSession
     @ObservationIgnored private let resumedMinutes: Int?
+    /// The face the Live Activity wears (P15-08). Captured at init because the
+    /// widget extension has no app group to read a preference from: the face
+    /// rides `FocusActivityAttributes`, set once at `start`.
+    @ObservationIgnored private let faceID: FaceID
     #if canImport(ActivityKit)
     @ObservationIgnored private lazy var liveActivity = FocusLiveActivityController()
     #endif
@@ -142,6 +146,7 @@ public final class FocusController {
         plannedMinutes: Int,
         resumedMinutes: Int? = nil,
         session: BlinkSession,
+        face: FaceID = .capsule,
         client: (any DetailsReading)? = nil,
         baseURL: URL = BlinkAPI.baseURL(),
         defaults: UserDefaults = .standard
@@ -151,6 +156,7 @@ public final class FocusController {
         self.plannedMinutes = plannedMinutes
         self.resumedMinutes = resumedMinutes
         self.session = session
+        self.faceID = face
         self.client = client ?? BlinkDetailsClient(baseURL: baseURL)
         // `integer(forKey:)` coerces a launch-argument string ("300") to an Int;
         // `object(_:) as? Int` would not, because the argument domain stores it
@@ -415,7 +421,7 @@ public final class FocusController {
 
     private func startActivity() {
         #if canImport(ActivityKit)
-        liveActivity.start(blockID: blockID, title: title, state: contentState())
+        liveActivity.start(blockID: blockID, title: title, face: faceID, state: contentState())
         liveActivityIsUp = liveActivity.isRunning
         #endif
     }

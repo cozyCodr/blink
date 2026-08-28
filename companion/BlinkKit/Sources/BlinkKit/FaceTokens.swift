@@ -97,6 +97,14 @@ public struct EyeGeometry: Sendable, Equatable {
     public var glintSize: CGFloat
     /// The glint's inset from the eye's top-left corner, in points.
     public var glintInset: CGSize
+    /// The connecting hairline between the two eyes, where the face has one
+    /// (lumen). Zero thickness means no hairline at all.
+    /// face.css:454 `height: 3px`.
+    public var hairlineThickness: CGFloat
+    /// How far each end of that hairline runs UNDER its eye, so no state can
+    /// ever open a gap between line and eye. face.css:453
+    /// `left: calc(var(--eye-w) - 12px)` — the last 12px sit beneath the dot.
+    public var hairlineUnderlap: CGFloat
 
     public init(
         eyeWidth: CGFloat,
@@ -107,7 +115,9 @@ public struct EyeGeometry: Sendable, Equatable {
         parkScale: CGFloat,
         ambientSize: CGFloat,
         glintSize: CGFloat,
-        glintInset: CGSize
+        glintInset: CGSize,
+        hairlineThickness: CGFloat = 0,
+        hairlineUnderlap: CGFloat = 0
     ) {
         self.eyeWidth = eyeWidth
         self.eyeHeight = eyeHeight
@@ -118,6 +128,8 @@ public struct EyeGeometry: Sendable, Equatable {
         self.ambientSize = ambientSize
         self.glintSize = glintSize
         self.glintInset = glintInset
+        self.hairlineThickness = hairlineThickness
+        self.hairlineUnderlap = hairlineUnderlap
     }
 }
 
@@ -276,6 +288,78 @@ public struct IdleMotion: Sendable {
     }
 }
 
+/// One held pose of a line boil: the stop-motion wobble that keeps a drawn
+/// outline from ever sitting perfectly still (folio). Custom properties
+/// animate DISCRETELY on the web, so each keyframe is a held frame; here each
+/// held frame is one of these.
+public struct BoilPose: Sendable, Equatable {
+    /// The corner set of this held frame, or nil where the boil only carries
+    /// rotation (an emotion that overrides the corners outright keeps its own,
+    /// exactly as a CSS class overriding `border-radius` beats the base calc
+    /// while `--boil-rot` still rides the composed transform, face.css:842).
+    public var corners: CornerRadii?
+    /// `--boil-rot` for this frame.
+    public var rotation: Angle
+
+    public init(corners: CornerRadii?, rotation: Angle) {
+        self.corners = corners
+        self.rotation = rotation
+    }
+}
+
+/// A whole boil: the held frames and how long one full cycle takes.
+/// `period / poses.count` is one held frame.
+public struct BoilLoop: Sendable, Equatable {
+    public var period: Double
+    public var poses: [BoilPose]
+
+    public init(period: Double, poses: [BoilPose]) {
+        self.period = period
+        self.poses = poses
+    }
+
+    /// Seconds one frame is held. face.css:851 `steps(1, end)` over the cycle.
+    public var frameDuration: Double {
+        period / Double(max(poses.count, 1))
+    }
+}
+
+/// folio's celebrate: a five-pointed star THUNKS down above the pair like a
+/// rubber stamp, in hard held poses rather than a tween (face.css:1114-1126).
+public struct StampBeat: Sendable, Equatable {
+    /// The stamp's box, points. face.css:1116 `width/height: 58px`.
+    public var size: CGFloat
+    /// How far above the pair's top edge it lands. face.css:1115 `top: -84px`.
+    public var rise: CGFloat
+    /// Where it starts: oversized and tilted. face.css:1124 `scale(2.1) rotate(-14deg)`.
+    public var startScale: CGFloat
+    public var startRotation: Angle
+    /// Where it lands. face.css:1125 `scale(1) rotate(-4deg)`.
+    public var landedRotation: Angle
+    /// The whole thunk, seconds. face.css:1121 `folio-stamp 0.32s`.
+    public var period: Double
+    /// Hard poses on the way down. face.css:1121 `steps(2, end)`.
+    public var steps: Int
+
+    public init(
+        size: CGFloat,
+        rise: CGFloat,
+        startScale: CGFloat,
+        startRotation: Angle,
+        landedRotation: Angle,
+        period: Double,
+        steps: Int
+    ) {
+        self.size = size
+        self.rise = rise
+        self.startScale = startScale
+        self.startRotation = startRotation
+        self.landedRotation = landedRotation
+        self.period = period
+        self.steps = steps
+    }
+}
+
 /// The one-shot beats: the celebrate bounce, the deliberate slow blink that
 /// IS `satisfied`, and the gap inside a double blink.
 public struct BeatMotion: Sendable {
@@ -293,6 +377,9 @@ public struct BeatMotion: Sendable {
     public var slowBlinkHold: Double
     /// The pause between the two blinks of a double blink, seconds. app.js:181.
     public var doubleBlinkGap: Double
+    /// The stamped star, where the face's celebrate stamps one (folio,
+    /// face.css:1114-1126). nil where celebrate does something else.
+    public var stamp: StampBeat?
 
     public init(
         bouncePeriod: Double,
@@ -300,7 +387,8 @@ public struct BeatMotion: Sendable {
         bounceRise: [CGFloat]?,
         slowBlinkClose: Double,
         slowBlinkHold: Double,
-        doubleBlinkGap: Double
+        doubleBlinkGap: Double,
+        stamp: StampBeat? = nil
     ) {
         self.bouncePeriod = bouncePeriod
         self.bounceCount = bounceCount
@@ -308,6 +396,7 @@ public struct BeatMotion: Sendable {
         self.slowBlinkClose = slowBlinkClose
         self.slowBlinkHold = slowBlinkHold
         self.doubleBlinkGap = doubleBlinkGap
+        self.stamp = stamp
     }
 }
 
@@ -355,6 +444,15 @@ public struct FaceMotion: Sendable {
     public var boilPeriod: Double?
     /// folio only: held poses per cycle. `boilPeriod / boilSteps` is one frame.
     public var boilSteps: Int
+    /// The held frames themselves, in keyframe order. Empty where there is no
+    /// boil. Count matches `boilSteps` where both are set (face.css:858-863).
+    public var boilPoses: [BoilPose]
+
+    /// The boil as one value, for the renderer. nil where the face does not boil.
+    public var boilLoop: BoilLoop? {
+        guard let boilPeriod, !boilPoses.isEmpty else { return nil }
+        return BoilLoop(period: boilPeriod, poses: boilPoses)
+    }
 
     /// How long the earned beat holds, seconds.
     public var celebrationHold: Double
@@ -381,6 +479,7 @@ public struct FaceMotion: Sendable {
         releaseDuration: Double,
         boilPeriod: Double?,
         boilSteps: Int,
+        boilPoses: [BoilPose] = [],
         celebrationHold: Double,
         heartHold: Double,
         haptic: FaceHaptic,
@@ -401,6 +500,7 @@ public struct FaceMotion: Sendable {
         self.releaseDuration = releaseDuration
         self.boilPeriod = boilPeriod
         self.boilSteps = boilSteps
+        self.boilPoses = boilPoses
         self.celebrationHold = celebrationHold
         self.heartHold = heartHold
         self.haptic = haptic

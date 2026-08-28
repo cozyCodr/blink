@@ -31,10 +31,11 @@ public final class FocusLiveActivityController {
     public func start(
         blockID: String,
         title: String?,
+        face: FaceID = .capsule,
         state: FocusActivityAttributes.ContentState
     ) {
         guard isAvailable, activity == nil else { return }
-        let attributes = FocusActivityAttributes(blockID: blockID, title: title)
+        let attributes = FocusActivityAttributes(blockID: blockID, title: title, face: face)
         do {
             activity = try Activity.request(
                 attributes: attributes,

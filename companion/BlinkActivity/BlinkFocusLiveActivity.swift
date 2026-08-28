@@ -13,23 +13,25 @@ import BlinkKit
 // app pushing every second; paused, idle and ended states are static, so a
 // backgrounded session never keeps ticking on its own.
 //
-// Colour and shape compose from `CapsuleFace` tokens, the same theme layer the
-// app uses. P15-08 makes the theme follow the account; until then this wears
-// capsule, like the rest of the shipping app.
-
-private let theme: any FaceTokens = CapsuleFace()
+// Colour and shape compose from the SAME token layer the app uses. P15-08:
+// which face's tokens is decided by `context.attributes.face` — the app hands
+// the chosen face over when it starts the Activity (the extension has no app
+// group to read a preference from), and every view here resolves its theme
+// from that. No view asks "which face": it asks the tokens.
 
 struct BlinkFocusLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: FocusActivityAttributes.self) { context in
-            LockScreenView(context: context)
+            let theme = Faces.tokens(for: context.attributes.face)
+            LockScreenView(context: context, theme: theme)
                 .activityBackgroundTint(theme.ground.opacity(0.92))
                 .activitySystemActionForegroundColor(theme.accent)
         } dynamicIsland: { context in
             let state = context.state
+            let theme = Faces.tokens(for: context.attributes.face)
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    RingGlyph(state: state)
+                    RingGlyph(state: state, theme: theme)
                         .frame(width: 34, height: 34)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
@@ -43,17 +45,17 @@ struct BlinkFocusLiveActivity: Widget {
                         .lineLimit(1)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    ExpandedBottom(context: context)
+                    ExpandedBottom(context: context, theme: theme)
                 }
             } compactLeading: {
-                RingGlyph(state: state)
+                RingGlyph(state: state, theme: theme)
                     .frame(width: 20, height: 20)
             } compactTrailing: {
                 ElapsedText(state: state, font: .system(.body, design: .rounded).monospacedDigit())
                     .foregroundStyle(state.phase == .running ? theme.ink : theme.muted)
                     .frame(maxWidth: 54)
             } minimal: {
-                RingGlyph(state: state)
+                RingGlyph(state: state, theme: theme)
                     .frame(width: 20, height: 20)
             }
             .widgetURL(URL(string: "blink://focus"))
@@ -66,11 +68,12 @@ struct BlinkFocusLiveActivity: Widget {
 
 private struct LockScreenView: View {
     let context: ActivityViewContext<FocusActivityAttributes>
+    let theme: any FaceTokens
 
     var body: some View {
         let state = context.state
         HStack(spacing: 14) {
-            RingGlyph(state: state)
+            RingGlyph(state: state, theme: theme)
                 .frame(width: 48, height: 48)
 
             VStack(alignment: .leading, spacing: 3) {
@@ -78,7 +81,7 @@ private struct LockScreenView: View {
                     .font(.headline)
                     .foregroundStyle(theme.ink)
                     .lineLimit(1)
-                StatusLine(state: state)
+                StatusLine(state: state, theme: theme)
             }
 
             Spacer(minLength: 8)
@@ -86,7 +89,7 @@ private struct LockScreenView: View {
             VStack(alignment: .trailing, spacing: 6) {
                 ElapsedText(state: state, font: .system(.title, design: .rounded).monospacedDigit())
                     .foregroundStyle(state.phase == .running ? theme.ink : theme.muted)
-                DoneButton()
+                DoneButton(theme: theme)
             }
         }
         .padding(16)
@@ -120,6 +123,7 @@ private struct ElapsedText: View {
 /// (system-driven), static otherwise.
 private struct RingGlyph: View {
     let state: FocusActivityAttributes.ContentState
+    let theme: any FaceTokens
 
     var body: some View {
         ZStack {
@@ -162,6 +166,7 @@ private struct RingStyle: ProgressViewStyle {
 
 private struct StatusLine: View {
     let state: FocusActivityAttributes.ContentState
+    let theme: any FaceTokens
     var body: some View {
         Text(text)
             .font(.caption)
@@ -187,11 +192,12 @@ private struct StatusLine: View {
 
 private struct ExpandedBottom: View {
     let context: ActivityViewContext<FocusActivityAttributes>
+    let theme: any FaceTokens
     var body: some View {
         HStack {
-            StatusLine(state: context.state)
+            StatusLine(state: context.state, theme: theme)
             Spacer()
-            DoneButton()
+            DoneButton(theme: theme)
         }
     }
 }
@@ -200,6 +206,7 @@ private struct ExpandedBottom: View {
 /// so the write still goes through the app's single `log-time` path; the widget
 /// records nothing itself.
 private struct DoneButton: View {
+    let theme: any FaceTokens
     var body: some View {
         if #available(iOS 17.0, *) {
             Button(intent: EndFocusIntent()) {

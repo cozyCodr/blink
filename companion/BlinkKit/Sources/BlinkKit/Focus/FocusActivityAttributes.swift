@@ -80,10 +80,18 @@ public struct FocusActivityAttributes: ActivityAttributes {
     /// life; everything that changes lives in `ContentState`.
     public let blockID: String
     public let title: String?
+    /// Which face the widget wears (P15-08). It rides the attributes because
+    /// the extension has NO app group to read a preference from — this
+    /// project signs ad-hoc, the same wall the Keychain and the details cache
+    /// hit — so the app hands the chosen face over at `start` and the widget
+    /// resolves its tokens from it. A face picked MID-session reaches the
+    /// next Activity, not this one, which is how attributes work everywhere.
+    public let face: FaceID
 
-    public init(blockID: String, title: String?) {
+    public init(blockID: String, title: String?, face: FaceID = .capsule) {
         self.blockID = blockID
         self.title = title
+        self.face = face
     }
 }
 #endif

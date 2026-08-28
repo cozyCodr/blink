@@ -87,6 +87,25 @@ public struct FolioFace: FaceTokens {
         glintInset: .zero
     )
 
+    // MARK: The boil
+    //
+    // face.css:831-835 — the drawn mark's base border-radius is a calc over
+    // two boil vars, so each held boil frame nudges every corner:
+    //   h: 48%+a  52%-a  50%+b  50%-b
+    //   v: 53%-b  47%+b  52%+a  48%-a
+    // a and b are px against the 80x96 eye box; resolved to fractions here so
+    // the same frame reads correctly at any rendered size (park scale, watch).
+    static let eyeBox = CGSize(width: 80, height: 96)   // face.css:774-775
+    static func boilCorners(a: CGFloat, b: CGFloat) -> CornerRadii {
+        let w = eyeBox.width, h = eyeBox.height
+        return CornerRadii(
+            topLeft: CGSize(width: 0.48 + a / w, height: 0.53 - b / h),
+            topRight: CGSize(width: 0.52 - a / w, height: 0.47 + b / h),
+            bottomRight: CGSize(width: 0.50 + b / w, height: 0.52 + a / h),
+            bottomLeft: CGSize(width: 0.50 - b / w, height: 0.48 - a / h)
+        )
+    }
+
     // MARK: Motion
     public let motion = FaceMotion(
         breathePeriod: 7.0,          // face.css:799  animation: folio-breathe 7s
@@ -101,6 +120,11 @@ public struct FolioFace: FaceTokens {
         releaseDuration: 0.30,       // app.js:284    emote-ease window
         boilPeriod: 0.42,            // face.css:851  folio-boil 0.42s steps(1, end)
         boilSteps: 3,                // face.css:858-863  three held poses (~7fps)
+        boilPoses: [                 // face.css:859-861, resolved via boilCorners
+            BoilPose(corners: boilCorners(a: 0, b: 2), rotation: .degrees(0)),
+            BoilPose(corners: boilCorners(a: 3, b: -1), rotation: .degrees(0.9)),
+            BoilPose(corners: boilCorners(a: -2, b: 1), rotation: .degrees(-0.8))
+        ],
         celebrationHold: 1.4,        // app.js:5939   emote("celebrate", 1400)
         heartHold: 0.9,              // app.js:5753   emote("heart", 900)
         haptic: .thunk,              // COMPANION_SCREENS.md
@@ -123,22 +147,32 @@ public struct FolioFace: FaceTokens {
                                           // bounces it
             slowBlinkClose: 0.45,         // app.js:305    transform 0.45s
             slowBlinkHold: 0.48,          // app.js:309    setTimeout(…, 480)
-            doubleBlinkGap: 0.18          // app.js:181    setTimeout(…, 180)
+            doubleBlinkGap: 0.18,         // app.js:181    setTimeout(…, 180)
+            stamp: StampBeat(             // face.css:1114-1126
+                size: 58,                       // face.css:1116
+                rise: 84,                       // face.css:1115  top: -84px
+                startScale: 2.1,                // face.css:1124
+                startRotation: .degrees(-14),   // face.css:1124
+                landedRotation: .degrees(-4),   // face.css:1125
+                period: 0.32,                   // face.css:1121
+                steps: 2                        // face.css:1121  steps(2, end)
+            )
         )
     )
 
     // MARK: The vocabulary, in Folio's language
     //
     // The four transform channels and the corner sets, transcribed from
-    // face.css:1012-1113. What is NOT here is the parts that are not channels:
-    // the boil, the sorry smudge blur, the worried tremble, the heart lobes,
-    // and the stamped star. Those need folio's own eye RENDERER, which is
-    // P15-08. The table says what it carries rather than implying a whole beat.
+    // face.css:1012-1113, plus (P15-08) the parts that are not per-eye
+    // channels: the dim-by-colour ink washes, the sorry smudge blur, the
+    // worried tremble that replaces the base boil, and the heart lobes. The
+    // boil itself and the stamped star live in `motion`, because they are
+    // motion, not a pose.
     public let emotionPoses = EmotionPoseTable(
         // face.css:831-835 — the drawn mark's slightly irregular corners, at
         // the boil's rest pose (--boil-a 0px, --boil-b 2px, face.css:859)
         resting: EyePose(both: EyeChannels(
-            corners: .percent((48, 52, 50, 50), (53, 47, 52, 48))
+            corners: FolioFace.boilCorners(a: 0, b: 2)
         )),
         poses: [
             // face.css:913
@@ -153,7 +187,8 @@ public struct FolioFace: FaceTokens {
                 scaleX: 1.16, scaleY: 1.1,
                 corners: .percent((50, 48, 52, 50), (52, 50, 48, 50))
             )),
-            // face.css:1030-1036 — the blur is P15-08
+            // face.css:1030-1036 — the SMUDGE: droop, wash toward grey
+            // (colour, never opacity), and a hair of wet-ink blur
             .sorry: EyePose(
                 left: EyeChannels(
                     scaleY: 0.78, translateY: 10,
@@ -162,7 +197,9 @@ public struct FolioFace: FaceTokens {
                 right: EyeChannels(
                     scaleY: 0.78, translateY: 10,
                     corners: .percent((42, 58, 50, 46), (40, 74, 44, 34))
-                )
+                ),
+                ink: .dim,          // face.css:1032
+                blur: 1.4           // face.css:1033  filter: blur(1.4px)
             ),
             // face.css:1039-1041
             .curious: EyePose(
@@ -170,21 +207,30 @@ public struct FolioFace: FaceTokens {
                 right: EyeChannels(scaleY: 0.76, translateY: 3),
                 pairRotation: .degrees(3)
             ),
-            // face.css:1045-1049 — channels only; the lobes are P15-08
-            .heart: EyePose(both: EyeChannels(
-                scaleX: 0.78, scaleY: 0.66, rotation: .degrees(-45),
-                corners: .percent((0, 0, 0, 12), (0, 0, 0, 12))
-            )),
+            // face.css:1045-1056 — inked hearts in the stamp red: rotated
+            // body + the two round lobes; the boil rot keeps them hand-held
+            .heart: EyePose(
+                both: EyeChannels(
+                    scaleX: 0.78, scaleY: 0.66, rotation: .degrees(-45),
+                    corners: .percent((0, 0, 0, 12), (0, 0, 0, 12))
+                ),
+                ink: .heart,
+                heartLobes: true
+            ),
             // face.css:1060-1063
             .surprised: EyePose(both: EyeChannels(
                 scaleX: 0.6, scaleY: 0.52, translateY: -12,
                 corners: .percent((50, 50, 50, 50), (50, 50, 50, 50))
             )),
-            // face.css:1066-1070
-            .sleepy: EyePose(both: EyeChannels(
-                scaleY: 0.3, translateY: 12,
-                corners: .percent((42, 42, 50, 50), (22, 22, 74, 74))
-            )),
+            // face.css:1066-1070 — heavy lids, ink washed grey (colour, not
+            // opacity)
+            .sleepy: EyePose(
+                both: EyeChannels(
+                    scaleY: 0.3, translateY: 12,
+                    corners: .percent((42, 42, 50, 50), (22, 22, 74, 74))
+                ),
+                ink: .dim               // face.css:1068
+            ),
             // face.css:1073-1076
             .proud: EyePose(both: EyeChannels(
                 scaleY: 0.6, translateY: -9,
@@ -203,7 +249,12 @@ public struct FolioFace: FaceTokens {
                 pairRotation: .degrees(-2.5),
                 pairOffset: CGSize(width: 10, height: 0)
             ),
-            // face.css:1081-1092 — the tremble is P15-08
+            // face.css:1081-1097 — the marks knit inward, with a faster,
+            // harder tremble whose steps() jitter replaces the base boil for
+            // the hold. The pose overrides the corners outright, so only the
+            // tremble's rotation frames carry (same as the web, where the
+            // class's border-radius beats the base calc but --boil-rot still
+            // rides the composed transform).
             .worried: EyePose(
                 left: EyeChannels(
                     scaleY: 0.8, translateY: 3, rotation: .degrees(9),
@@ -212,9 +263,18 @@ public struct FolioFace: FaceTokens {
                 right: EyeChannels(
                     scaleY: 0.8, translateY: 3, rotation: .degrees(-9),
                     corners: .percent((24, 62, 52, 50), (26, 70, 50, 46))
+                ),
+                boilOverride: BoilLoop(
+                    period: 0.26,                     // face.css:1091
+                    poses: [                          // face.css:1093-1097
+                        BoilPose(corners: nil, rotation: .degrees(1.6)),
+                        BoilPose(corners: nil, rotation: .degrees(-1.4)),
+                        BoilPose(corners: nil, rotation: .degrees(0.6))
+                    ]
                 )
             ),
-            // face.css:1110-1113 — the star itself is P15-08
+            // face.css:1110-1113 — the happy arcs; the stamped star is
+            // motion, carried by `beats.stamp`
             .celebrate: EyePose(both: EyeChannels(
                 scaleY: 0.48, translateY: -7,
                 corners: .percent((50, 50, 16, 14), (68, 72, 8, 10))

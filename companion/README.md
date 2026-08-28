@@ -227,10 +227,17 @@ holds no timing literals, only `FaceMotion` values.
 will not interpolate a `RoundedRectangle`'s corner set, so the eight corner
 radii become `animatableData` on a custom `Shape`.
 
-**Capsule only, for now.** Lumen's dots-and-hairline and folio's boiling ink
-marks are P15-08. Their pose tables are already transcribed, so that item is
-rendering work rather than a fork; the rehearsal screen says plainly when you
-are looking at capsule bodies wearing another face's ink.
+**All three faces render their own eyes (P15-08).** Lumen draws two dark dots
+joined by a hairline whose ends run UNDER the dots (face.css:453), so no state
+can ever open a gap; its dim beats swap the INK to `#8b8e91` and never touch
+opacity, exactly as the web insists. Folio's ink marks boil: a
+`TimelineView(.periodic(by: boilPeriod / boilSteps))` swaps held corner/rotation
+frames with no tween between them — cleaner here than the web's
+discrete-custom-property hack, and the same ~7 poses a second. The heart's two
+round lobes, folio's sorry smudge blur, the worried tremble and the celebrate
+STAMP (a red star in hard `steps()` poses, no bounce — `bounceRise` is nil and
+the tokens are honoured) all ride the pose tables and `FaceMotion`; `EyesView`
+still never asks which face it is wearing.
 
 **Vocabulary, honestly counted.** Thirteen beats, not twelve, and they are not
 all the same kind of thing: eleven held classes (`app.js:265-266`), plus
@@ -313,8 +320,31 @@ BlinkKit/Sources/BlinkKit/Faces/FolioFace.swift
 Every value in those files carries the stylesheet line it was transcribed from,
 so the web and the companion can be diffed when either moves.
 
-## Face preference
+## Face preference (P15-08: on the account)
 
-`FaceProvider` persists the choice in `UserDefaults` under `blink.face`,
-defaulting to capsule. That is local only, and `lastSyncedWithServer` stays nil
-to say so. Moving the preference onto the account is P15-08.
+`FaceProvider` persists the choice in `UserDefaults` under `blink.face`
+(defaulting to capsule) as the FAST PATH, and the account holds the shared
+field: `UserProfile.face`, read back on `GET /profile` and `GET /v1/session`,
+written by `PATCH /v1/workspaces/{ws}/profile/face` (only `capsule|lumen|folio`
+is accepted, a repeat write is a no-op, same reasoning as the timezone
+endpoint). The conflict rule on load is SERVER WINS: it is the newest pick made
+on any device, and a pick made locally is pushed the moment it happens, so it
+can only ever replay your own latest choice. `lastSyncedWithServer` moves only
+when the server actually confirmed, and the Settings sheet says which of the
+two states you are in. The web mirrors the same rule in `app.js` (`syncFace`):
+localStorage paints before first paint, the profile reconciles after, a pick
+PATCHes fire-and-forget.
+
+The minimal S6 slice ships with this: a Settings sheet behind the gear on
+Today, holding the face picker, Sign out, "Open Blink on the web" and Privacy.
+The rest of S6 (notifications, calendar status) fills in with its own items.
+
+The Live Activity follows too: the chosen `FaceID` rides
+`FocusActivityAttributes` (set once at `start`), because the ad-hoc-signed
+extension has no app group to read a preference from. A face picked mid-session
+reaches the next Activity, not the running one.
+
+**Fonts, still not vendored.** The P15-01 fallback table above still stands:
+lumen wears San Francisco and folio wears Bradley Hand on a stock simulator.
+Vendoring the three OFL families needs font files this repo does not carry and
+this item did not download; it stays an open follow-up.

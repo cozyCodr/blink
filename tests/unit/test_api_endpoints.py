@@ -285,3 +285,55 @@ def test_ui_index_serving():
     assert res.status_code == 200
 
 
+# ---------------------------------------------------------------------------
+# P15-08 — the face preference on the account
+# ---------------------------------------------------------------------------
+
+def test_profile_face_defaults_to_none_and_rides_the_get():
+    """A fresh workspace has no face: nobody picked one, so nothing is claimed."""
+    ws_id = "test_ws_face_default"
+    profile = client.get(f"/v1/workspaces/{ws_id}/profile").json()
+    assert profile["face"] is None
+
+
+def test_profile_face_set_and_read_back():
+    ws_id = "test_ws_face_set"
+    res = client.patch(
+        f"/v1/workspaces/{ws_id}/profile/face", json={"face": "lumen"}
+    )
+    assert res.status_code == 200
+    assert res.json() == {"face": "lumen", "changed": True}
+    profile = client.get(f"/v1/workspaces/{ws_id}/profile").json()
+    assert profile["face"] == "lumen"
+
+
+def test_profile_face_rejects_unknown_value_and_keeps_the_old_one():
+    """Garbage is refused with a 422 and the stored face is left untouched,
+    exactly as the timezone endpoint treats an unknown zone."""
+    ws_id = "test_ws_face_invalid"
+    client.patch(f"/v1/workspaces/{ws_id}/profile/face", json={"face": "folio"})
+    res = client.patch(
+        f"/v1/workspaces/{ws_id}/profile/face", json={"face": "cathode"}
+    )
+    assert res.status_code == 422
+    profile = client.get(f"/v1/workspaces/{ws_id}/profile").json()
+    assert profile["face"] == "folio"
+
+
+def test_profile_face_repeat_is_a_no_op_write():
+    """The web posts on every pick; a repeat of the stored value must not bump
+    `updated_at` (each bump publishes an event and costs a Firestore write)."""
+    ws_id = "test_ws_face_noop"
+    first = client.patch(
+        f"/v1/workspaces/{ws_id}/profile/face", json={"face": "capsule"}
+    )
+    assert first.json()["changed"] is True
+    stamp = client.get(f"/v1/workspaces/{ws_id}/profile").json()["updated_at"]
+    again = client.patch(
+        f"/v1/workspaces/{ws_id}/profile/face", json={"face": "capsule"}
+    )
+    assert again.status_code == 200
+    assert again.json()["changed"] is False
+    assert client.get(f"/v1/workspaces/{ws_id}/profile").json()["updated_at"] == stamp
+
+

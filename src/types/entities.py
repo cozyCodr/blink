@@ -145,6 +145,13 @@ class UserProfile(BaseModel):
     # carried a "UTC" default since the first commit but was never read
     # anywhere; this field is the one that is actually wired up.
     timezone: Optional[str] = None
+    # P15-08: the chosen face ("capsule" | "lumen" | "folio"), shared between
+    # the web app and the companion so both wear the same skin. Same shape as
+    # `timezone` above: Optional, validated at the endpoint (never stored raw),
+    # and it rides the Firestore profile snapshot automatically. None means the
+    # user has never picked one on any device, and every client falls back to
+    # its own local default (capsule, per planner P10-00).
+    face: Optional[str] = None
     platforms: List[str] = Field(default_factory=list)   # e.g. ["Coursera", "DataCamp"]
     current_level: Optional[str] = None                  # e.g. "beginner", "some Python"
     hours_per_week: Optional[int] = None

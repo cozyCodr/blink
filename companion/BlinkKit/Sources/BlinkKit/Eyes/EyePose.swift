@@ -175,6 +175,48 @@ public struct EyeChannels: Sendable, Equatable {
     }
 }
 
+// MARK: - Ink
+
+/// Which ink the eye bodies wear for a beat. The flat-ink faces dim via
+/// COLOUR and keep the shapes fully opaque (face.css:394 "dim states grey …
+/// but stay OPAQUE", face.css:767-768), and the heart re-inks the bodies in
+/// the face's heart colour outright (face.css:645, face.css:1048). Capsule
+/// never re-inks: its dim beats turn the glow down instead.
+public enum EyeInkRole: Sendable, Equatable {
+    /// The face's eye ink (the gradient stops, or the flat ink).
+    case standard
+    /// The face's `eyeInkDim`, flat. Colour change, never opacity.
+    case dim
+    /// The face's `heart` colour, flat.
+    case heart
+}
+
+/// What the connecting hairline does during a beat, on a face that has one
+/// (lumen's `.eyes::before`, face.css:445-461). Every value neutral by
+/// default, so an emotion declares only what its CSS block declares.
+public struct HairlineState: Sendable, Equatable {
+    /// The line's own translateY, points (sorry drops it, face.css:632).
+    public var offsetY: CGFloat
+    /// The line's opacity. The DOTS never fade; the line may (face.css:632).
+    public var opacity: Double
+    /// The line's scaleX (surprised contracts it, face.css:658).
+    public var scaleX: CGFloat
+    /// The line's ink (the heart blushes it coral, face.css:641).
+    public var ink: EyeInkRole
+
+    public init(
+        offsetY: CGFloat = 0,
+        opacity: Double = 1,
+        scaleX: CGFloat = 1,
+        ink: EyeInkRole = .standard
+    ) {
+        self.offsetY = offsetY
+        self.opacity = opacity
+        self.scaleX = scaleX
+        self.ink = ink
+    }
+}
+
 // MARK: - The pair
 
 /// One emotion, fully described: both eyes, plus everything the CSS puts on
@@ -197,6 +239,21 @@ public struct EyePose: Sendable, Equatable {
     public var brightness: Double = 1
     /// Whether this beat bounces the pair (celebrate).
     public var bounces: Bool = false
+    /// Which ink the bodies wear (see `EyeInkRole`).
+    public var ink: EyeInkRole = .standard
+    /// Whether each body grows the two round lobes that complete a heart
+    /// (the web's `::before`/`::after` pseudos, face.css:648-654 and
+    /// face.css:1050-1056). Capsule's heart is the body itself and never
+    /// sets this.
+    public var heartLobes: Bool = false
+    /// A CSS `filter: blur(n px)` on the bodies. folio's sorry smudge
+    /// (face.css:1033). 0 is untouched.
+    public var blur: Double = 0
+    /// A boil that replaces the face's base boil for this beat (folio's
+    /// worried tremble, face.css:1091-1097). nil means the base boil stands.
+    public var boilOverride: BoilLoop?
+    /// What the connecting hairline does, on a face that has one.
+    public var line: HairlineState = HairlineState()
 
     public init(
         left: EyeChannels = EyeChannels(),
@@ -207,7 +264,12 @@ public struct EyePose: Sendable, Equatable {
         rightEyeInset: CGFloat = 0,
         glow: CGFloat? = nil,
         brightness: Double = 1,
-        bounces: Bool = false
+        bounces: Bool = false,
+        ink: EyeInkRole = .standard,
+        heartLobes: Bool = false,
+        blur: Double = 0,
+        boilOverride: BoilLoop? = nil,
+        line: HairlineState = HairlineState()
     ) {
         self.left = left
         self.right = right
@@ -218,6 +280,11 @@ public struct EyePose: Sendable, Equatable {
         self.glow = glow
         self.brightness = brightness
         self.bounces = bounces
+        self.ink = ink
+        self.heartLobes = heartLobes
+        self.blur = blur
+        self.boilOverride = boilOverride
+        self.line = line
     }
 
     /// Both eyes doing the same thing, which is most emotions.
@@ -229,7 +296,12 @@ public struct EyePose: Sendable, Equatable {
         rightEyeInset: CGFloat = 0,
         glow: CGFloat? = nil,
         brightness: Double = 1,
-        bounces: Bool = false
+        bounces: Bool = false,
+        ink: EyeInkRole = .standard,
+        heartLobes: Bool = false,
+        blur: Double = 0,
+        boilOverride: BoilLoop? = nil,
+        line: HairlineState = HairlineState()
     ) {
         self.init(
             left: both,
@@ -240,7 +312,12 @@ public struct EyePose: Sendable, Equatable {
             rightEyeInset: rightEyeInset,
             glow: glow,
             brightness: brightness,
-            bounces: bounces
+            bounces: bounces,
+            ink: ink,
+            heartLobes: heartLobes,
+            blur: blur,
+            boilOverride: boilOverride,
+            line: line
         )
     }
 

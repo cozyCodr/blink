@@ -27,9 +27,7 @@ import BlinkKit
 struct TodayScreen: View {
     @Environment(\.face) private var face
     @Environment(\.openURL) private var openURL
-    #if DEBUG
     @Environment(FaceProvider.self) private var faces
-    #endif
 
     let identity: BlinkIdentity
     let session: BlinkSession
@@ -45,6 +43,7 @@ struct TodayScreen: View {
     /// The session S1 is about to run, or nil. Set by the Start button and
     /// cleared when S3 closes; presenting it is what opens the focus timer.
     @State private var focusTarget: SessionCard?
+    @State private var showingSettings = false
     @State private var showingRehearsal = false
     #if DEBUG
     @State private var showingSignals = false
@@ -83,11 +82,21 @@ struct TodayScreen: View {
             .refreshable { await store.refresh() }
             .scrollBounceBehavior(.always)
 
-            #if DEBUG
-            debugDoor
-            #endif
+            topBar
         }
         .task { await store.load(session: session) }
+        // P15-08 — the face preference lives on the account. Wire the
+        // write-through seam first, then adopt what the server holds: server
+        // wins, because it is the newest pick made on ANY device, and a pick
+        // made here is pushed the moment it happens.
+        .task {
+            let sync = FaceSyncClient()
+            let blink = session
+            faces.pushToServer = { await sync.push($0, session: blink) }
+            if let serverFace = identity.face {
+                faces.adopt(serverFace: serverFace)
+            }
+        }
         // The permission ask waits for a payload on purpose. Asking on launch
         // means asking before the app has anything to offer; asking once
         // Today holds a real plan means the question has an answer behind it.
@@ -127,7 +136,11 @@ struct TodayScreen: View {
                     title: target.title,
                     plannedMinutes: target.plannedMinutes,
                     resumedMinutes: target.resumedTimerMinutes,
-                    session: session
+                    session: session,
+                    // The Live Activity wears the chosen face (P15-08). It
+                    // rides the attributes, set once at start, because the
+                    // widget extension has no app group to read from.
+                    face: faces.faceID
                 ),
                 rig: rig,
                 streakDays: store.state?.streakDays ?? 0,
@@ -141,6 +154,11 @@ struct TodayScreen: View {
                 }
             )
             .face(face)
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsScreen(identity: identity, onSignedOut: onSignedOut)
+                .environment(faces)
+                .face(face)
         }
         #if DEBUG
         .sheet(isPresented: $showingRehearsal) {
@@ -507,13 +525,25 @@ struct TodayScreen: View {
             )
     }
 
-    #if DEBUG
-    /// P15-02's rehearsal screen stays one tap away, as it was before this
-    /// screen took its place in RootView. DEBUG only; not product UI.
-    private var debugDoor: some View {
+    /// The quiet chrome over the eyes: the Settings door (S6) on the left,
+    /// and, in DEBUG builds only, P15-02's rehearsal doors on the right.
+    private var topBar: some View {
         VStack {
             HStack {
+                Button {
+                    showingSettings = true
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(face.bodyFont)
+                        .foregroundStyle(face.faint)
+                        .frame(width: face.layout.minTapTarget,
+                               height: face.layout.minTapTarget,
+                               alignment: .topLeading)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Settings")
                 Spacer()
+                #if DEBUG
                 Button("beats") { showingRehearsal = true }
                     .font(face.metaFont)
                     .foregroundStyle(face.faint)
@@ -521,12 +551,12 @@ struct TodayScreen: View {
                     .font(face.metaFont)
                     .foregroundStyle(face.faint)
                     .padding(.leading, face.layout.tightGap)
+                #endif
             }
             Spacer()
         }
         .padding(face.layout.screenMargin)
     }
-    #endif
 
     // MARK: The beats
 

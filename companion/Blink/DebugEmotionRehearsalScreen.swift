@@ -60,16 +60,10 @@ struct DebugEmotionRehearsalScreen: View {
                 }
                 Spacer()
                 VStack(spacing: 6) {
-                    if !isCapsuleEyeShape {
-                        // Degrade, never fabricate: the pose tables for lumen
-                        // and folio are transcribed, but their eye shapes are
-                        // not drawn yet. Say so rather than letting capsule
-                        // bodies pass as another face.
-                        Text("These are capsule bodies wearing \(face.displayName)'s ink. \(face.displayName)'s own eye shape lands in P15-08.")
-                            .font(face.monoFont)
-                            .foregroundStyle(face.warm)
-                            .multilineTextAlignment(.center)
-                    }
+                    // P15-08: every face renders its own eyes now — lumen's
+                    // dots-and-hairline, folio's boiling ink — so the old
+                    // "capsule bodies wearing another face's ink" warning
+                    // would itself be the lie.
                     if reduceMotion {
                         Text("Reduced Motion is on. Shapes still change, they just arrive without travel.")
                             .font(face.monoFont)
@@ -84,11 +78,6 @@ struct DebugEmotionRehearsalScreen: View {
         .frame(height: 300)
         .frame(maxWidth: .infinity)
         .clipped()
-    }
-
-    private var isCapsuleEyeShape: Bool {
-        if case .capsule = face.eyeShape { return true }
-        return false
     }
 
     private var nowShowing: String {

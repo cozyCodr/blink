@@ -5447,6 +5447,33 @@
     }
     applyFace(settings.get("face"));
     settings.onChange(function (k, v) { if (k === "face") applyFace(v); });
+    /* P15-08 — the face preference lives on the account now, so the phone and
+       this page wear the same skin. localStorage stays the FAST PATH (index.html
+       applies it before first paint); the server field reconciles after load.
+       Conflict rule: the server's value wins when it exists and differs,
+       because it is the newest pick made on ANY device; a pick made HERE goes
+       straight to the server below, so "server wins on load" can only ever
+       replay someone's own latest choice. Both requests degrade silently:
+       offline, this page simply keeps the face it already had. */
+    (function syncFace() {
+      var FACE_NAMES = ["capsule", "lumen", "folio"];
+      var adopting = false;   // adopting the server's value must not echo it back
+      settings.onChange(function (k, v) {
+        if (k !== "face" || adopting) return;
+        api("/profile/face", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ face: v }),
+        }).catch(function () { /* offline pick stays local; next load reconciles */ });
+      });
+      api("/profile").then(function (profile) {
+        var remote = profile && profile.face;
+        if (FACE_NAMES.indexOf(remote) === -1) return;   // null/junk: keep local
+        if (remote === settings.get("face")) return;
+        adopting = true;
+        try { settings.set("face", remote); } finally { adopting = false; }
+      }).catch(function () { /* unreachable server changes nothing */ });
+    })();
     var settingsUi = createSettings(settings);
 
     // Google OAuth returns land here: sign-in (?signin=connected|error, plus
