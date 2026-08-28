@@ -15,7 +15,14 @@ struct SettingsScreen: View {
     @Environment(\.dismiss) private var dismiss
 
     let identity: BlinkIdentity
+    /// The bearer P15-03 minted. Settings reads and writes the calendar with
+    /// the same credential every other screen uses.
+    let session: BlinkSession
     var onSignedOut: () -> Void
+
+    /// Calendar state, as the SERVER states it. Nothing is shown until it
+    /// answers, and nothing here claims a sync that did not happen.
+    @State private var calendar = CalendarController()
 
     /// P15-12: the agent's voice, default OFF like the web's `voiceEnabled`
     /// toggle, persisted locally the same way the face preference is
@@ -30,11 +37,19 @@ struct SettingsScreen: View {
                 VStack(alignment: .leading, spacing: face.layout.sectionGap) {
                     header
                     facePicker
+                    calendarSection
                     voiceSection
                     account
                     links
                 }
                 .padding(face.layout.screenMargin)
+            }
+        }
+        .task { await calendar.load(session: session) }
+        .onChange(of: calendar.needsSignIn) { _, dead in
+            if dead {
+                dismiss()
+                onSignedOut()
             }
         }
     }
@@ -105,6 +120,101 @@ struct SettingsScreen: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Wear the \(candidate.displayName) face")
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    // MARK: Calendar
+
+    /// Three honest states and one action.
+    ///
+    /// Connected and granted: Blink is reading the calendar on its own, and
+    /// "Sync now" is there for the impatient. Connected without Calendar
+    /// permission: say exactly that, and point at the web, because the consent
+    /// screen lives there and this app will not grow a second OAuth flow. Not
+    /// connected: the same pointer, no pretending.
+    @ViewBuilder
+    private var calendarSection: some View {
+        VStack(alignment: .leading, spacing: face.layout.rowGap) {
+            sectionLabel("CALENDAR")
+            if let status = calendar.status {
+                switch status.standing {
+                case .connected:
+                    Text(status.email ?? "Google Calendar is connected.")
+                        .font(face.bodyFont)
+                        .foregroundStyle(face.ink)
+                    Text("I read your calendar on my own, so plans go around what is already there.")
+                        .font(face.metaFont)
+                        .foregroundStyle(face.muted)
+                    syncRow
+
+                case .connectedWithoutCalendarPermission:
+                    Text("Signed in, no Calendar permission yet.")
+                        .font(face.bodyFont)
+                        .foregroundStyle(face.ink)
+                    Text("Until you grant it, I am planning without knowing what is already booked. Connect it on the web and keep the Calendar box checked.")
+                        .font(face.metaFont)
+                        .foregroundStyle(face.warm)
+                    webLink("Fix this on the web")
+
+                case .notConnected:
+                    Text("Not connected.")
+                        .font(face.bodyFont)
+                        .foregroundStyle(face.ink)
+                    Text("Connect Google Calendar on the web and I will keep it in step from then on.")
+                        .font(face.metaFont)
+                        .foregroundStyle(face.muted)
+                    webLink("Connect it on the web")
+                }
+            } else if calendar.isLoading {
+                Text("Checking.")
+                    .font(face.metaFont)
+                    .foregroundStyle(face.muted)
+            } else {
+                // The read did not answer. Silence about the calendar beats a
+                // guess about it.
+                Text("I could not reach the server to check this.")
+                    .font(face.metaFont)
+                    .foregroundStyle(face.muted)
+            }
+        }
+    }
+
+    private var syncRow: some View {
+        VStack(alignment: .leading, spacing: face.layout.rowGap) {
+            Button {
+                Task { await calendar.sync(session: session) }
+            } label: {
+                Text(calendar.isSyncing ? "Syncing" : "Sync now")
+                    .font(face.bodyFont)
+                    .foregroundStyle(face.accent)
+                    .frame(minHeight: face.layout.minTapTarget, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .disabled(calendar.isSyncing)
+
+            // Counts, from the server's own answer. No titles, because the
+            // phone is never sent one.
+            if calendar.lastSyncFailed {
+                Text("That pull did not go through. Your calendar is as I last had it.")
+                    .font(face.metaFont)
+                    .foregroundStyle(face.warm)
+            } else if let result = calendar.lastResult {
+                Text("^[\(result.eventsCount) event](inflect: true) read, ^[\(result.constraintsCreated) busy block](inflect: true) in your week.")
+                    .font(face.metaFont)
+                    .foregroundStyle(face.faint)
+            }
+        }
+    }
+
+    private func webLink(_ title: String) -> some View {
+        Button {
+            openURL(BlinkAPI.baseURL())
+        } label: {
+            Text(title)
+                .font(face.bodyFont)
+                .foregroundStyle(face.accent)
+                .frame(minHeight: face.layout.minTapTarget, alignment: .leading)
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: Voice (P15-12)

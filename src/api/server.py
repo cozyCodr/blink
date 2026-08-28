@@ -12,7 +12,7 @@ import secrets
 import time
 import urllib.parse
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, HTTPException, Header, status, BackgroundTasks, Request, Query
 from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse, JSONResponse
@@ -341,10 +341,16 @@ def get_workspace_state(workspace_id: str):
 @app.get("/v1/workspaces/{workspace_id}/details")
 def get_workspace_details(
     workspace_id: str,
+    background_tasks: BackgroundTasks,
     days: int = Query(7, description="Ledger horizon in days (clamped to 1-370)")
 ):
     """Full detail bundle powering the interactive Neo-Brutalist dashboard."""
     store = get_or_create_store(workspace_id)
+    # Opportunistic calendar refresh, AFTER this response is handed back (same
+    # discipline as the persistence middleware). The bundle below is built from
+    # whatever capacity we already hold, so nobody waits on Google, and a stale
+    # window is closed in time for the next load or turn.
+    background_tasks.add_task(maybe_sync_calendar, workspace_id)
     now = _now()
     days = max(1, min(370, days))
     ledger = ledger_for(store, now, days=days)
@@ -1328,7 +1334,7 @@ def _whatif_turn_response(store, workspace_id: str, hours: float, now: datetime)
 
 
 @app.post("/v1/workspaces/{workspace_id}/turn")
-def turn(workspace_id: str, payload: TurnRequest):
+def turn(workspace_id: str, payload: TurnRequest, background_tasks: BackgroundTasks):
     """Unified entry point: route a free-form message to a chat answer, an
     elicitation question, or a concrete decompose+schedule.
 
@@ -1348,6 +1354,10 @@ def turn(workspace_id: str, payload: TurnRequest):
             decision_log.turn_summary(
                 trace.get("intent"), res,
                 int((time.monotonic() - started) * 1000)))
+        # Opportunistic refresh, off the response path. It cannot help the turn
+        # that just ran (nothing may block a reply on a Google round trip), it
+        # closes a stale window so the NEXT plan is drawn on real meetings.
+        background_tasks.add_task(maybe_sync_calendar, workspace_id)
         # P13: one append per turn, on the endpoint, whatever branch replied.
         return _log_exchange(get_or_create_store(workspace_id), payload.message, res)
 
@@ -2149,6 +2159,70 @@ def _sync_google_events(store, workspace_id: str) -> Dict[str, Any]:
     return {"status": "synced", "events_count": len(events), "constraints_created": len(constraints)}
 
 
+# How long a Google pull stays FRESH. Inside this window an opportunistic
+# surface (a dashboard load, a turn) leaves the calendar alone; past it, the
+# next such surface refreshes it in the background. Thirty minutes is the
+# smallest window that still keeps a hard-polled workspace far under Google's
+# per-user quota, and small enough that a meeting accepted this morning is in
+# the capacity ledger before this afternoon's plan is drawn.
+CALENDAR_SYNC_FRESHNESS_MINUTES = 30
+
+# workspace id -> naive-UTC instant of the last SUCCESSFUL pull. Process-local
+# on purpose: this is a rate limiter, not user state. A restart (or a second
+# Cloud Run instance) simply means one extra sync, never a stale ledger, so it
+# does not belong in the durable snapshot.
+_last_calendar_sync_at: Dict[str, datetime] = {}
+
+
+def calendar_sync_is_stale(workspace_id: str, now: datetime) -> bool:
+    """True when this workspace has never synced, or synced longer ago than the
+    freshness window."""
+    last = _last_calendar_sync_at.get(workspace_id)
+    if last is None:
+        return True
+    return (now - last) >= timedelta(minutes=CALENDAR_SYNC_FRESHNESS_MINUTES)
+
+
+def maybe_sync_calendar(workspace_id: str, now: Optional[datetime] = None,
+                        force: bool = False) -> Optional[Dict[str, Any]]:
+    """Pull Google events into capacity IF it is worth doing, and never raise.
+
+    Worth doing means: the workspace is connected, Calendar permission was
+    actually granted, and the last successful pull is older than the freshness
+    window (or `force`, used right after a fresh consent).
+
+    This is the degrade-never-fabricate path. An expired refresh token, a
+    revoked grant or a Google outage returns None and leaves the existing
+    capacity exactly as it was: no route that calls this may fail because of
+    it, and nothing downstream is told the calendar is up to date. One honest
+    log line either way, counts and milliseconds only, never a title, an
+    attendee or an address.
+    """
+    store = get_or_create_store(workspace_id)
+    tokens = store.get_google_tokens()
+    if not tokens or not gcal.has_calendar_scope(tokens):
+        return None
+    now = now or _now()
+    if not force and not calendar_sync_is_stale(workspace_id, now):
+        return None
+    started = time.monotonic()
+    try:
+        summary = _sync_google_events(store, workspace_id)
+    except Exception as exc:  # HTTPException, CalendarUnavailable, anything
+        decision_log.decision(
+            "calendar", workspace_id,
+            f"sync failed after {int((time.monotonic() - started) * 1000)}ms "
+            f"({type(exc).__name__}); capacity left as it was")
+        return None
+    _last_calendar_sync_at[workspace_id] = now
+    decision_log.decision(
+        "calendar", workspace_id,
+        f"synced {summary['events_count']} events, "
+        f"{summary['constraints_created']} busy intervals, "
+        f"in {int((time.monotonic() - started) * 1000)}ms")
+    return summary
+
+
 @app.get("/v1/workspaces/{workspace_id}/calendar/connect")
 def calendar_connect(workspace_id: str):
     """Start the OAuth flow: return the Google consent URL for the frontend to open."""
@@ -2171,6 +2245,13 @@ def calendar_status(workspace_id: str):
         "connected": bool(tokens),
         "email": (tokens or {}).get("email"),
         "calendar_granted": gcal.has_calendar_scope(tokens),
+        # None until a pull has actually succeeded in this process. Clients show
+        # a freshness line ONLY when this is set, so nothing ever claims the
+        # calendar is current on the strength of a sync that failed.
+        "last_synced_at": (
+            _last_calendar_sync_at[workspace_id].isoformat()
+            if workspace_id in _last_calendar_sync_at else None
+        ),
     }
 
 
@@ -2181,6 +2262,7 @@ def calendar_disconnect(workspace_id: str):
     store.set_google_tokens(None)
     for cid in [c for c in list(store.constraints.keys()) if c.startswith("gcal_")]:
         del store.constraints[cid]
+    _last_calendar_sync_at.pop(workspace_id, None)
     return {"status": "disconnected"}
 
 
@@ -2250,6 +2332,12 @@ def _signin_callback(code: str, state: str):
     name = claims.get("name") or claims.get("given_name")
     if name:
         store.update_profile(name=str(name).strip()[:120])
+
+    # The user consented seconds ago: pull their calendar NOW rather than
+    # waiting for a freshness window to expire, so the first plan they see is
+    # already drawn around real meetings. Blocking here on purpose (this is a
+    # redirect, not a turn) and it cannot fail the sign-in.
+    maybe_sync_calendar(user_ws, force=True)
 
     dest = f"/?signin=connected&ws={user_ws}"
     if not gcal.has_calendar_scope(tokens):
@@ -2420,6 +2508,10 @@ def _native_callback(code: str, state: str):
     if name:
         store.update_profile(name=str(name).strip()[:120])
 
+    # Same reasoning as the web callback: fresh consent, immediate pull, so the
+    # companion's first Today screen is grounded in the real calendar.
+    maybe_sync_calendar(user_ws, force=True)
+
     token = blink_auth.make_bearer_token(user_ws)
     if not token:  # secret vanished mid-flight; say so rather than guess
         return _native_error(redirect, "unavailable", client_state)
@@ -2465,6 +2557,9 @@ def oauth_callback(code: Optional[str] = None, state: Optional[str] = None, erro
     store.set_google_tokens(tokens)
     if not gcal.has_calendar_scope(tokens):
         return RedirectResponse(url="/?calendar=missing_scope")
+    # Calendar-only connect: they just said yes, so pull immediately instead of
+    # leaving the ledger empty until something else happens to ask.
+    maybe_sync_calendar(workspace_id, force=True)
     return RedirectResponse(url="/?calendar=connected")
 
 
@@ -2473,9 +2568,17 @@ def calendar_sync_google(workspace_id: str):
     """Pull the user's upcoming Google events into capacity as busy constraints."""
     store = get_or_create_store(workspace_id)
     try:
-        return _sync_google_events(store, workspace_id)
+        summary = _sync_google_events(store, workspace_id)
     except gcal.CalendarUnavailable as e:
         raise HTTPException(status_code=502, detail=str(e))
+    # A manual pull counts as a pull: it restarts the freshness window, so the
+    # button and the background path share one clock.
+    _last_calendar_sync_at[workspace_id] = _now()
+    decision_log.decision(
+        "calendar", workspace_id,
+        f"synced {summary['events_count']} events, "
+        f"{summary['constraints_created']} busy intervals, on request")
+    return summary
 
 
 @app.post("/v1/workspaces/{workspace_id}/calendar/events")

@@ -458,6 +458,10 @@ public struct FaceMotion: Sendable {
     public var celebrationHold: Double
     /// How long the heart holds, seconds.
     public var heartHold: Double
+    /// How long a returning-greeting holds before it leaves, seconds. The
+    /// greeting is a MOMENT on return, the way the web speaks it once, not a
+    /// row that lives on the screen (P15-13).
+    public var greetingHold: Double
 
     // P15-11: the conversation surface's motion, mirroring the web.
     /// The mode cross-fade: how long one conversation state eases out before
@@ -494,6 +498,7 @@ public struct FaceMotion: Sendable {
         boilPoses: [BoilPose] = [],
         celebrationHold: Double,
         heartHold: Double,
+        greetingHold: Double = 4.0,
         swapFade: Double,
         dealDuration: Double,
         dealStagger: Double,
@@ -519,6 +524,7 @@ public struct FaceMotion: Sendable {
         self.boilPoses = boilPoses
         self.celebrationHold = celebrationHold
         self.heartHold = heartHold
+        self.greetingHold = greetingHold
         self.swapFade = swapFade
         self.dealDuration = dealDuration
         self.dealStagger = dealStagger

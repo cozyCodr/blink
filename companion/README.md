@@ -26,6 +26,18 @@ up, sorry only on a server-answered failure. The conversation's motion rides
 four new FaceMotion tokens (`swapFade`, `dealDuration`, `dealStagger`,
 `revealRise`), each cited to the web's timings.
 
+P15-13 fixed two honesty gaps. Settings now carries a **Calendar** section
+that states what the server states: connected, connected without Calendar
+permission, or not connected, plus a "Sync now" action over the same
+`BlinkDetailsClient` transport (`BlinkKit/Today/CalendarClient.swift`). Counts
+only ever, never an event title, and never a freshness claim behind a sync
+that failed. Connecting still happens on the web: there is one OAuth flow and
+this app does not grow a second. And the greeting stopped being furniture: it
+holds for `face.motion.greetingHold` on the first appearance of an app
+session, then leaves, and any interaction (a send, a pull to refresh, opening
+Settings, starting a session) retires it early. Reduced Motion gets the same
+arrival and departure without the fade.
+
 ## Layout
 
 ```

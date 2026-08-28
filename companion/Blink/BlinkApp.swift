@@ -53,10 +53,15 @@ struct AppRoot: View {
             // real API with a real payload. Nothing is stubbed: the door only
             // supplies which workspace to read.
             //
-            // DEBUG only, refuses a `u_` id outright, and the identity carries
-            // no greeting because no server composed one.
+            // DEBUG only, refuses a `u_` id outright. The identity carries no
+            // greeting unless `-blinkDebugGreeting "…"` supplies one, which
+            // exists solely so the greeting's LIFECYCLE (it holds, then it
+            // leaves) can be inspected without signing in as somebody.
             TodayScreen(
-                identity: BlinkIdentity(workspaceID: workspace),
+                identity: BlinkIdentity(
+                    workspaceID: workspace,
+                    greeting: UserDefaults.standard.string(forKey: "blinkDebugGreeting")
+                ),
                 session: BlinkSession(token: "", workspaceID: workspace),
                 rig: rig,
                 onSignedOut: {}

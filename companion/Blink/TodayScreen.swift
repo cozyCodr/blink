@@ -56,6 +56,12 @@ struct TodayScreen: View {
     /// P15-12: whether the software keyboard is up, so the eyes give ground
     /// instead of the compose field being pushed offscreen.
     @State private var keyboardUp = false
+    /// P15-13: the greeting is a MOMENT, not a row. True for the first few
+    /// seconds of an app session, then false forever (this state lives as long
+    /// as the signed-in screen does, so it cannot come back on a scroll, a
+    /// refresh or a returning foreground). The web speaks its greeting once on
+    /// return from sign-in; this is the same event, worn visually.
+    @State private var greetingShowing = true
     @State private var showingSettings = false
     @State private var showingRehearsal = false
     #if DEBUG
@@ -103,7 +109,10 @@ struct TodayScreen: View {
                     .padding(.bottom, face.layout.cardPaddingBottom)
                     .animation(reduceMotion ? nil : face.motion.swapAnimation, value: eyeScale)
                 }
-                .refreshable { await store.refresh() }
+                .refreshable {
+                    retireGreeting()
+                    await store.refresh()
+                }
                 .scrollBounceBehavior(.always)
                 // P15-12: a drag lets go of the keyboard, so the compressed
                 // layout always has a way back to full-size eyes.
@@ -153,6 +162,20 @@ struct TodayScreen: View {
         .onReceive(NotificationCenter.default.publisher(for: .blinkSignalActionWrote)) { _ in
             Task { await store.refresh() }
         }
+        // The person has started talking, or gone somewhere: the greeting has
+        // done its job and gets out of the way.
+        .onChange(of: composer.isSending) { _, sending in
+            if sending { retireGreeting() }
+        }
+        .onChange(of: keyboardUp) { _, up in
+            if up { retireGreeting() }
+        }
+        .onChange(of: showingSettings) { _, open in
+            if open { retireGreeting() }
+        }
+        .onChange(of: focusTarget?.blockID) { _, target in
+            if target != nil { retireGreeting() }
+        }
         .onChange(of: composer.needsSignIn) { _, dead in
             if dead { onSignedOut() }
         }
@@ -200,7 +223,7 @@ struct TodayScreen: View {
             .face(face)
         }
         .sheet(isPresented: $showingSettings) {
-            SettingsScreen(identity: identity, onSignedOut: onSignedOut)
+            SettingsScreen(identity: identity, session: session, onSignedOut: onSignedOut)
                 .environment(faces)
                 .face(face)
         }
@@ -222,13 +245,35 @@ struct TodayScreen: View {
     @ViewBuilder
     private var greeting: some View {
         // Server-composed, from the STORED name. No name, no greeting, and
-        // never one this app wrote (P15-03).
-        if let line = identity.greeting {
+        // never one this app wrote (P15-03). The TEXT is the server's; only its
+        // lifecycle is decided here.
+        //
+        // It says one thing, "you are back", and that stops being news within
+        // seconds. So it holds for `face.motion.greetingHold` and then leaves,
+        // and any interaction that means the person has moved on (a send, a
+        // pull to refresh, opening Settings) retires it early. Reduced Motion
+        // gets the same appearance and the same departure, without the fade.
+        if let line = identity.greeting, greetingShowing {
             Text(line)
                 .font(face.displayFont)
                 .foregroundStyle(face.ink)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
+                .transition(reduceMotion ? .identity : .opacity)
+                .task {
+                    try? await Task.sleep(for: .seconds(face.motion.greetingHold))
+                    guard !Task.isCancelled else { return }
+                    retireGreeting()
+                }
+        }
+    }
+
+    /// Let the greeting go, once. Safe to call from anywhere and from any
+    /// number of places: it never brings the line back.
+    private func retireGreeting() {
+        guard greetingShowing else { return }
+        withAnimation(reduceMotion ? nil : face.motion.releaseAnimation) {
+            greetingShowing = false
         }
     }
 

@@ -117,6 +117,7 @@ public struct CapsuleFace: FaceTokens {
         boilSteps: 0,
         celebrationHold: 1.4,        // app.js:5939   emote("celebrate", 1400)
         heartHold: 0.9,              // app.js:5753   emote("heart", 900)
+        greetingHold: 4.0,        // a return greeting is a moment, not furniture
         swapFade: 0.14,              // app.js:457-464  swapMode 140ms
         dealDuration: 0.26,          // clarify.css:229 clarifyDeal 0.26s
         dealStagger: 0.04,           // clarify.css:232-238  40ms apart
