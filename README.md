@@ -49,9 +49,29 @@ mermaid, renders inline on GitHub). In short:
 - **State** (`src/agent/workspace_registry.py`, `persistence.py`) — the working copy is in memory for speed; **Firestore** (native mode, database `blink`) holds a snapshot per workspace, split into six documents (`commitments`, `tasks`, `blocks`, `zones`, `constraints`, `meta`). A workspace hydrates from Firestore the first time an instance touches it, and only the sections that actually changed are written back, after the response, off the request path. Live asyncio listeners and the trace stream are never persisted. If Firestore is unavailable, Blink logs one line, keeps serving from memory, and `/_health` reports `"backend": "memory"` so nothing ever claims state was saved when it was not. (The route is `/_health`, not `/healthz`: Google's frontend reserves `/healthz` and returns its own 404 before the request reaches Cloud Run.)
 - **ADK agent + tools** (`src/agent/agent.py`, `tools.py`) — the deterministic core exposed to the model as docstring'd, typed, `status`-returning tools.
 
+## Implementation insights
+
+Five decisions that carry the codebase:
+
+1. **The model judges, the code computes.** Gemini owns everything fuzzy (intent, extraction, phrasing); a pure zero-I/O core owns every number. A reply's counts are post-checked against the real outcome, and a rephrase that drops a real count is discarded for the honest template.
+2. **The finish-reason guard.** Gemini 3's thinking tokens count against `max_output_tokens`, so a tight cap silently truncates replies mid-sentence. Any non-STOP finish degrades to the honest template instead of shipping a fragment.
+3. **Measured beats claimed.** Timer minutes are recorded fact (`actual_source: "timer"`); a later self-report can never overwrite a measurement, and every downstream judgment (pacing, insights, replans) runs on evidence.
+4. **Snapshot persistence, dirty-tracked.** The workspace serializes into six Firestore documents; only the sections that actually changed are written back, after the response, off the request path. If Firestore is down, Blink serves from memory and says so.
+5. **Emotions must be true.** The face's twelve emotions (plus the thinking state) ride composed CSS variable channels and only fire when the grounded data backs them: `worried` requires a real unplaced count, `heart` requires a first plan that actually placed blocks.
+
+## More than fits in four minutes
+
+Things we are proud of that a four-minute video cannot hold:
+
+- A twelve-emotion vocabulary plus a thinking state, riding composed `--emo-*` variable channels so a blink always layers cleanly on top of any expression, on all three faces.
+- The streaming word-reveal sync math: the reveal deliberately over-estimates duration mid-stream so words can lag the voice but never lead it, snapping exact on the last chunk.
+- The emotion truthfulness rule: every expression is wired to a grounded trigger, and every one is rehearsable from the console via `window.__emote(name, holdMs)`.
+- An iOS companion in `companion/` that shares the same brain through the same API: the same eyes, the same honesty, in your pocket.
+- A localised day boundary: "today" is the user's day, not UTC's, published by one server clock that every consumer reads.
+
 ## Run it locally
 
-**Prereqs:** Python 3.11+, and (for the live Gemini path) a Google Cloud project with **Vertex AI enabled** and credentials — either a service-account key or `gcloud auth application-default login`. Without credentials the app still runs on its deterministic fallbacks.
+**Prereqs:** Python 3.13 (3.11+ may work; 3.13 is what the suite runs on), and (for the live Gemini path) a Google Cloud project with **Vertex AI enabled** and credentials — either a service-account key or `gcloud auth application-default login`. Without credentials the app still runs on its deterministic fallbacks.
 
 ```bash
 # 1. clone + enter
@@ -63,7 +83,8 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # 3. configure (copy .env.example -> .env and fill in)
-#    For Vertex:
+#    Simplest local path: set GEMINI_API_KEY (already stubbed in .env.example).
+#    For keyless Vertex instead, add these to .env:
 #      GOOGLE_GENAI_USE_VERTEXAI=TRUE
 #      GOOGLE_CLOUD_PROJECT=<your-project>
 #      GOOGLE_CLOUD_LOCATION=global
@@ -80,7 +101,7 @@ Open **http://localhost:8080**. Tap the mic, type *"I want to become a data scie
 
 ```bash
 source .venv/bin/activate
-python -m pytest -q     # 428 passing, fully offline (the LLM is mocked, Firestore is off)
+python -m pytest -q     # 463 passing, fully offline (the LLM is mocked, Firestore is off)
 ```
 
 The deterministic core, every specialist's fallback, the grounded-reply invariants ("the text must match what actually happened"), and the disruption pipeline are all covered without spending a single token.
@@ -121,21 +142,29 @@ direction is a planner that **starts doing**:
   the doc, start the meeting, file the thing — executing steps of the plan it
   made, under the same never-act-without-consent rules.
 - **A pocket companion.** A minimal mobile presence whose only jobs are
-  encouragement and reminders — the Duolingo half of accountability.
+  encouragement and reminders — the Duolingo half of accountability. The iOS
+  app in `companion/` is this, in progress, sharing the same brain through the
+  same API.
 
-## Project layout
+## Repository map
+
+One line per folder, so you can find things fast:
 
 ```
-src/
-  agent/            # llm gateway, ADK root_agent, tools, voice, tts, conversation, specialists/
-  core/             # pure deterministic: capacity, scheduler, rebalancer, validator, scoring, progress
-  agent/persistence.py  # Firestore snapshot serializer + backend (degrades to memory)
-  api/server.py     # FastAPI: turn router, elicitation loop, horizon details, calendar, tts
-  web/              # eyes presence + horizon UI (css/ split by ownership) + component kit
-  types/entities.py # domain model (Pydantic)
-docs/               # PRD, ARCHITECTURE, DIAGRAMS, COMPANION_ARCHITECTURE, COMPANION_SCREENS
-deployment/         # deploy.sh, seed_demo.sh, cloud_run.yaml
-.agents/rules/      # engineering standards (governance, ADK, Gemini config, voice, frontend)
+src/agent/          # LLM gateway (llm.py), ADK root_agent + typed tools, the specialists/,
+                    #   voice + TTS, conversation thread, persistence.py (Firestore snapshots)
+src/core/           # the pure deterministic engine: capacity ledger, scheduler, rebalancer,
+                    #   validator, priority scoring, progress/streak/pacing (zero I/O, fully tested)
+src/api/            # FastAPI server: turn router, elicitation loop, horizon details,
+                    #   calendar OAuth + sync, TTS streaming
+src/web/            # the eyes presence + horizon UI: app.js component factories,
+                    #   css/ split into eight ownership-scoped stylesheets
+src/types/          # the Pydantic domain model (entities.py)
+companion/          # the iOS companion (SwiftUI): same brain, same API, in your pocket
+tests/              # 463 offline tests (unit + scenario; the LLM is mocked, Firestore off)
+docs/               # PRD, ARCHITECTURE, DIAGRAMS, DEMO_SCRIPT, companion design docs
+deployment/         # deploy.sh (Cloud Build only), seed_demo.sh, cloud_run.yaml
+.agents/rules/      # the engineering rulebook the code is held to (start with agent-governance.md)
 ```
 
 `.agents/rules/` is the rulebook the code is held to, and it is worth reading
