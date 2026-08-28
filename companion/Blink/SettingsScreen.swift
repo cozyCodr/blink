@@ -17,6 +17,11 @@ struct SettingsScreen: View {
     let identity: BlinkIdentity
     var onSignedOut: () -> Void
 
+    /// P15-12: the agent's voice, default OFF like the web's `voiceEnabled`
+    /// toggle, persisted locally the same way the face preference is
+    /// (UserDefaults; AgentVoice re-reads it per utterance).
+    @AppStorage(AgentVoice.storageKey) private var voiceEnabled = false
+
     var body: some View {
         ZStack {
             face.ground.ignoresSafeArea()
@@ -25,6 +30,7 @@ struct SettingsScreen: View {
                 VStack(alignment: .leading, spacing: face.layout.sectionGap) {
                     header
                     facePicker
+                    voiceSection
                     account
                     links
                 }
@@ -99,6 +105,28 @@ struct SettingsScreen: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Wear the \(candidate.displayName) face")
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    // MARK: Voice (P15-12)
+
+    /// The web's "Agent voice" switch, worn iOS-style. The text always
+    /// renders either way; this only decides whether the reply is also
+    /// spoken (Cloud TTS server-side, and silence when it cannot).
+    private var voiceSection: some View {
+        VStack(alignment: .leading, spacing: face.layout.rowGap) {
+            sectionLabel("VOICE")
+            Toggle(isOn: $voiceEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Agent voice")
+                        .font(face.bodyFont)
+                        .foregroundStyle(face.ink)
+                    Text("Speak replies aloud, in Blink's voice.")
+                        .font(face.metaFont)
+                        .foregroundStyle(face.muted)
+                }
+            }
+            .tint(face.accent)
+        }
     }
 
     // MARK: Account

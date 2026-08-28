@@ -174,7 +174,18 @@ def ask_next_clarification(workspace_id: str) -> Optional[Dict[str, Any]]:
     return payload
 
 
-def _state_context(workspace_id: str) -> str:
+def _state_context(workspace_id: str, for_user: bool = False) -> str:
+    """The grounded state summary.
+
+    Two audiences share the facts but not the instructions. `for_user=False`
+    (the default) builds the MODEL's context: facts plus behavioural guidance
+    (how to use the name, the cannot-save-from-chat guard). `for_user=True`
+    builds the text a HUMAN sees when the model is unavailable: facts only.
+    A fallback reply that prints model instructions to the person is a prompt
+    leak, and it shipped that way until a companion screenshot caught it
+    (P15-12): the offline reply told the user "Never say something was saved
+    or noted unless the state above already shows it."
+    """
     store = get_or_create_store(workspace_id)
     cap = get_capacity(workspace_id)
     openq = list_open_questions(workspace_id)
@@ -190,7 +201,7 @@ def _state_context(workspace_id: str) -> str:
     # it natural and sparing; no stored name means no line at all, so the
     # model can never invent one.
     name = getattr(store.get_profile(), "name", None)
-    if name:
+    if name and not for_user:
         lines.append(
             f"The user's name is {name}. Use it naturally and sparingly, like "
             "a greeting or the start of a morning brief. Most replies should "
@@ -204,20 +215,31 @@ def _state_context(workspace_id: str) -> str:
         zdesc = "; ".join(
             f"{z.label} {z.start}-{z.end} ({', '.join(z.days)})" for z in zones[:6]
         )
-        lines.append(
-            "No-touch zones the user told you about (the schedule already "
-            f"plans around them): {zdesc}."
-        )
+        if for_user:
+            lines.append(f"I'm planning around your no-touch time: {zdesc}.")
+        else:
+            lines.append(
+                "No-touch zones the user told you about (the schedule already "
+                f"plans around them): {zdesc}."
+            )
     key_points = list(getattr(store, "key_points", []) or [])
     if key_points:
-        lines.append(
-            "Things the user asked you to keep in mind: "
-            + " | ".join(key_points[:5])
-        )
+        if for_user:
+            lines.append(
+                "Things you asked me to keep in mind: "
+                + "; ".join(key_points[:5])
+            )
+        else:
+            lines.append(
+                "Things the user asked you to keep in mind: "
+                + " | ".join(key_points[:5])
+            )
     # P9-08 truthfulness guard (a live chat reply once CLAIMED it had saved a
     # zone that never stored): chat cannot write memory. Only the confirm flow
     # saves zones, so if the user asks you to remember a time and no
     # confirmation appeared, the time didn't parse.
+    if for_user:
+        return "\n".join(lines)
     lines.append(
         "You cannot save, change, or remove no-touch zones or memories from "
         "chat; zones are saved only through a separate confirmation step. If "
@@ -295,7 +317,7 @@ def respond(
                                  model=model, thinking_level=level)
         return {"type": "message", "text": voice.scrub(text)}
     except llm.LlmUnavailable:
-        ctx = _state_context(workspace_id)
+        ctx = _state_context(workspace_id, for_user=True)
         return {"type": "message",
                 "text": f"I'm running without the language model right now, so here's the state.\n{ctx}"}
 

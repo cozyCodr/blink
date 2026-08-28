@@ -137,3 +137,39 @@ class TestNaturalizeOutcome(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOfflineFallbackNeverLeaksInstructions(unittest.TestCase):
+    """P15-12 finding: the LLM-less fallback printed MODEL guidance to the
+    human ("Never say something was saved or noted..."). The fallback must
+    carry facts only; instructions belong to the model's context alone."""
+
+    def test_fallback_text_is_facts_only(self):
+        from src.agent import conversation, llm
+
+        class Down:
+            def __getattr__(self, name):
+                raise RuntimeError("no model")
+
+        llm.set_client(Down())
+        try:
+            res = conversation.respond("ws_leak_check", "hello there")
+        finally:
+            llm.set_client(None)
+        self.assertEqual(res["type"], "message")
+        text = res["text"]
+        # Facts present.
+        self.assertIn("Capacity next 7 days", text)
+        # Instructions absent.
+        for fragment in (
+            "Never say something was saved",
+            "You cannot save, change, or remove",
+            "Use it naturally and sparingly",
+            "the user",
+        ):
+            self.assertNotIn(fragment, text, f"prompt leak: {fragment!r}")
+
+    def test_model_context_still_carries_the_guard(self):
+        from src.agent import conversation
+        ctx = conversation._state_context("ws_leak_check2")
+        self.assertIn("You cannot save, change, or remove", ctx)

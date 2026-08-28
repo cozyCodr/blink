@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import BlinkKit
 
 // S1 · Today (docs/COMPANION_SCREENS.md).
@@ -48,6 +49,13 @@ struct TodayScreen: View {
     /// elicitation loop. Configured alongside the store's session so a plan
     /// made here lands back in `store.refresh()`.
     @State private var composer = PlanComposer()
+    /// P15-12: the agent's voice (server TTS, gated by the Settings toggle)
+    /// and the hold-to-talk capture. Text never waits on either.
+    @State private var voice = AgentVoice()
+    @State private var voiceCapture = VoiceCapture()
+    /// P15-12: whether the software keyboard is up, so the eyes give ground
+    /// instead of the compose field being pushed offscreen.
+    @State private var keyboardUp = false
     @State private var showingSettings = false
     @State private var showingRehearsal = false
     #if DEBUG
@@ -69,26 +77,50 @@ struct TodayScreen: View {
     }
 
     var body: some View {
-        ZStack {
-            face.ground.ignoresSafeArea()
+        GeometryReader { geo in
+            ZStack {
+                face.ground.ignoresSafeArea()
 
-            ScrollView {
-                VStack(spacing: face.layout.sectionGap) {
-                    EyesView(rig: rig, scale: 0.62)
-                        .frame(height: 150)
-                    greeting
-                    card
-                    conversation
-                    footer
+                ScrollView {
+                    VStack(spacing: face.layout.sectionGap) {
+                        // P15-12: the eyes float in the upper-middle band, close
+                        // to the words they converse with (the web's stage rhythm,
+                        // conversation.css:51-66), and both the band and the rig
+                        // shrink as the text grows or the keyboard rises. The rig's
+                        // pose tables are fraction-based (P15-02), so a scaled rig
+                        // stays correct. Reduced Motion snaps between sizes.
+                        EyesView(rig: rig, scale: eyeScale)
+                            .frame(height: ConversationScale.eyeBand(tier: textTier, keyboardUp: keyboardUp))
+                            .padding(.top, geo.size.height
+                                     * ConversationScale.eyesTopFraction(keyboardUp: keyboardUp))
+                        greeting
+                        card
+                        conversation
+                        footer
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, face.layout.screenMargin)
+                    .padding(.bottom, face.layout.cardPaddingBottom)
+                    .animation(reduceMotion ? nil : face.motion.swapAnimation, value: eyeScale)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, face.layout.screenMargin)
-                .padding(.bottom, face.layout.cardPaddingBottom)
-            }
-            .refreshable { await store.refresh() }
-            .scrollBounceBehavior(.always)
+                .refreshable { await store.refresh() }
+                .scrollBounceBehavior(.always)
+                // P15-12: a drag lets go of the keyboard, so the compressed
+                // layout always has a way back to full-size eyes.
+                .scrollDismissesKeyboard(.interactively)
 
-            topBar
+                topBar
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIResponder.keyboardWillShowNotification)) { _ in keyboardUp = true }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIResponder.keyboardWillHideNotification)) { _ in keyboardUp = false }
+        // P15-12: the agent speaks the reply it just wrote, when the toggle
+        // says to. The text is already on screen; audio failure changes
+        // nothing (AgentVoice logs and stays quiet).
+        .onChange(of: composer.reply) { _, reply in
+            if let reply { voice.speak(reply, session: session) }
         }
         .task {
             composer.configure(session: session) { await store.refresh() }
@@ -302,6 +334,7 @@ struct TodayScreen: View {
         Group {
             if let question = composer.question {
                 QuestionSurface(question: question) { value in
+                    voice.stop()   // answering IS a new turn: the old reply's audio yields
                     Task { await composer.answer(value) }
                 }
                 .id(question.field)   // fresh selection state per question
@@ -312,7 +345,12 @@ struct TodayScreen: View {
                         PlanReplySurface(composer: composer)
                             .transition(swapTransition)
                     }
-                    PlanComposeField(composer: composer, prompt: composePrompt)
+                    PlanComposeField(
+                        composer: composer,
+                        prompt: composePrompt,
+                        voice: voiceCapture,
+                        onSend: { voice.stop() }   // sending interrupts the reply audio
+                    )
                 }
                 .transition(swapTransition)
             }
@@ -333,6 +371,28 @@ struct TodayScreen: View {
     private var replyVisible: Bool {
         composer.answerEcho != nil || composer.isSending || composer.reply != nil
             || composer.didRefuse || composer.wasUnreachable
+    }
+
+    // MARK: The breathing layout (P15-12)
+
+    /// How much text the conversation is carrying right now: the question up,
+    /// or the reply on screen. This is what the eyes yield to.
+    private var conversationCharCount: Int {
+        if let q = composer.question {
+            return q.question.count + (q.why?.count ?? 0)
+        }
+        return composer.reply?.count ?? 0
+    }
+
+    private var textTier: ConversationScale.TextTier {
+        ConversationScale.TextTier(charCount: conversationCharCount)
+    }
+
+    /// Full-size on a short reply, stepping down as the words grow, one step
+    /// further when the keyboard is up. The tiers live in ConversationScale
+    /// with their reasoning; this screen only reads them.
+    private var eyeScale: CGFloat {
+        ConversationScale.eyeScale(tier: textTier, keyboardUp: keyboardUp)
     }
 
     private var composePrompt: String {
@@ -635,6 +695,7 @@ struct TodayScreen: View {
         "\(store.isLoading)|\(store.state == nil)|\(store.wasRefused)"
             + "|\(composer.isSending)|\(composer.question != nil)"
             + "|\(composer.didRefuse)|\(composer.heartPending)"
+            + "|\(voiceCapture.isRecording)"
     }
 
     private func react() {
@@ -644,6 +705,12 @@ struct TodayScreen: View {
         //   sorry    — the server ANSWERED with a refusal (either surface).
         //   thinking — a request is genuinely in flight (state, not a beat).
         //   curious  — a question is genuinely up, held until it is answered.
+        //   wide     — the mic is GENUINELY held and recording (P15-12): the
+        //              web's listening enter, and nothing else fires it.
+        if voiceCapture.isRecording {
+            rig.emote(.wide)
+            return
+        }
         if store.wasRefused || composer.didRefuse {
             // The server answered, and the answer was no.
             rig.emote(.sorry, hold: .seconds(face.motion.celebrationHold))
@@ -664,7 +731,7 @@ struct TodayScreen: View {
             rig.emote(.curious)
             return
         }
-        if rig.emotion == .thinking || rig.emotion == .curious {
+        if rig.emotion == .thinking || rig.emotion == .curious || rig.emotion == .wide {
             rig.clearEmotion()
         }
     }

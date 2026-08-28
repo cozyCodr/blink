@@ -362,3 +362,56 @@ reaches the next Activity, not the running one.
 lumen wears San Francisco and folio wears Bradley Hand on a stock simulator.
 Vendoring the three OFL families needs font files this repo does not carry and
 this item did not download; it stays an open follow-up.
+
+## The conversation surface breathes (P15-12)
+
+Today's conversation now trades space honestly between the eyes, the words and
+the keyboard:
+
+- **The eyes float lower**, in the upper-middle band, close to the words they
+  converse with — the web's stage rhythm (`conversation.css:51-66` reserves the
+  stage's bottom and centers the face above it). The proportion lives in
+  `ConversationScale.eyesTopFraction`.
+- **The eyes shrink as text grows.** `ConversationScale.TextTier` tiers the
+  conversation's character count (short under 90, medium under 220, long
+  above); the rig scales 0.62 → 0.50 → 0.40 (floor 0.34 with the keyboard up).
+  The pose tables are fraction-based (P15-02), so a scaled rig stays correct.
+  The web has no equivalent — it scrolls a fixed 20px band instead — so the
+  tiers are documented iOS-only choices, all in `Today/ConversationLayout.swift`.
+- **Text tiers down too**: reply and question step display → card title → body
+  through the face's own token fonts, plus `minimumScaleFactor(0.85)`. Dynamic
+  Type is never fought; only our own base tier shrinks.
+- **Keyboard aware**: `keyboardWillShow/Hide` compress the layout (eyes give
+  one more step and the top band collapses) so the compose field stays visible;
+  a drag dismisses the keyboard (`scrollDismissesKeyboard`).
+
+**Voice out (the agent speaks).** `Today/AgentVoice.swift` is the phone's copy
+of the web's whole-file TTS path (`prepareWhole`, app.js): `POST /tts` with the
+bearer, played through `AVAudioPlayer`, gated by the "Agent voice" toggle in
+Settings (default OFF, persisted in UserDefaults like the face). The text
+renders regardless; a null `audio_base64`, a dead network or a decode failure
+all end in one log line and silence — never an error, never a fake success.
+Sending a new turn (or answering a question) stops playback: an interrupt is
+something you do to speak.
+
+**Voice in (hold to talk).** A mic beside the compose field: HOLD to record,
+live transcription streams into the field (`SFSpeechRecognizer` +
+`AVAudioEngine`), release settles it there for review — never auto-sent, the
+web's release-to-edit grammar (`createVoiceInput`). The `wide` beat fires only
+while genuinely recording (the web's listening enter). Denied permission is a
+normal state: one warm line under the field, then the mic stays quiet and
+typing carries on. Usage copy ships as `INFOPLIST_KEY_NSMicrophoneUsageDescription`
+and `INFOPLIST_KEY_NSSpeechRecognitionUsageDescription` (same mechanism as
+Live Activities).
+
+**Simulator honesty.** The permission flow, the denied explainer, the TTS
+fetch and its silent degradation were all verified in the iPhone 16 simulator
+against a local server. LIVE recording was not verifiable there: this
+simulator's CoreAudio aborts the process on engine start ("Initialize: RPC
+timeout"), an environment fault below the API surface. A zero-channel input
+now degrades to the unavailable state; the live-transcription path needs a
+real device with a real microphone.
+
+**Roadmap for parity with the web:** the streaming `/tts/stream` PCM path,
+word-reveal caption sync (`speakSynced`), auto-send on release as an opt-in,
+and Spacebar-style push-to-talk have no phone equivalent yet.

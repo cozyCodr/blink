@@ -30,10 +30,52 @@ struct PlanComposeField: View {
     @Environment(\.face) private var face
     @Bindable var composer: PlanComposer
     var prompt: String
+    /// P15-12: hold-to-talk. Owned by the screen so the eyes can react to it.
+    var voice: VoiceCapture?
+    /// Fired the moment a send actually leaves, so the screen can cut any
+    /// reply audio (an interrupt is something you do to send — the web's rule).
+    var onSend: () -> Void = {}
+
+    /// While the hold is live the transcript streams straight into the draft,
+    /// which IS the review surface: release leaves it there, editable, never
+    /// auto-sent (createVoiceInput's release-to-edit flow, app.js:1141-1148).
+    private var isListening: Bool { voice?.isRecording ?? false }
+
+    private func send() {
+        onSend()
+        Task { await composer.send() }
+    }
 
     var body: some View {
-        HStack(spacing: face.layout.tightGap) {
-            TextField(prompt, text: $composer.draft, axis: .vertical)
+        VStack(spacing: face.layout.tightGap) {
+            HStack(spacing: face.layout.tightGap) {
+                if let voice {
+                    micButton(voice)
+                }
+                field
+                sendButton
+            }
+            // The one-time explanation when the mic cannot listen. A denied
+            // permission is a normal state: it is named once, and the field
+            // above keeps working (the web's unsupported fallback, app.js:1156).
+            if let voice, voice.explained, let line = voice.limitationLine {
+                Text(line)
+                    .font(face.metaFont)
+                    .foregroundStyle(face.faint)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        // Live transcription: while the hold is on, the words land in the
+        // draft as they are heard, so release-to-review is seamless (the
+        // web's interim results streaming onto the surface, app.js:1170-1178).
+        .onChange(of: voice?.transcript ?? "") { _, live in
+            guard let voice, voice.isRecording else { return }
+            composer.draft = live
+        }
+    }
+
+    private var field: some View {
+        TextField(isListening ? "Listening" : prompt, text: $composer.draft, axis: .vertical)
                 .font(face.bodyFont)
                 .foregroundStyle(face.ink)
                 .multilineTextAlignment(.center)
@@ -46,23 +88,59 @@ struct PlanComposeField: View {
                     RoundedRectangle(cornerRadius: face.cornerStyle.nominalRadius, style: .continuous)
                         .fill(face.control)
                 )
-                .onSubmit { Task { await composer.send() } }
-                .disabled(composer.isSending)
+                .onSubmit { send() }
+                .disabled(composer.isSending || isListening)
+    }
 
-            Button {
-                Task { await composer.send() }
-            } label: {
-                Image(systemName: "arrow.up")
-                    .font(face.bodyFont.weight(.semibold))
-                    .foregroundStyle(face.ground)
-                    .frame(width: face.layout.minTapTarget, height: face.layout.minTapTarget)
-                    .background(Circle().fill(face.accent))
-            }
-            .buttonStyle(.plain)
-            .disabled(composer.isSending
-                      || composer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .accessibilityLabel("Send to Blink")
+    private var sendButton: some View {
+        Button {
+            send()
+        } label: {
+            Image(systemName: "arrow.up")
+                .font(face.bodyFont.weight(.semibold))
+                .foregroundStyle(face.ground)
+                .frame(width: face.layout.minTapTarget, height: face.layout.minTapTarget)
+                .background(Circle().fill(face.accent))
         }
+        .buttonStyle(.plain)
+        .disabled(composer.isSending || isListening
+                  || composer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        .accessibilityLabel("Send to Blink")
+    }
+
+    /// HOLD to record (a zero-distance drag is the hold, exactly what the
+    /// web's pointerdown/pointerup pair is); release settles the transcript
+    /// into the field for review. A hold while denied explains once.
+    private func micButton(_ voice: VoiceCapture) -> some View {
+        Image(systemName: isListening ? "waveform" : "mic")
+            .font(face.bodyFont.weight(.semibold))
+            .foregroundStyle(isListening ? face.ground : face.accent)
+            .frame(width: face.layout.minTapTarget, height: face.layout.minTapTarget)
+            .background(
+                Circle()
+                    .fill(isListening ? face.accent : face.control)
+                    .overlay(Circle().stroke(face.line, lineWidth: 1))
+            )
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard !isListening, !composer.isSending else { return }
+                        if voice.limitationLine != nil {
+                            // Cannot listen. Say so once, then stay quiet.
+                            if !voice.explained { voice.markExplained() }
+                            return
+                        }
+                        voice.beginHold()
+                    }
+                    .onEnded { _ in
+                        let text = voice.endHold()
+                        if !text.isEmpty { composer.draft = text }
+                        if voice.limitationLine != nil, !voice.explained {
+                            voice.markExplained()
+                        }
+                    }
+            )
+            .accessibilityLabel(isListening ? "Listening. Release to review." : "Hold to talk")
     }
 }
 
@@ -88,7 +166,8 @@ struct PlanReplySurface: View {
                     .foregroundStyle(face.faint)
             } else if let reply = composer.reply {
                 Text(reply)   // verbatim; grounded server-side
-                    .font(face.displayFont)
+                    .font(tieredFont(for: reply))
+                    .minimumScaleFactor(ConversationScale.textMinimumScale)
                     .foregroundStyle(face.ink)
             }
             if composer.didRefuse {
@@ -117,6 +196,19 @@ struct PlanReplySurface: View {
         .multilineTextAlignment(.center)
         .frame(maxWidth: .infinity)
     }
+
+    /// P15-12: the reply's base type steps down as it grows, so a long
+    /// answer trades size for room instead of pushing everything offscreen.
+    /// The tiers pick between EXISTING face token fonts (display -> card
+    /// title -> body), so a face's identity — and the user's Dynamic Type
+    /// size, which all three ride — is never fought.
+    private func tieredFont(for text: String) -> Font {
+        switch ConversationScale.TextTier(charCount: text.count) {
+        case .short: return face.displayFont
+        case .medium: return face.cardTitleFont
+        case .long: return face.bodyFont
+        }
+    }
 }
 
 // MARK: The question, on the same paper
@@ -141,7 +233,8 @@ struct QuestionSurface: View {
     var body: some View {
         VStack(spacing: face.layout.rowGap) {
             Text(question.question)
-                .font(face.displayFont)
+                .font(questionFont)
+                .minimumScaleFactor(ConversationScale.textMinimumScale)
                 .foregroundStyle(face.ink)
             if let why = question.why, !why.isEmpty {
                 Text(why)
@@ -153,6 +246,17 @@ struct QuestionSurface: View {
         .multilineTextAlignment(.center)
         .frame(maxWidth: .infinity)
         .onAppear { dealt = true }   // Reduced Motion: the animation is nil, so this lands instantly
+    }
+
+    /// Same tiering as the reply (P15-12): a long question steps down through
+    /// the face's own token fonts rather than crowding its chips off screen.
+    private var questionFont: Font {
+        let count = question.question.count + (question.why?.count ?? 0)
+        switch ConversationScale.TextTier(charCount: count) {
+        case .short: return face.displayFont
+        case .medium: return face.cardTitleFont
+        case .long: return face.bodyFont
+        }
     }
 
     @ViewBuilder
