@@ -117,6 +117,13 @@ struct TodayScreen: View {
                 // P15-12: a drag lets go of the keyboard, so the compressed
                 // layout always has a way back to full-size eyes.
                 .scrollDismissesKeyboard(.interactively)
+                // P15-14: the compose bar lives at the bottom of the screen,
+                // not in the scroll. See `composeBar`.
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    composeBar
+                        .animation(reduceMotion ? nil : face.motion.swapAnimation,
+                                   value: composer.question != nil)
+                }
 
                 topBar
             }
@@ -367,11 +374,13 @@ struct TodayScreen: View {
 
     // MARK: The conversation (P15-11)
 
-    /// The /turn loop under the plan card: the reply (verbatim), the question
-    /// with its typed control, and the compose field — all written straight
-    /// on the ground, no cards (the paper direction the web took). One of
-    /// question-or-compose at a time, the same shape the web's ask surface
-    /// holds, and the states CROSS-FADE on the web's swap timing
+    /// The /turn loop under the plan card: the reply (verbatim) and the
+    /// question with its typed control, written straight on the ground, no
+    /// cards (the paper direction the web took). The compose field is NOT
+    /// here; it is pinned to the bottom of the screen (`composeBar`), which is
+    /// where a phone keeps the thing you talk into.
+    ///
+    /// The states CROSS-FADE on the web's swap timing
     /// (`swapMode`, app.js:457-464), soft-revealing with a small rise.
     /// Reduced Motion: the animation is nil and everything lands instantly.
     @ViewBuilder
@@ -384,23 +393,67 @@ struct TodayScreen: View {
                 }
                 .id(question.field)   // fresh selection state per question
                 .transition(swapTransition)
-            } else {
-                VStack(spacing: face.layout.rowGap) {
-                    if replyVisible {
-                        PlanReplySurface(composer: composer)
-                            .transition(swapTransition)
-                    }
-                    PlanComposeField(
-                        composer: composer,
-                        prompt: composePrompt,
-                        voice: voiceCapture,
-                        onSend: { voice.stop() }   // sending interrupts the reply audio
-                    )
-                }
-                .transition(swapTransition)
+            } else if replyVisible {
+                // The compose field itself is no longer here: it lives pinned
+                // at the bottom of the screen (`composeBar`). What stays in
+                // the scroll is the SAID part of the conversation, centered
+                // and borderless on the paper, exactly as P15-11 left it.
+                PlanReplySurface(composer: composer)
+                    .transition(swapTransition)
             }
         }
         .animation(reduceMotion ? nil : face.motion.swapAnimation, value: conversationPhase)
+    }
+
+    // MARK: The compose bar, pinned to the bottom
+
+    /// Mic, field and send, held at the bottom of the screen above the home
+    /// indicator, riding the keyboard up and down.
+    ///
+    /// WHY IT IS AN INSET AND NOT A ROW IN THE SCROLL. On a phone the thing
+    /// you talk into belongs under your thumb, and it belongs there whatever
+    /// the scroll is doing. `safeAreaInset(edge: .bottom)` is the one tool
+    /// that gets both halves right: it pins the bar AND lengthens the scroll
+    /// view's content inset by the bar's height, so the last line of a reply
+    /// can always be scrolled clear of it and is never left hiding underneath.
+    ///
+    /// HOW IT MEETS THE KEYBOARD. The keyboard is itself a bottom safe area
+    /// inset, so the bar rises with it for free, with no keyboard-height
+    /// arithmetic here at all. P15-12's `keyboardUp` keeps its existing and
+    /// separate job of compressing what is ABOVE the bar (the eye band and the
+    /// rig's scale, via ConversationScale), so the two work on opposite halves
+    /// of the screen and never fight over the same points.
+    ///
+    /// A question replaces the bar rather than stacking with it, the same
+    /// one-at-a-time rule the surface has always had: while Blink is asking,
+    /// answering it IS the reply.
+    @ViewBuilder
+    private var composeBar: some View {
+        if composer.question == nil {
+            VStack(spacing: 0) {
+                // No divider, no chrome bar. The paper simply stops being
+                // paper: content scrolling underneath dissolves into the
+                // ground rather than sliding under a line (P15-11's quiet).
+                LinearGradient(
+                    colors: [face.ground.opacity(0), face.ground],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: face.layout.composeBarFade)
+                .allowsHitTesting(false)
+
+                PlanComposeField(
+                    composer: composer,
+                    prompt: composePrompt,
+                    voice: voiceCapture,
+                    onSend: { voice.stop() }   // sending interrupts the reply audio
+                )
+                .padding(.horizontal, face.layout.screenMargin)
+                .padding(.bottom, face.layout.rowGap)
+                .background(face.ground)
+            }
+            .transition(reduceMotion ? .identity : .opacity)
+        }
     }
 
     /// One value that changes exactly when the conversation surface swaps

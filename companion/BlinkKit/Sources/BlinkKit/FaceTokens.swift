@@ -169,6 +169,13 @@ public struct FaceLayout: Sendable, Equatable {
     /// Minimum tap target. docs/COMPANION_SCREENS.md, Accessibility:
     /// "Minimum tap target 44pt on iOS".
     public var minTapTarget: CGFloat
+    /// The soft ground-coloured fade above the bottom-pinned compose bar, so
+    /// scrolling text dissolves into the paper instead of running into a rule.
+    /// iOS-only, no web equivalent: the web's compose surface sits in the page
+    /// flow with the whole stage above it, and never has content pass beneath
+    /// it. On a phone the bar is pinned, so something has to say where the
+    /// paper ends, and a fade says it without drawing a line.
+    public var composeBarFade: CGFloat
 
     public init(
         cardPaddingTop: CGFloat,
@@ -181,7 +188,8 @@ public struct FaceLayout: Sendable, Equatable {
         pillPaddingH: CGFloat,
         dotSize: CGFloat,
         screenMargin: CGFloat,
-        minTapTarget: CGFloat
+        minTapTarget: CGFloat,
+        composeBarFade: CGFloat
     ) {
         self.cardPaddingTop = cardPaddingTop
         self.cardPaddingSide = cardPaddingSide
@@ -194,6 +202,7 @@ public struct FaceLayout: Sendable, Equatable {
         self.dotSize = dotSize
         self.screenMargin = screenMargin
         self.minTapTarget = minTapTarget
+        self.composeBarFade = composeBarFade
     }
 
     /// The web's shared chrome, which is what all three faces sit on today.
@@ -208,7 +217,8 @@ public struct FaceLayout: Sendable, Equatable {
         pillPaddingH: 14,        // chrome.css:9
         dotSize: 9,              // now.css:35
         screenMargin: 24,        // chrome.css:25
-        minTapTarget: 44         // COMPANION_SCREENS.md, Accessibility
+        minTapTarget: 44,        // COMPANION_SCREENS.md, Accessibility
+        composeBarFade: 28       // iOS-only, see the property
     )
 }
 

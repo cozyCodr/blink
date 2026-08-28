@@ -44,6 +44,23 @@ public final class EyeRig {
     private var isBusy: Bool { emotion != nil || isRunningProceduralBeat }
     private var isRunningProceduralBeat = false
 
+    /// How many live views are currently showing these eyes.
+    ///
+    /// The app hoists ONE rig (BlinkApp) and hands it to every screen, so the
+    /// eyes that ask you to sign in are literally the same eyes that greet you
+    /// afterwards. That means a screen transition lands BOTH the arriving
+    /// screen's `onAppear` and the departing screen's `onDisappear` on this one
+    /// object, and SwiftUI fires them in exactly that order. A plain
+    /// start/stop pair therefore tore itself down: `start()` saw a scheduler
+    /// already running and returned, then the departing screen's `stop()`
+    /// cancelled every loop, and the eyes never blinked again for the rest of
+    /// the app's life. Counting viewers is what carries the loops across the
+    /// handover.
+    ///
+    /// iOS-only, no web equivalent: the web has one page and one pair of eyes
+    /// for its whole life, so nothing there ever hands the rig over.
+    private var viewers = 0
+
     private var blinkSchedulerTask: Task<Void, Never>?
     private var glanceSchedulerTask: Task<Void, Never>?
     private var blinkTask: Task<Void, Never>?
@@ -61,15 +78,24 @@ public final class EyeRig {
 
     // MARK: Lifecycle
 
-    /// Start the ambient loops. Safe to call more than once.
+    /// A view is showing the eyes. Pairs with `stop()`, and the ambient loops
+    /// run for as long as at least one viewer is up. Safe to call more than
+    /// once: the loops are started once and then left alone.
     public func start() {
+        viewers += 1
         guard blinkSchedulerTask == nil else { return }
         blinkSchedulerTask = Task { [weak self] in await self?.runBlinkScheduler() }
         glanceSchedulerTask = Task { [weak self] in await self?.runGlanceScheduler() }
     }
 
-    /// Stop every loop and settle the channels. Called when the view leaves.
+    /// A view showing the eyes has left. The loops only stand down, and the
+    /// channels only settle, once the LAST viewer is gone: mid-transition
+    /// there is always another screen still holding these same eyes, and the
+    /// creature does not stop being alive because one screen swapped for
+    /// another.
     public func stop() {
+        viewers = max(0, viewers - 1)
+        guard viewers == 0 else { return }
         for task in [blinkSchedulerTask, glanceSchedulerTask, blinkTask,
                      holdTask, thinkTask, shimmerTask, bounceTask] {
             task?.cancel()
