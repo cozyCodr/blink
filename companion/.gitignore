@@ -1,0 +1,7 @@
+# Xcode / SwiftPM local state. Nothing here is source.
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.swiftpm/
+BlinkKit/.build/
