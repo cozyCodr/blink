@@ -27,6 +27,7 @@ import BlinkKit
 struct TodayScreen: View {
     @Environment(\.face) private var face
     @Environment(\.openURL) private var openURL
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(FaceProvider.self) private var faces
 
     let identity: BlinkIdentity
@@ -43,6 +44,10 @@ struct TodayScreen: View {
     /// The session S1 is about to run, or nil. Set by the Start button and
     /// cleared when S3 closes; presenting it is what opens the focus timer.
     @State private var focusTarget: SessionCard?
+    /// P15-11: the /turn conversation. The compose field, the reply, the
+    /// elicitation loop. Configured alongside the store's session so a plan
+    /// made here lands back in `store.refresh()`.
+    @State private var composer = PlanComposer()
     @State private var showingSettings = false
     @State private var showingRehearsal = false
     #if DEBUG
@@ -73,6 +78,7 @@ struct TodayScreen: View {
                         .frame(height: 150)
                     greeting
                     card
+                    conversation
                     footer
                 }
                 .frame(maxWidth: .infinity)
@@ -84,7 +90,10 @@ struct TodayScreen: View {
 
             topBar
         }
-        .task { await store.load(session: session) }
+        .task {
+            composer.configure(session: session) { await store.refresh() }
+            await store.load(session: session)
+        }
         // P15-08 — the face preference lives on the account. Wire the
         // write-through seam first, then adopt what the server holds: server
         // wins, because it is the newest pick made on ANY device, and a pick
@@ -111,6 +120,9 @@ struct TodayScreen: View {
         // the number on this screen is the server's number.
         .onReceive(NotificationCenter.default.publisher(for: .blinkSignalActionWrote)) { _ in
             Task { await store.refresh() }
+        }
+        .onChange(of: composer.needsSignIn) { _, dead in
+            if dead { onSignedOut() }
         }
         .onChange(of: store.needsSignIn) { _, dead in
             if dead {
@@ -195,12 +207,16 @@ struct TodayScreen: View {
         if let state = store.state {
             switch state.card {
             case .emptyWorkspace:
-                surface {
-                    Text("Your plan lives on the web for now. Make one, and I will keep you to it.")
-                        .font(face.bodyFont)
+                // P15-11: an invitation to plan, not a dead end — written
+                // straight on the paper, no card, no web detour (Settings
+                // keeps the only web link). The compose field renders just
+                // below (`conversation`).
+                if composer.reply == nil, !composer.isSending, composer.question == nil {
+                    Text("Tell me what you are working on, and I will plan it.")
+                        .font(face.displayFont)
                         .foregroundStyle(face.ink)
-                        .multilineTextAlignment(.leading)
-                    webButton("Open Blink on the web", prominent: true)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
                 }
 
             case .nothingPlanned:
@@ -270,6 +286,60 @@ struct TodayScreen: View {
         } else {
             unreachableCard
         }
+    }
+
+    // MARK: The conversation (P15-11)
+
+    /// The /turn loop under the plan card: the reply (verbatim), the question
+    /// with its typed control, and the compose field — all written straight
+    /// on the ground, no cards (the paper direction the web took). One of
+    /// question-or-compose at a time, the same shape the web's ask surface
+    /// holds, and the states CROSS-FADE on the web's swap timing
+    /// (`swapMode`, app.js:457-464), soft-revealing with a small rise.
+    /// Reduced Motion: the animation is nil and everything lands instantly.
+    @ViewBuilder
+    private var conversation: some View {
+        Group {
+            if let question = composer.question {
+                QuestionSurface(question: question) { value in
+                    Task { await composer.answer(value) }
+                }
+                .id(question.field)   // fresh selection state per question
+                .transition(swapTransition)
+            } else {
+                VStack(spacing: face.layout.rowGap) {
+                    if replyVisible {
+                        PlanReplySurface(composer: composer)
+                            .transition(swapTransition)
+                    }
+                    PlanComposeField(composer: composer, prompt: composePrompt)
+                }
+                .transition(swapTransition)
+            }
+        }
+        .animation(reduceMotion ? nil : face.motion.swapAnimation, value: conversationPhase)
+    }
+
+    /// One value that changes exactly when the conversation surface swaps
+    /// states, so the cross-fade animates those swaps and nothing else.
+    private var conversationPhase: String {
+        "\(composer.question?.field ?? "")|\(replyVisible)|\(composer.isSending)|\(composer.reply ?? "")"
+    }
+
+    private var swapTransition: AnyTransition {
+        .opacity.combined(with: .offset(y: face.motion.revealRise))
+    }
+
+    private var replyVisible: Bool {
+        composer.answerEcho != nil || composer.isSending || composer.reply != nil
+            || composer.didRefuse || composer.wasUnreachable
+    }
+
+    private var composePrompt: String {
+        if case .emptyWorkspace = store.state?.card {
+            return "What are you working on?"
+        }
+        return "Plan something with me"
     }
 
     /// No cache, no payload. Say what happened and what to do, and show no
@@ -563,20 +633,38 @@ struct TodayScreen: View {
     /// Changes exactly when something the eyes may react to changes.
     private var beatKey: String {
         "\(store.isLoading)|\(store.state == nil)|\(store.wasRefused)"
+            + "|\(composer.isSending)|\(composer.question != nil)"
+            + "|\(composer.didRefuse)|\(composer.heartPending)"
     }
 
     private func react() {
-        if store.wasRefused {
+        // P15-11's beats, each grounded:
+        //   heart    — the server's planned reply said blocks_scheduled > 0,
+        //              first time this session. Consumed once.
+        //   sorry    — the server ANSWERED with a refusal (either surface).
+        //   thinking — a request is genuinely in flight (state, not a beat).
+        //   curious  — a question is genuinely up, held until it is answered.
+        if store.wasRefused || composer.didRefuse {
             // The server answered, and the answer was no.
             rig.emote(.sorry, hold: .seconds(face.motion.celebrationHold))
             return
         }
-        if store.isLoading, store.state == nil {
-            // A request is genuinely in flight and there is nothing to show.
+        if composer.isSending || (store.isLoading && store.state == nil) {
+            // A request is genuinely in flight. The heart, if one is
+            // pending, stays pending: it fires on the pass where the
+            // request ends, so thinking can never stomp it.
             rig.emote(.thinking)
             return
         }
-        if rig.emotion == .thinking {
+        if composer.consumeHeart() {
+            rig.emote(.heart, hold: .seconds(face.motion.heartHold))
+            return
+        }
+        if composer.question != nil {
+            rig.emote(.curious)
+            return
+        }
+        if rig.emotion == .thinking || rig.emotion == .curious {
             rig.clearEmotion()
         }
     }

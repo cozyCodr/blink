@@ -459,6 +459,18 @@ public struct FaceMotion: Sendable {
     /// How long the heart holds, seconds.
     public var heartHold: Double
 
+    // P15-11: the conversation surface's motion, mirroring the web.
+    /// The mode cross-fade: how long one conversation state eases out before
+    /// the next eases in (`swapMode`, app.js:457-464: 140ms).
+    public var swapFade: Double
+    /// One chip's deal-in (clarify.css:229: `clarifyDeal 0.26s`).
+    public var dealDuration: Double
+    /// The stagger between dealt chips (clarify.css:232-238: 40ms apart).
+    public var dealStagger: Double
+    /// How far dealt/revealed content rises from, points
+    /// (clarify.css:240: `translateY(6px)`).
+    public var revealRise: CGFloat
+
     public var haptic: FaceHaptic
 
     /// The ambient loops.
@@ -482,6 +494,10 @@ public struct FaceMotion: Sendable {
         boilPoses: [BoilPose] = [],
         celebrationHold: Double,
         heartHold: Double,
+        swapFade: Double,
+        dealDuration: Double,
+        dealStagger: Double,
+        revealRise: CGFloat,
         haptic: FaceHaptic,
         idle: IdleMotion,
         beats: BeatMotion
@@ -503,7 +519,23 @@ public struct FaceMotion: Sendable {
         self.boilPoses = boilPoses
         self.celebrationHold = celebrationHold
         self.heartHold = heartHold
+        self.swapFade = swapFade
+        self.dealDuration = dealDuration
+        self.dealStagger = dealStagger
+        self.revealRise = revealRise
         self.haptic = haptic
+    }
+
+    /// The conversation-state cross-fade (app.js:457-464).
+    public var swapAnimation: Animation {
+        emotionCurve.animation(duration: swapFade)
+    }
+
+    /// One dealt chip's entrance, delayed by its place in the reading order
+    /// (clarify.css:229-238).
+    public func dealAnimation(index: Int) -> Animation {
+        emotionCurve.animation(duration: dealDuration)
+            .delay(Double(index) * dealStagger)
     }
 
     /// The animation that carries an emotion in.

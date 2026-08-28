@@ -127,6 +127,10 @@ public struct FolioFace: FaceTokens {
         ],
         celebrationHold: 1.4,        // app.js:5939   emote("celebrate", 1400)
         heartHold: 0.9,              // app.js:5753   emote("heart", 900)
+        swapFade: 0.14,              // app.js:457-464  swapMode 140ms
+        dealDuration: 0.26,          // clarify.css:229 clarifyDeal 0.26s
+        dealStagger: 0.04,           // clarify.css:232-238  40ms apart
+        revealRise: 6,               // clarify.css:240 translateY(6px)
         haptic: .thunk,              // COMPANION_SCREENS.md
         idle: IdleMotion(
             glanceInterval: 4.5...9.0,    // app.js:213  coarse pointer branch

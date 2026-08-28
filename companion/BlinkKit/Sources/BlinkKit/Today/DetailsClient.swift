@@ -125,7 +125,9 @@ public protocol DetailsReading: Sendable {
 /// is byte-for-byte the write the web makes, so a Done tapped on the phone is
 /// the same record.
 public struct BlinkDetailsClient: DetailsReading {
-    private let baseURL: URL
+    /// Internal so TurnClient.swift's extension posts to the SAME host this
+    /// client was built for, debug override included.
+    let baseURL: URL
     private let urlSession: URLSession
 
     public init(baseURL: URL = BlinkAPI.baseURL(), urlSession: URLSession = .shared) {
@@ -224,7 +226,10 @@ public struct BlinkDetailsClient: DetailsReading {
 
     // MARK: The one transport
 
-    private func send(_ request: URLRequest, label: String) async throws -> Data {
+    /// Internal (not private) so TurnClient.swift's extension rides the SAME
+    /// transport and error vocabulary. P15-11 adds endpoints, not a second
+    /// way to talk to the server.
+    func send(_ request: URLRequest, label: String) async throws -> Data {
         let data: Data
         let response: URLResponse
         do {

@@ -11,6 +11,20 @@ added the notification layer (S2). P15-06 built the focus timer, its Live
 Activity and both Dynamic Island presentations (**S3**), and added the real
 "Start focus session" button to Today. The rehearsal screen is still one tap
 away, behind the DEBUG-only "beats" door in Today's top-right corner.
+P15-11 made the phone able to PLAN: the compose field on Today speaks the same
+`POST /turn` + `/elicit/answer` contract the web does, renders the typed
+responses (message / planned / question / checkin / courses) as writing on the
+paper rather than cards, and loops the elicitation chips through to a plan.
+The empty state is now the invitation to plan; the only web link left lives in
+Settings. Transport: `BlinkKit/Today/TurnClient.swift` (an extension of the
+ONE `BlinkDetailsClient` transport, same four-way error vocabulary). State:
+`BlinkKit/Today/PlanComposer.swift`. Views: `Blink/PlanComposeViews.swift`.
+Reply text renders VERBATIM from the server; the heart fires only on the first
+planned reply of a session whose own `blocks_scheduled` count is above zero,
+thinking only while a request is in flight, curious held while a question is
+up, sorry only on a server-answered failure. The conversation's motion rides
+four new FaceMotion tokens (`swapFade`, `dealDuration`, `dealStagger`,
+`revealRise`), each cited to the web's timings.
 
 ## Layout
 
