@@ -3,6 +3,12 @@ import BlinkKit
 
 @main
 struct BlinkApp: App {
+    /// S2's actions can launch this app in the background with no scene at
+    /// all, and the notification delegate has to be in place before launch
+    /// finishes. That is the one thing SwiftUI's `App` cannot express, so it
+    /// gets a delegate (P15-05).
+    @UIApplicationDelegateAdaptor(BlinkAppDelegate.self) private var appDelegate
+
     @State private var faces = FaceProvider()
     @State private var session = SessionController()
     // ONE rig for the whole app, so the eyes that ask you to sign in are
@@ -35,6 +41,26 @@ struct AppRoot: View {
         #if DEBUG
         if UserDefaults.standard.bool(forKey: "blinkDebugSignInStates") {
             DebugSignInStatesScreen()
+        } else if let workspace = UserDefaults.standard.string(forKey: "blinkDebugWorkspace"),
+                  !workspace.hasPrefix("u_") {
+            // S1 against a GUEST workspace on a local server.
+            //
+            // Signing in as the user is not something this project can do, and
+            // several of S1's states need real data to exist first (a running
+            // session, an unresolved evening, a recorded outcome). Guest
+            // workspaces are ungated by design (`_gate_signed_in_workspaces`
+            // only gates `u_…`), so this opens the SHIPPING screen against a
+            // real API with a real payload. Nothing is stubbed: the door only
+            // supplies which workspace to read.
+            //
+            // DEBUG only, refuses a `u_` id outright, and the identity carries
+            // no greeting because no server composed one.
+            TodayScreen(
+                identity: BlinkIdentity(workspaceID: workspace),
+                session: BlinkSession(token: "", workspaceID: workspace),
+                rig: rig,
+                onSignedOut: {}
+            )
         } else {
             RootView(session: session, rig: rig)
         }
@@ -58,11 +84,17 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            if session.phase.isSignedIn, handedOver {
-                // Still scaffolding behind the gate: P15-04 brings the Today
-                // screen. The rehearsal screen stays reachable, now wearing
-                // the same rig the sign-in screen used.
-                DebugEmotionRehearsalScreen(rig: rig)
+            if case .signedIn(let identity) = session.phase,
+               handedOver,
+               let blink = session.session {
+                // S1 · Today. The rehearsal screen P15-02 built is still one
+                // tap away, behind TodayScreen's DEBUG-only "beats" door.
+                TodayScreen(
+                    identity: identity,
+                    session: blink,
+                    rig: rig,
+                    onSignedOut: { session.signOut() }
+                )
             } else {
                 SignInScreen(
                     phase: session.phase,

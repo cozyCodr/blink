@@ -55,12 +55,23 @@ public struct FolioFace: FaceTokens {
     public var displayFont: Font { Self.typography.font(.display, size: 30, relativeTo: .title) }
     public var bodyFont: Font { Self.typography.font(.body, size: 19, relativeTo: .body) }
     public var monoFont: Font { Self.typography.font(.mono, size: 15, relativeTo: .callout) }
+    // P15-04 named type roles. The SIZES come from the web's shared chrome
+    // (now.css), which is not face-scoped; the FAMILY is this face's, because
+    // `typography` is. So a role reads in this face's voice without any view
+    // knowing which face it is wearing.
+    public var cardTitleFont: Font { Self.typography.font(.display, size: 22, relativeTo: .title3) }   // now.css:30
+    public var labelFont: Font { Self.typography.font(.body, size: 12, relativeTo: .caption) }         // now.css:22
+    public var numberFont: Font { Self.typography.font(.mono, size: 48, relativeTo: .largeTitle) }     // now.css:44, :89
+    public var metaFont: Font { Self.typography.font(.mono, size: 12, relativeTo: .caption) }          // now.css:60
+    public var secondaryFont: Font { Self.typography.font(.body, size: 14, relativeTo: .subheadline) } // now.css:73
     public var fontResolutions: [FontResolution] { Self.typography.resolutions }
 
     // MARK: Shape
     // Hand-drawn corners: the web writes four different radii nudged by the
     // boil vars around a ~12.5px base, ±2px (face.css:1259-1263).
     public let cornerStyle: CornerStyle = .handDrawn(base: 12.5, jitter: 2)
+    // Shared web chrome; see FaceLayout. This face does not depart from it.
+    public let layout = FaceLayout.webChrome
     public let eyeShape: EyeShape = .inkBlot            // face.css:826-853
     public let celebration: Celebration = .stampedStar  // COMPANION_SCREENS.md
 

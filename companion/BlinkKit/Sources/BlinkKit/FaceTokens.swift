@@ -121,6 +121,85 @@ public struct EyeGeometry: Sendable, Equatable {
     }
 }
 
+// MARK: - Layout
+
+/// The spacing a face lays its surfaces out on.
+///
+/// P15-04 added this because S1 is the first screen with real chrome, and a
+/// padding written inline in a view is exactly the fork `data-face` exists to
+/// prevent. Every value is transcribed from the web's shared chrome, with its
+/// stylesheet line beside it.
+///
+/// **The web does not vary these per face today.** `chrome.css` and `now.css`
+/// are not inside a `data-face` scope, so all three conformances carry the
+/// same numbers, and that sameness is a fact about the stylesheet rather than
+/// a shortcut. The property exists on the protocol so a face that wants to
+/// breathe differently has somewhere to say so without a view learning its
+/// name.
+public struct FaceLayout: Sendable, Equatable {
+    /// A card's inner padding. chrome.css:36 `padding: 22px 24px 24px`.
+    public var cardPaddingTop: CGFloat
+    public var cardPaddingSide: CGFloat
+    public var cardPaddingBottom: CGFloat
+    /// Between two stacked sections. chrome.css:53 `gap: 18px`.
+    public var sectionGap: CGFloat
+    /// Between rows inside one section. chrome.css:56 `gap: 12px`.
+    public var rowGap: CGFloat
+    /// Between an icon and its label. chrome.css:10 `gap: 8px`.
+    public var tightGap: CGFloat
+    /// A pill control's padding. chrome.css:9 `padding: 9px 14px`.
+    public var pillPaddingV: CGFloat
+    public var pillPaddingH: CGFloat
+    /// The commitment dot beside a session title. now.css:35 `9px`.
+    public var dotSize: CGFloat
+    /// The screen's own horizontal margin. chrome.css:25 `padding: 24px`.
+    public var screenMargin: CGFloat
+    /// Minimum tap target. docs/COMPANION_SCREENS.md, Accessibility:
+    /// "Minimum tap target 44pt on iOS".
+    public var minTapTarget: CGFloat
+
+    public init(
+        cardPaddingTop: CGFloat,
+        cardPaddingSide: CGFloat,
+        cardPaddingBottom: CGFloat,
+        sectionGap: CGFloat,
+        rowGap: CGFloat,
+        tightGap: CGFloat,
+        pillPaddingV: CGFloat,
+        pillPaddingH: CGFloat,
+        dotSize: CGFloat,
+        screenMargin: CGFloat,
+        minTapTarget: CGFloat
+    ) {
+        self.cardPaddingTop = cardPaddingTop
+        self.cardPaddingSide = cardPaddingSide
+        self.cardPaddingBottom = cardPaddingBottom
+        self.sectionGap = sectionGap
+        self.rowGap = rowGap
+        self.tightGap = tightGap
+        self.pillPaddingV = pillPaddingV
+        self.pillPaddingH = pillPaddingH
+        self.dotSize = dotSize
+        self.screenMargin = screenMargin
+        self.minTapTarget = minTapTarget
+    }
+
+    /// The web's shared chrome, which is what all three faces sit on today.
+    public static let webChrome = FaceLayout(
+        cardPaddingTop: 22,      // chrome.css:36
+        cardPaddingSide: 24,     // chrome.css:36
+        cardPaddingBottom: 24,   // chrome.css:36
+        sectionGap: 18,          // chrome.css:53
+        rowGap: 12,              // chrome.css:56
+        tightGap: 8,             // chrome.css:10
+        pillPaddingV: 9,         // chrome.css:9
+        pillPaddingH: 14,        // chrome.css:9
+        dotSize: 9,              // now.css:35
+        screenMargin: 24,        // chrome.css:25
+        minTapTarget: 44         // COMPANION_SCREENS.md, Accessibility
+    )
+}
+
 // MARK: - Motion
 
 /// A CSS `cubic-bezier(x1, y1, x2, y2)`, carried across verbatim so a curve
@@ -416,6 +495,21 @@ public protocol FaceTokens: Sendable {
     var displayFont: Font { get }
     var bodyFont: Font { get }
     var monoFont: Font { get }
+    /// A card's own headline, one step under the screen's. The face's serif
+    /// (or its equivalent) at now.css:30's `clamp(18px, 2.6vw, 24px)`, taken
+    /// at the middle of that clamp because a phone is not a viewport slider.
+    var cardTitleFont: Font { get }
+    /// The all-caps section label above a card. now.css:22 `12px/600`.
+    var labelFont: Font { get }
+    /// A measured number, large and mono with tabular figures. now.css:44
+    /// `clamp(44px, 8vw, 64px)`, and now.css:89's phone pass `clamp(38px,
+    /// 12vw, 52px)`; 48 sits inside both.
+    var numberFont: Font { get }
+    /// The quiet mono line under a number: the "as of" stamp, a duration,
+    /// the source of an actual. now.css:60 `12px` mono.
+    var metaFont: Font { get }
+    /// A secondary sentence, smaller than body. now.css:73 `14px`.
+    var secondaryFont: Font { get }
     /// What actually resolved on this device, so the debug screen (and the
     /// README) can be honest about a fallback instead of quietly showing
     /// San Francisco.
@@ -423,6 +517,8 @@ public protocol FaceTokens: Sendable {
 
     // Shape
     var cornerStyle: CornerStyle { get }
+    /// The spacing this face lays surfaces out on.
+    var layout: FaceLayout { get }
     var eyeShape: EyeShape { get }
     var eyeGeometry: EyeGeometry { get }
     var celebration: Celebration { get }

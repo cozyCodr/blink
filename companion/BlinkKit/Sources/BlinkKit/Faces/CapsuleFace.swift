@@ -63,6 +63,15 @@ public struct CapsuleFace: FaceTokens {
     public var displayFont: Font { Self.typography.font(.display, size: 28, relativeTo: .title) }
     public var bodyFont: Font { Self.typography.font(.body, size: 17, relativeTo: .body) }
     public var monoFont: Font { Self.typography.font(.mono, size: 15, relativeTo: .callout) }
+    // P15-04 named type roles. The SIZES come from the web's shared chrome
+    // (now.css), which is not face-scoped; the FAMILY is this face's, because
+    // `typography` is. So a role reads in this face's voice without any view
+    // knowing which face it is wearing.
+    public var cardTitleFont: Font { Self.typography.font(.display, size: 22, relativeTo: .title3) }   // now.css:30
+    public var labelFont: Font { Self.typography.font(.body, size: 12, relativeTo: .caption) }         // now.css:22
+    public var numberFont: Font { Self.typography.font(.mono, size: 48, relativeTo: .largeTitle) }     // now.css:44, :89
+    public var metaFont: Font { Self.typography.font(.mono, size: 12, relativeTo: .caption) }          // now.css:60
+    public var secondaryFont: Font { Self.typography.font(.body, size: 14, relativeTo: .subheadline) } // now.css:73
     public var fontResolutions: [FontResolution] { Self.typography.resolutions }
 
     // MARK: Shape
@@ -70,6 +79,8 @@ public struct CapsuleFace: FaceTokens {
     // (The web's capsule chrome uses 10px cards, clarify.css:49; the companion
     // spec asks for a softer native radius, so 20 is deliberate, not a typo.)
     public let cornerStyle: CornerStyle = .rounded(20)
+    // Shared web chrome; see FaceLayout. This face does not depart from it.
+    public let layout = FaceLayout.webChrome
     public let eyeShape: EyeShape = .capsule(cornerRadius: 40)  // face.css:96 border-radius: 40px
     public let celebration: Celebration = .heartBurst           // COMPANION_SCREENS.md
 

@@ -5,10 +5,10 @@ are kept. Spec: `docs/COMPANION_ARCHITECTURE.md` and `docs/COMPANION_SCREENS.md`
 
 Planner item P15-01 built the skeleton: the Xcode project, the shared BlinkKit
 package, and the face token layer. P15-02 added the eyes and the whole emotion
-vocabulary. P15-03 put sign-in in front of everything (screen S7). Behind the
-gate there is still no product UI: the app lands on the debug rehearsal screen
-where every beat is one tappable row, with P15-01's token swatches one tap away
-inside it. The Today screen is P15-04.
+vocabulary. P15-03 put sign-in in front of everything (screen S7). P15-04 put
+the real product behind the gate: **S1 Today** and **S5 Celebration**. The
+rehearsal screen is still one tap away, behind the DEBUG-only "beats" door in
+Today's top-right corner.
 
 ## Layout
 
@@ -17,8 +17,86 @@ companion/
 ├── BlinkCompanion.xcodeproj     the app project (one target: Blink)
 ├── Blink/                       the iOS app sources
 └── BlinkKit/                    local Swift package: tokens, motion, models
-    └── Sources/BlinkKit/Eyes/   the eye rig (P15-02)
+    ├── Sources/BlinkKit/Eyes/   the eye rig (P15-02)
+    └── Sources/BlinkKit/Today/  the clock, the payload, the state (P15-04)
 ```
+
+## Today and the celebration (P15-04)
+
+```
+BlinkKit/Sources/BlinkKit/Today/
+├── ServerClock.swift        the ONE clock: which day is it, to this person
+├── WorkspaceDetails.swift   the subset of GET /details that S1 reads
+├── TodayState.swift         S1's states, as pure arithmetic
+├── RecordedOutcome.swift    S5's key, and the wall that guards it
+├── DetailsClient.swift      GET /details + POST /checkin/resolve
+├── DetailsCache.swift       the last payload, and when we received it
+└── TodayStore.swift         cache first, reconcile after, degrade honestly
+```
+
+**`Date()` never decides what "today" is.** Every date on the wire is naive UTC
+and `today` is the USER'S local day, localised server-side from their stored
+zone (P15-00). `ServerClock` is the only thing allowed to answer day and hour
+questions, and it answers them in the zone the payload published. A phone in
+Lisbon reading a Tokyo account shows Tokyo's day, exactly as the web does. The
+device clock is used for one thing only, and says so: the "as of 9:41" stamp,
+which records when THIS DEVICE last heard from the server.
+
+**Cache first, reconcile after.** `TodayStore.load` paints the last cached
+payload immediately WITH its stamp, then refreshes. A refusal or an unreachable
+server never clears the screen and never substitutes a number: it leaves the
+payload up and adds the stamp. A CANCELLED request (the view went away, or
+SwiftUI tore down a `refreshable` task) is a fourth case and changes nothing at
+all, because nobody failed and nothing was learned. With no cache at all the
+screen shows no numbers, only what happened and what to do.
+
+The cache lives in Application Support, not a shared app group. The group needs
+a provisioning profile this ad-hoc-signed project does not have, the same wall
+the Keychain hit. `DetailsCaching` is the seam P15-09's widgets move it behind.
+
+**The tracked line names its sources separately and never adds them.**
+`TrackedLine` carries `measuredMinutes` and `reportedMinutes` as two fields and
+deliberately has no property that sums them. Only timer minutes are ever called
+"tracked"; reported minutes read "you told me about". A day with only reported
+minutes never shows the word tracked at all.
+
+**S5 cannot be reached locally, and that is a compiler guarantee.**
+`CelebrationScreen` has one initialiser and it needs a `RecordedOutcome`.
+`RecordedOutcome`'s initialiser is `internal` to BlinkKit, so nothing in
+`companion/Blink/` can build one; inside BlinkKit the only two constructions
+are its own factories, and both take a decoded server response (a `BlockPayload`
+off `GET /details`, or a `CheckinResolveResponse` off `POST /checkin/resolve`,
+which echoes what the server WROTE). Both return nil unless the server actually
+recorded a status AND a minute count AND a source. `grep -rn "RecordedOutcome("
+companion/` prints two lines, both in that file.
+
+Beats, and what grounds each one:
+
+| Beat | Fires when |
+|---|---|
+| `thinking` | a request is genuinely in flight and there is nothing on screen yet |
+| `sorry` | the server ANSWERED with a refusal. Never for an unreachable server |
+| `heart` | a TIMER-MEASURED outcome the server holds. S5 only |
+| `satisfied` | a SELF-REPORTED outcome. S5's quieter register |
+
+Nothing fires on appearance, on a timer, or for a state ("nothing planned",
+"work done"). Those are not things that happened.
+
+**Seeing S1's states.** Several of them need real data to exist first, and
+signing in as the user is not something this project can do. `-blinkDebugWorkspace
+<ws_…>` (DEBUG only, refuses a `u_` id) opens the SHIPPING screen against a
+guest workspace, which the server leaves ungated by design. Nothing is stubbed;
+the argument only says which workspace to read.
+
+```
+.venv/bin/python -m uvicorn src.api.server:app --port 8091
+xcrun simctl launch booted dev.oapps.blink.companion \
+  -blinkAPIBaseURL http://localhost:8091 -blinkDebugWorkspace ws_demo_today
+```
+
+Seed it through the real API (`POST /ingest`, then `/checkin/resolve` or
+`/blocks/{id}/log-time`), and move `POST /profile/timezone` to reach the
+after-5pm and not-today states without waiting for the clock.
 
 ## Sign-in (P15-03)
 
