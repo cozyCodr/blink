@@ -1,0 +1,214 @@
+{
+  "eval_set_id": "blink_core",
+  "name": "Blink core tool-trajectory evalset",
+  "description": "Runs the real root_agent against its real deterministic tools. Each case pins a fresh eval-* workspace id (in-memory, Firestore stays off without BLINK_FIRESTORE), so tool responses are deterministic. Trajectory is scored strictly; the final response is LLM-phrased on top of grounded tool output.",
+  "eval_cases": [
+    {
+      "eval_id": "capacity_query",
+      "conversation": [
+        {
+          "invocation_id": "capacity_query-1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "For workspace eval-capacity: how much schedulable time do I actually have? Check the capacity tool before answering."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "You have about 100 hours of schedulable time over the next 7 days, roughly 15 hours a day after waking hours, commitments and a reserve buffer."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "get_capacity",
+                "args": {
+                  "workspace_id": "eval-capacity"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "eval_id": "schedule_proposal",
+      "conversation": [
+        {
+          "invocation_id": "schedule_proposal-1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "For workspace eval-schedule: propose a schedule for my ready tasks and tell me what got placed. Skip validation and capacity checks this time, just the proposal."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Nothing to place: there are no ready tasks in this workspace, so the proposed schedule has no blocks and utilization is zero."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "propose_schedule_for_workspace",
+                "args": {
+                  "workspace_id": "eval-schedule"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "eval_id": "validate_before_planning",
+      "conversation": [
+        {
+          "invocation_id": "validate_before_planning-1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "For workspace eval-validate: run a validation check on the current plan state and report any findings."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "I ran the validation check and found no issues or conflicts in your plan. Everything is in order, nothing blocking."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "validate_plan",
+                "args": {
+                  "workspace_id": "eval-validate"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "eval_id": "open_questions",
+      "conversation": [
+        {
+          "invocation_id": "open_questions-1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "For workspace eval-questions: are there any open clarification questions waiting on me?"
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "No open questions. Nothing is waiting on you in this workspace."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "list_open_questions",
+                "args": {
+                  "workspace_id": "eval-questions"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "eval_id": "calendar_write_requires_confirm",
+      "conversation": [
+        {
+          "invocation_id": "calendar_write_requires_confirm-1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "For workspace eval-calendar: create a calendar event with summary Deep work, start 2026-08-29T09:00:00, end 2026-08-29T10:00:00."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "I want to create the calendar event Deep work on 2026-08-29 from 09:00 to 10:00. Should I go ahead? Yes or not now."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "propose_create_event",
+                "args": {
+                  "workspace_id": "eval-calendar",
+                  "summary": "Deep work",
+                  "start_iso": "2026-08-29T09:00:00",
+                  "end_iso": "2026-08-29T10:00:00"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "eval_id": "capacity_before_claiming_room",
+      "conversation": [
+        {
+          "invocation_id": "capacity_before_claiming_room-1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "For workspace eval-room: do I have room for a three hour task? Check capacity first (call get_capacity with only the workspace_id, keep the default window), never guess."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Yes, you have room: about 100 hours of schedulable time this week, far more than the three hours this task needs."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "get_capacity",
+                "args": {
+                  "workspace_id": "eval-room"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -24,7 +24,7 @@ Knowledge workers burn cognitive effort on three things that aren't the work its
 - **It learns your life before it plans it.** First run opens with a short get-to-know-you interview; work hours, sleep, standing commitments become no-touch zones in Blink's own memory (never calendar clutter) that the capacity math respects — and replies cite it: *"I kept your Work and Sleep time clear."* Say "remember I hit the gym at 6pm on Tuesdays" any time and it asks to confirm, then plans around it.
 - **Measured work, not claimed work.** A focus session binds a timer to the current block: elapsed minutes are recorded fact, a timer measurement can't be overwritten by a later self-report, idle gaps pause and ask instead of silently counting, and the evening check-in confirms recorded reality instead of quizzing your memory.
 - **It adapts — with your consent.** Deterministic pattern mining over your measured history (never fewer than three occurrences) surfaces at most one insight at natural moments: *"4 of your last 5 Monday evening sessions fell through. Want me to stop planning Monday evenings?"* Accept and it graduates into memory; decline and it never nags about that pattern again.
-- **Real calendar, guarded writes.** Google Calendar OAuth (read + write); every write goes through a confirm gate, and a missing Calendar scope is detected and recoverable in-app.
+- **Real calendar, guarded writes.** Google Calendar OAuth (read + write); every write is a human-in-the-loop tool confirmation: `propose_create_event` never touches Google, and only your explicit yes routes to `create_event_confirmed` (`src/agent/tools.py`). A governed external action, in the pattern catalog's terms. A missing Calendar scope is detected and recoverable in-app.
 - **It degrades, never fabricates.** Every LLM path has a deterministic fallback, so the app keeps working even if Gemini is unavailable — it just says so.
 
 ## Hackathon requirements → how we meet them
@@ -40,13 +40,18 @@ Knowledge workers burn cognitive effort on three things that aren't the work its
 
 See **[`docs/DIAGRAMS.md`](docs/DIAGRAMS.md)** for the full set (system topology,
 the loose-goal flow, the division of labour, and the truthfulness contract —
-mermaid, renders inline on GitHub). In short:
+mermaid, renders inline on GitHub). Structurally, Blink is the agent triad from
+Google's Agents whitepaper made concrete: a **model** (Gemini 3.5 Flash behind
+one gateway, `src/agent/llm.py`), **tools** (typed, docstring'd,
+status-returning functions over a pure deterministic core, `src/agent/tools.py`),
+and an **orchestration layer** (the turn router plus the LLM specialists,
+`src/api/server.py` and `src/agent/specialists/`). In short:
 
 - **Browser** — the eyes presence + horizon + response-component kit (`src/web/`, eight ownership-scoped stylesheets, vanilla component factories).
 - **FastAPI** (`src/api/server.py`) — a **turn router** (`/turn`) classifies every message (chat · plan a goal · concrete tasks · disruption) and routes it; `/elicit/answer` runs the elicitation loop; `/details` powers the horizon; `/calendar/*` handles OAuth + sync; `/tts` speaks.
 - **LLM specialists** (`src/agent/specialists/`) — `intent_router`, `goal_classifier`, `elicitor`, `extractor`, `plan_synthesizer`, all LLM-first with deterministic fallbacks, all through one Gemini gateway (`src/agent/llm.py`) with client-lifecycle hygiene (timeouts, stale-client rebuild, retry-once).
 - **Deterministic core** (`src/core/`) — pure capacity ledger, greedy scheduler, rebalancer, validator, priority scoring, milestone progress accrual. Zero I/O, fully tested.
-- **State** (`src/agent/workspace_registry.py`, `persistence.py`) — the working copy is in memory for speed; **Firestore** (native mode, database `blink`) holds a snapshot per workspace, split into six documents (`commitments`, `tasks`, `blocks`, `zones`, `constraints`, `meta`). A workspace hydrates from Firestore the first time an instance touches it, and only the sections that actually changed are written back, after the response, off the request path. Live asyncio listeners and the trace stream are never persisted. If Firestore is unavailable, Blink logs one line, keeps serving from memory, and `/_health` reports `"backend": "memory"` so nothing ever claims state was saved when it was not. (The route is `/_health`, not `/healthz`: Google's frontend reserves `/healthz` and returns its own 404 before the request reaches Cloud Run.)
+- **State** (`src/agent/workspace_registry.py`, `persistence.py`) — Blink keeps **session state** and **long-term memory** separate, the same split ADK draws between a Session and a MemoryService: the conversation thread (`src/agent/conversation.py`) is per-session working context, while a typed `Memory` entity (`src/types/entities.py`) holds durable cross-session facts (no-touch zones from onboarding, accepted insights) inside the persisted `meta` section. The working copy is in memory for speed; **Firestore** (native mode, database `blink`) holds a snapshot per workspace, split into six documents (`commitments`, `tasks`, `blocks`, `zones`, `constraints`, `meta`). A workspace hydrates from Firestore the first time a fresh instance touches it (that hydration is the recovery path for Cloud Run scale-to-zero and instance death), and only the sections that actually changed are written back, after the response, off the request path. Live asyncio listeners and the trace stream are never persisted. If Firestore is unavailable, Blink logs one line, keeps serving from memory, and `/_health` reports `"backend": "memory"` so nothing ever claims state was saved when it was not. (The route is `/_health`, not `/healthz`: Google's frontend reserves `/healthz` and returns its own 404 before the request reaches Cloud Run.)
 - **ADK agent + tools** (`src/agent/agent.py`, `tools.py`) — the deterministic core exposed to the model as docstring'd, typed, `status`-returning tools.
 
 ## Implementation insights
@@ -101,10 +106,18 @@ Open **http://localhost:8080**. Tap the mic, type *"I want to become a data scie
 
 ```bash
 source .venv/bin/activate
-python -m pytest -q     # 463 passing, fully offline (the LLM is mocked, Firestore is off)
+python -m pytest -q     # 477 passing, fully offline (the LLM is mocked, Firestore is off)
 ```
 
-The deterministic core, every specialist's fallback, the grounded-reply invariants ("the text must match what actually happened"), and the disruption pipeline are all covered without spending a single token.
+There is also an ADK-native evalset that runs the real `root_agent` in Google's own harness — strict tool-trajectory scoring plus final-response matching (see `tests/evalsets/README.md`; unlike pytest it drives the live Gemini model, so it needs the Vertex credentials from `.env`):
+
+```bash
+pip install "google-adk[eval]"   # one-time
+PYTHONPATH=. .venv/bin/adk eval src/agent tests/evalsets/blink.evalset.json \
+  --config_file_path tests/evalsets/test_config.json --print_detailed_results
+```
+
+The suite covers both halves of agent evaluation: **trajectory** (scenario tests in `tests/scenarios/` drive full pipelines end to end and assert the route and tool path taken) and **final response** (the grounded-reply invariants assert the text matches what actually happened, `tests/unit/test_grounded_responses.py`). The deterministic core, every specialist's fallback, and the disruption pipeline are all covered too. 477 tests, fully offline, with the LLM mocked at the `llm.set_client` seam, so the whole suite runs without spending a single token.
 
 ## Deploy to Cloud Run
 
@@ -145,6 +158,11 @@ direction is a planner that **starts doing**:
   encouragement and reminders — the Duolingo half of accountability. The iOS
   app in `companion/` is this, in progress, sharing the same brain through the
   same API.
+- **Agent ops.** Today every turn already logs one legible decision line
+  (intent, counts, latency) and persistence logs its dirty sections
+  (`src/agent/decision_log.py`); next are OpenTelemetry trace export under the
+  GenAI semantic conventions and recasting the specialists as ADK `sub_agents`
+  (an `adk eval` evalset already ships in `tests/evalsets/`).
 
 ## Repository map
 
@@ -161,7 +179,7 @@ src/web/            # the eyes presence + horizon UI: app.js component factories
                     #   css/ split into eight ownership-scoped stylesheets
 src/types/          # the Pydantic domain model (entities.py)
 companion/          # the iOS companion (SwiftUI): same brain, same API, in your pocket
-tests/              # 463 offline tests (unit + scenario; the LLM is mocked, Firestore off)
+tests/              # 477 offline tests (unit + scenario; the LLM is mocked, Firestore off)
 docs/               # PRD, ARCHITECTURE, DIAGRAMS, DEMO_SCRIPT, companion design docs
 deployment/         # deploy.sh (Cloud Build only), seed_demo.sh, cloud_run.yaml
 .agents/rules/      # the engineering rulebook the code is held to (start with agent-governance.md)

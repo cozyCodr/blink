@@ -20,7 +20,7 @@ flowchart TB
 
     subgraph CloudRun["Google Cloud Run (keyless service account)"]
         API["FastAPI server<br/>/turn /elicit/answer /ingest-image /details /checkin/* /calendar/* /tts"]
-        Router["Intent router<br/>chat · plan_goal · concrete_tasks · disruption · checkin<br/>(deterministic guards run BEFORE the LLM)"]
+        Router["Intent router (orchestration layer)<br/>chat · plan_goal · concrete_tasks · disruption · checkin<br/>(deterministic guards run BEFORE the LLM)"]
 
         subgraph Specialists["LLM specialists (LLM-first, deterministic fallback)"]
             Elicitor["elicitor<br/>(fish for context)"]
@@ -36,7 +36,7 @@ flowchart TB
             Progress["progress + streak + pacing<br/>(derived at read time)"]
         end
 
-        LLM["src/agent/llm.py<br/>one Gemini gateway (text + vision)"]
+        LLM["src/agent/llm.py (the model)<br/>one Gemini gateway (text + vision)"]
         Store["workspace store"]
     end
 
@@ -62,7 +62,10 @@ flowchart TB
 **Why it is decoupled this way:** every specialist is LLM-first with a
 deterministic fallback, so the app degrades instead of dying if Gemini is
 unavailable. The core never calls the model; the model reaches the core only
-through typed, docstring'd tools. State lives behind one store interface.
+through typed, docstring'd, status-returning tools (`src/agent/tools.py`).
+State lives behind one store interface. In the Agents whitepaper's triad, the
+gateway is the model, `tools.py` is the tools, and the router plus specialists
+are the orchestration layer.
 
 ---
 
@@ -115,6 +118,10 @@ sequenceDiagram
 | Reading a syllabus photo | Gemini vision | Pixels to typed tasks; empty list over invention |
 | Phrasing every reply | Gemini + post-check | Warmth, with the real counts required verbatim |
 | Where state lives | Store interface | Swappable (memory to Firestore) |
+
+In the whitepaper triad's terms: the Gemini rows are the **model**, the
+pure-code rows sit behind the **tools**, and the routing between them is the
+**orchestration layer**.
 
 ---
 
