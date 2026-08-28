@@ -18,6 +18,7 @@ from src.agent.specialists.intent_router import classify_intent, _FOCUS
 from src.api.server import app
 from src.agent.workspace_registry import stores, get_or_create_store, now_naive
 from src.core.progress import timed_block_status, accumulate_timed_minutes
+from tests.unit._clock import pin_workspace_to_midday
 from src.types.entities import Block, Task, Commitment
 
 WS = "ws_focus"
@@ -287,6 +288,9 @@ class TestCheckinSkipsTimerResolved(unittest.TestCase):
         stores.pop(WS, None)
         self.client = TestClient(app)
         self.store = get_or_create_store(WS)
+        # Blocks are seeded at `now - N hours` and asserted to be today; pin the
+        # workspace to a zone where now is midday so that is true at any hour.
+        pin_workspace_to_midday(self.store, now_naive())
 
     def tearDown(self):
         llm.set_client(None)

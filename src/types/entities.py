@@ -134,6 +134,17 @@ class UserProfile(BaseModel):
     # invented; None until a real sign-in stores it. Spoken sparingly (a
     # greeting, the morning brief), never in every reply.
     name: Optional[str] = None
+    # The user's IANA timezone, e.g. "America/Los_Angeles". Decides where their
+    # DAY BOUNDARY falls, which is what "today" means for the check-in, the
+    # morning brief and the streak. Storage and arithmetic stay naive UTC; only
+    # the day boundary localises (see `src/core/localtime.py`).
+    #
+    # None means we have not been told yet, and every day-boundary question
+    # falls back to UTC, which is exactly what the code did before this field
+    # existed. The web client posts it on load. NOTE: `Workspace.timezone` has
+    # carried a "UTC" default since the first commit but was never read
+    # anywhere; this field is the one that is actually wired up.
+    timezone: Optional[str] = None
     platforms: List[str] = Field(default_factory=list)   # e.g. ["Coursera", "DataCamp"]
     current_level: Optional[str] = None                  # e.g. "beginner", "some Python"
     hours_per_week: Optional[int] = None

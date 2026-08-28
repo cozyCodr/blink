@@ -26,6 +26,7 @@ Semantics
 from datetime import datetime, timedelta
 from typing import Dict, Iterable, List, Optional
 
+from src.core.localtime import local_date
 from src.types.entities import Block, Milestone, Task
 
 _EXCLUDED_BLOCK_STATUSES = ("cancelled", "missed")
@@ -35,8 +36,15 @@ _EXCLUDED_BLOCK_STATUSES = ("cancelled", "missed")
 _STREAK_MAX_DAYS = 366
 
 
-def compute_streak(blocks: Iterable[Block], now: datetime) -> int:
+def compute_streak(blocks: Iterable[Block], now: datetime, tz=None) -> int:
     """Consecutive-day accountability streak, derived at read time (pure).
+
+    `tz` is the user's timezone, deciding where a day starts and ends. Omitted,
+    days are UTC days, which is the historical behaviour and is what every
+    caller got before timezones were wired up. A streak is a statement about
+    the user's days, so passing the real zone matters: without it, a Pacific
+    user's day rolls over at 17:00 local and an evening session lands on
+    tomorrow.
 
     A day COUNTS (+1) when it had at least one planned block and every one of
     them ended resolved as done or partial. A day BREAKS the streak when any
@@ -61,12 +69,12 @@ def compute_streak(blocks: Iterable[Block], now: datetime) -> int:
     Cancelled blocks are invisible everywhere: a disruption rebalance that
     cleared a day must not break (or fake) a streak.
     """
-    today = now.date()
+    today = local_date(now, tz)
     by_day: Dict[object, List[Block]] = {}
     for b in blocks:
         if b.status == "cancelled":
             continue
-        by_day.setdefault(b.starts_at.date(), []).append(b)
+        by_day.setdefault(local_date(b.starts_at, tz), []).append(b)
 
     streak = 0
     for i in range(_STREAK_MAX_DAYS):

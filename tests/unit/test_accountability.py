@@ -11,6 +11,7 @@ from src.agent.specialists.intent_router import classify_intent, _CHECKIN
 from src.api.server import app
 from src.agent.workspace_registry import stores, get_or_create_store, now_naive
 from src.core.progress import compute_streak
+from tests.unit._clock import pin_workspace_to_midday
 from src.types.entities import Block, Task, Commitment
 
 WS = "ws_acct"
@@ -82,6 +83,10 @@ class TestCheckinTurnAndResolution(unittest.TestCase):
         stores.pop(WS, None)
         self.client = TestClient(app)
         self.store = get_or_create_store(WS)
+        # These tests seed blocks at `now - N hours` and assert they are today.
+        # Pin the workspace to a zone where now is midday so that holds at any
+        # hour the suite happens to run. See tests/unit/_clock.py.
+        pin_workspace_to_midday(self.store, now_naive())
 
     def tearDown(self):
         llm.set_client(None)
