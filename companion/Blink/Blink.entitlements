@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- P15-10 companion push. "development" mints tokens the APNs SANDBOX host
+	     accepts, which is what a device build signed here uses; the release/
+	     TestFlight build's aps-environment is switched to "production" at
+	     archive time by Xcode's capability, and the client reports which host
+	     minted its token so the server sends to the matching one (see
+	     RemoteDeviceRegistrar.currentEnvironment and DeviceRegistration on the
+	     server). -->
+	<key>aps-environment</key>
+	<string>development</string>
+</dict>
+</plist>

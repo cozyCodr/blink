@@ -30,7 +30,58 @@ final class BlinkAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         #if DEBUG
         CompanionSignalSession.rememberDebugLaunchArguments()
         #endif
+        // If notifications are already granted, get (or refresh) the APNs token
+        // now. Registering is idempotent and cheap: iOS returns a cached token
+        // straight away, and a rotated one arrives through the same callback.
+        Task { await Self.registerForRemoteNotificationsIfAuthorised() }
         return true
+    }
+
+    /// Coming to the foreground. A token can rotate while the app was away, and
+    /// a first grant made on a previous run only becomes registrable now; both
+    /// are covered by re-registering here, which the system deduplicates.
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        Task { await Self.registerForRemoteNotificationsIfAuthorised() }
+    }
+
+    /// Only ask APNs for a token once the person has actually said yes.
+    /// Registering without authorisation would fail quietly and pointlessly;
+    /// provisional counts, because a provisional grant can still deliver.
+    @MainActor
+    private static func registerForRemoteNotificationsIfAuthorised() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized, .provisional:
+            UIApplication.shared.registerForRemoteNotifications()
+        default:
+            return
+        }
+    }
+
+    /// APNs handed us a token. Forward it to the server so the push sweep has a
+    /// delivery address (P15-10). A missing or guest session has no address to
+    /// own, so nothing is sent — the token is not lost, the next launch re-runs
+    /// this with the same token once a real session exists.
+    func application(
+        _ application: UIApplication,
+        didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+    ) {
+        guard let blink = CompanionSignalSession().session(), !blink.token.isEmpty else { return }
+        let registrar = RemoteDeviceRegistrar(baseURL: CompanionSignalSession.effectiveBaseURL())
+        Task {
+            let ok = await registrar.register(token: deviceToken, for: blink)
+            print("[push] device registration \(ok ? "accepted" : "not accepted") " +
+                  "env=\(RemoteDeviceRegistrar.currentEnvironment)")
+        }
+    }
+
+    /// Registration failed (no entitlement, no network, Simulator without a
+    /// paired push environment). Counts and a reason only, never the token.
+    func application(
+        _ application: UIApplication,
+        didFailToRegisterForRemoteNotificationsWithError error: Error
+    ) {
+        print("[push] remote registration failed: \(error.localizedDescription)")
     }
 
     func userNotificationCenter(

@@ -42,7 +42,7 @@ gcloud run deploy "${SERVICE}" \
   --service-account "${RUNTIME_SA}" \
   --allow-unauthenticated \
   --quiet \
-  --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=${PROJECT},GOOGLE_CLOUD_LOCATION=global,GOOGLE_OAUTH_CLIENT_ID=553785321909-6lrjgbtvpq2ki570vouqhuhp90oe6n5d.apps.googleusercontent.com,GOOGLE_OAUTH_REDIRECT_URI=https://blink.oapps.dev/oauth/callback,BLINK_FIRESTORE=1,FIRESTORE_DATABASE=blink,APNS_TEAM_ID=W893S8L2T5,APNS_TOPIC=dev.oapps.blink.companion" \
+  --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=${PROJECT},GOOGLE_CLOUD_LOCATION=global,GOOGLE_OAUTH_CLIENT_ID=553785321909-6lrjgbtvpq2ki570vouqhuhp90oe6n5d.apps.googleusercontent.com,GOOGLE_OAUTH_REDIRECT_URI=https://blink.oapps.dev/oauth/callback,BLINK_FIRESTORE=1,FIRESTORE_DATABASE=blink,APNS_TEAM_ID=LT6TLM327S,APNS_TOPIC=dev.oapps.blink.companion" \
   `# P14: blink-session-secret signs the sign-in session cookie. Created once:` \
   `#   openssl rand -hex 32 | gcloud secrets create blink-session-secret --data-file=- --project focus-agent-506601` \
   `#   gcloud secrets add-iam-policy-binding blink-session-secret --member serviceAccount:agent-824@focus-agent-506601.iam.gserviceaccount.com --role roles/secretmanager.secretAccessor --project focus-agent-506601` \

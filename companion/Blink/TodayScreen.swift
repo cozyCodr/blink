@@ -175,6 +175,13 @@ struct TodayScreen: View {
             guard !store.planFingerprint.isEmpty else { return }
             await notifications.askIfNeeded()
             await notifications.arrange(for: session)
+            // A first grant made just now only becomes an APNs registration if
+            // something asks; the AppDelegate's foreground pass would catch it
+            // on the next activation, but doing it here means the server has
+            // this device's delivery address the moment permission is given.
+            if notifications.authorization.canDeliver {
+                UIApplication.shared.registerForRemoteNotifications()
+            }
         }
         // Coming back to the app. The day may have rolled over, or the plan
         // may have been rewritten on the web while this screen sat there. Ask
