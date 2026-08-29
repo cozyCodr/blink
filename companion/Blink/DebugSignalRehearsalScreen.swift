@@ -24,6 +24,7 @@ struct DebugSignalRehearsalScreen: View {
     @State private var lines: [SignalKind: String] = [:]
     @State private var busy: SignalKind?
     @State private var authorization: NotificationAuthorization = .notAsked
+    @State private var waiting: [String] = []
 
     /// Long enough to put the app in the background before it lands.
     private let lead: TimeInterval = 15
@@ -43,6 +44,8 @@ struct DebugSignalRehearsalScreen: View {
                         .font(face.metaFont)
                         .foregroundStyle(face.faint)
 
+                    pending
+
                     ForEach(SignalKind.allCases) { kind in
                         row(kind)
                     }
@@ -53,7 +56,36 @@ struct DebugSignalRehearsalScreen: View {
         }
         .task {
             authorization = await scheduler.requestAuthorization()
+            waiting = await scheduler.pendingDescriptions()
         }
+    }
+
+    /// What the system is holding right now. This is the view that answers
+    /// "did the nudge follow the session when it moved?": after a replan the
+    /// list should name the same block at its NEW moment, and there should be
+    /// no second entry left over at the old one.
+    @ViewBuilder
+    private var pending: some View {
+        VStack(alignment: .leading, spacing: face.layout.rowGap) {
+            Button("waiting to be delivered") {
+                Task { waiting = await scheduler.pendingDescriptions() }
+            }
+            .font(face.bodyFont)
+            .foregroundStyle(face.accent)
+
+            if waiting.isEmpty {
+                Text("nothing waiting")
+                    .font(face.metaFont)
+                    .foregroundStyle(face.faint)
+            } else {
+                ForEach(waiting, id: \.self) { line in
+                    Text(line)
+                        .font(face.metaFont)
+                        .foregroundStyle(face.faint)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func row(_ kind: SignalKind) -> some View {

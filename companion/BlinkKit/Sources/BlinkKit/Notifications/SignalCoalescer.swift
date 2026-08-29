@@ -40,7 +40,14 @@ import Foundation
 public protocol SignalLedgering: Sendable {
     /// Signals arranged for this local day: key to intended delivery instant.
     func entries(day: String, workspaceID: String) -> [String: Date]
-    func record(key: String, deliverAt: Date, day: String, workspaceID: String)
+    /// Replace this day's whole record with `entries`.
+    ///
+    /// A whole-day write rather than a per-signal one, because an arrange is a
+    /// REBUILD: `LocalNotificationScheduler` cancels every request it owns and
+    /// then re-submits from the payload it has just read. A ledger that could
+    /// only be added to would remember a nudge for a session that has since
+    /// moved, and refuse to arrange it at its new time. See `admit`.
+    func replaceDay(_ entries: [String: Date], day: String, workspaceID: String)
     func forget(workspaceID: String)
 }
 
@@ -66,13 +73,13 @@ public struct DefaultsSignalLedger: SignalLedgering {
             .mapValues { Date(timeIntervalSince1970: $0) }
     }
 
-    public func record(key: String, deliverAt: Date, day: String, workspaceID: String) {
-        var raw = defaults.dictionary(forKey: storageKey(workspaceID)) as? [String: Double] ?? [:]
-        raw[key] = deliverAt.timeIntervalSince1970
+    public func replaceDay(_ entries: [String: Date], day: String, workspaceID: String) {
         // Keys carry the day, so anything from another day is dead weight.
         // Keeping only today's also means a device that sat idle for a week
         // does not start up owing itself a quota.
-        raw = raw.filter { $0.key.hasPrefix("\(day)|") }
+        let raw = entries
+            .filter { $0.key.hasPrefix("\(day)|") }
+            .mapValues { $0.timeIntervalSince1970 }
         defaults.set(raw, forKey: storageKey(workspaceID))
     }
 
@@ -90,14 +97,44 @@ public struct SignalCoalescer: Sendable {
         self.ledger = ledger
     }
 
-    /// Filter, in the order given, recording every acceptance so the next call
-    /// sees it. Refusals carry their reason.
+    /// Filter, in the order given, and leave the ledger holding exactly what
+    /// this device is now standing behind for the day. Refusals carry their
+    /// reason.
+    ///
+    /// AN ARRANGE IS A REBUILD, NOT AN APPEND, and that is the whole reason
+    /// `now` is a parameter. `LocalNotificationScheduler` cancels every
+    /// pending request it owns and re-submits from the payload it has just
+    /// read. Every ledger entry for the day is therefore in one of two states,
+    /// and the two are treated differently:
+    ///
+    ///   * ITS MOMENT HAS PASSED (`deliverAt <= now`). The person has already
+    ///     been spoken to. It stays in the ledger, it still counts toward the
+    ///     ceiling and the fifteen-minute gap, and a fresh candidate about the
+    ///     same subject is refused as `.alreadyArrangedToday`. Nobody gets the
+    ///     same check-in twice because they opened the app again.
+    ///
+    ///   * IT IS STILL IN THE FUTURE. Its request was just cancelled, so it is
+    ///     not standing anywhere any more, and the fresh candidate REPLACES
+    ///     it, at whatever moment the fresh payload says. This is what makes a
+    ///     moved session honest: the nudge follows the block to its new time
+    ///     instead of the ledger refusing it and leaving the person with
+    ///     nothing, or with a banner pointing at a time the plan abandoned.
+    ///     A block that has since been resolved or has left the plan composes
+    ///     no candidate at all, so its entry simply does not come back.
+    ///
+    /// `now` is the SERVER's instant, from the payload the candidates were
+    /// composed from, never the device's clock (`WorkspaceDetails.now`).
     public func admit(
         _ candidates: [NotificationSignal],
         day: String,
-        workspaceID: String
+        workspaceID: String,
+        now: Date
     ) -> (admitted: [NotificationSignal], refused: [(signal: NotificationSignal, reason: SignalRefusal)]) {
-        var existing = ledger.entries(day: day, workspaceID: workspaceID)
+        // Only the part of the day that has already been spoken survives the
+        // rebuild untouched. Everything still ahead is up for recomposition.
+        var standing = ledger.entries(day: day, workspaceID: workspaceID)
+            .filter { $0.value <= now }
+
         var admitted: [NotificationSignal] = []
         var refused: [(signal: NotificationSignal, reason: SignalRefusal)] = []
 
@@ -106,15 +143,17 @@ public struct SignalCoalescer: Sendable {
         for signal in candidates {
             let key = signal.ledgerKey(day: day)
 
-            if existing[key] != nil {
+            // Either already spoken today, or a second candidate about the
+            // same subject in this very pass. One per subject per day stands.
+            if standing[key] != nil {
                 refused.append((signal, .alreadyArrangedToday))
                 continue
             }
-            if existing.count >= SignalRules.deviceDailyCeiling {
+            if standing.count >= SignalRules.deviceDailyCeiling {
                 refused.append((signal, .deviceCeilingReached(ceiling: SignalRules.deviceDailyCeiling)))
                 continue
             }
-            if let clash = existing.values.first(where: {
+            if let clash = standing.values.first(where: {
                 abs($0.timeIntervalSince(signal.deliverAt)) < gap
             }) {
                 let minutes = Int((abs(clash.timeIntervalSince(signal.deliverAt)) / 60).rounded())
@@ -123,10 +162,10 @@ public struct SignalCoalescer: Sendable {
             }
 
             admitted.append(signal)
-            existing[key] = signal.deliverAt
-            ledger.record(key: key, deliverAt: signal.deliverAt, day: day, workspaceID: workspaceID)
+            standing[key] = signal.deliverAt
         }
 
+        ledger.replaceDay(standing, day: day, workspaceID: workspaceID)
         return (admitted, refused)
     }
 

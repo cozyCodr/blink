@@ -43,6 +43,26 @@ public final class TodayStore {
     /// The block whose answer is currently being written.
     public private(set) var writingBlockID: String?
 
+    /// What the notification signals would be built from, reduced to one
+    /// comparable value. Empty until the server has answered at least once.
+    ///
+    /// WHY THIS EXISTS. S2's signals are composed from today's blocks, and
+    /// they are only worth rebuilding when today's blocks have actually
+    /// changed. Rebuilding on every refresh would churn the ledger's record of
+    /// what this device has already said, for nothing; rebuilding only on the
+    /// first payload (which is what a `store.state != nil` key does) leaves a
+    /// nudge pointing at a time the plan has since abandoned. So the screen
+    /// keys its arrange on this instead.
+    ///
+    /// WHAT COUNTS AS "THE PLAN CHANGED", exactly: the user's local day rolled
+    /// over, or a block that starts today was added, removed, moved, resized
+    /// or resolved. Nothing else is in here, because nothing else changes what
+    /// a signal would say or when it would arrive. It is built from the
+    /// SERVER's payload only, and it is set on a live answer only: a cache
+    /// read or a failed reconcile leaves it exactly where it was, so an
+    /// unreachable server can never trigger a rebuild.
+    public private(set) var planFingerprint = ""
+
     /// The earned moment, or nil. Set ONLY by `RecordedOutcome`'s factories,
     /// which only accept a decoded server response. See RecordedOutcome.swift
     /// for how that is enforced.
@@ -106,6 +126,7 @@ public final class TodayStore {
             details = fresh
             state = TodayState(details: fresh)
             freshness = .live
+            planFingerprint = TodayStore.fingerprint(of: fresh)
             cache.save(fresh, receivedAt: receivedAt, workspaceID: session.workspaceID)
             considerCelebrating(fresh, isFirstEverPaint: !hadSomethingBefore)
         } catch DetailsError.notSignedIn {
@@ -142,6 +163,25 @@ public final class TodayStore {
             // still the last thing the server told us, so it keeps its stamp.
             freshness = .cached(receivedAt: Date())
         }
+    }
+
+    /// The digest behind `planFingerprint`. Sorted by block id, so two
+    /// payloads that describe the same day in a different order read as the
+    /// same day, which they are.
+    static func fingerprint(of details: WorkspaceDetails) -> String {
+        let clock = ServerClock(details: details)
+        let today = details.blocks
+            .filter { clock.isToday($0.startsAt) }
+            .map { block in
+                [
+                    block.id,
+                    ServerClock.string(from: block.startsAt),
+                    ServerClock.string(from: block.endsAt),
+                    block.status.rawValue,
+                ].joined(separator: "~")
+            }
+            .sorted()
+        return ([details.today] + today).joined(separator: "|")
     }
 
     // MARK: The check-in write

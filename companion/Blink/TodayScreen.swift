@@ -29,6 +29,7 @@ struct TodayScreen: View {
     @Environment(\.face) private var face
     @Environment(\.openURL) private var openURL
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(FaceProvider.self) private var faces
 
     let identity: BlinkIdentity
@@ -158,11 +159,30 @@ struct TodayScreen: View {
         // means asking before the app has anything to offer; asking once
         // Today holds a real plan means the question has an answer behind it.
         // A no is a normal state, recorded once and never asked again.
-        .task(id: store.state != nil) {
+        //
+        // THE KEY IS THE PLAN, not "is there a plan yet". The signals are made
+        // of today's blocks, so they are rebuilt every time today's blocks
+        // change and at no other time: a replan on the web, a plan made right
+        // here in the compose field, a check-in that resolved something, a day
+        // that rolled over while the app was away. Anything that lands a fresh
+        // payload runs through `store.refresh()`, and `planFingerprint` moves
+        // only when the day or a block genuinely did, so a pull that changed
+        // nothing costs nothing. Keying on `store.state != nil` instead, as
+        // this once did, arranged the day's signals once and then let them go
+        // stale for the rest of that day.
+        .task(id: store.planFingerprint) {
             await notifications.refreshAuthorization()
-            guard store.state != nil else { return }
+            guard !store.planFingerprint.isEmpty else { return }
             await notifications.askIfNeeded()
             await notifications.arrange(for: session)
+        }
+        // Coming back to the app. The day may have rolled over, or the plan
+        // may have been rewritten on the web while this screen sat there. Ask
+        // the server; if the answer differs from what we hold, the arrange
+        // above follows it. If it does not, nothing happens, which is right.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await store.refresh() }
         }
         // A background action wrote something. Re-read rather than assume:
         // the number on this screen is the server's number.

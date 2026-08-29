@@ -14,7 +14,10 @@ import UserNotifications
 //  3. It is idempotent. Every arrange cancels this scheduler's own pending
 //     requests and rebuilds them from the payload it just read, so a session
 //     that was cancelled on the web stops being nudged the next time the app
-//     runs.
+//     runs, and a session that MOVED is nudged at its new time with no stale
+//     copy left standing beside it. The ledger cooperates: an entry whose
+//     moment has not arrived yet is replaceable, not a refusal. See
+//     SignalCoalescer.admit.
 //  4. It coalesces, as a courtesy, and says so in the receipt.
 //
 // WHAT IT CANNOT DO, AND WHY P15-10 EXISTS
@@ -194,7 +197,13 @@ public final class LocalNotificationScheduler: NotificationScheduler, @unchecked
         await cancelOwnRequests()
 
         let (admitted, refused) = coalescer.admit(
-            candidates, day: payload.today, workspaceID: session.workspaceID
+            candidates,
+            day: payload.today,
+            workspaceID: session.workspaceID,
+            // The server's instant, so the coalescer can tell a signal that
+            // has already been delivered from one that was merely cancelled a
+            // few lines above and is waiting to be rebuilt.
+            now: payload.now
         )
 
         var scheduled: [NotificationSignal] = []
@@ -268,6 +277,30 @@ public final class LocalNotificationScheduler: NotificationScheduler, @unchecked
     }
 
     #if DEBUG
+    /// DEBUG SCAFFOLDING. Every pending request this scheduler owns, with the
+    /// moment it will actually arrive, so a MOVED session can be seen to have
+    /// taken its nudge with it rather than left a second one standing.
+    ///
+    /// Read straight off the system, not off the ledger: the ledger records
+    /// what this device intended, and the only thing worth checking is what
+    /// the system is really holding.
+    public func pendingDescriptions() async -> [String] {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return await center.pendingNotificationRequests()
+            .filter { request in
+                SignalKind.allCases.contains {
+                    request.content.categoryIdentifier == $0.categoryIdentifier
+                }
+            }
+            .map { request in
+                let fires = (request.trigger as? UNTimeIntervalNotificationTrigger)?
+                    .nextTriggerDate()
+                return "\(request.identifier) fires \(fires.map(formatter.string(from:)) ?? "unknown")"
+            }
+            .sorted()
+    }
+
     /// DEBUG SCAFFOLDING. Compose ONE named kind from the real payload and
     /// deliver it shortly, so each of S2's four can be seen and screenshotted.
     ///
