@@ -16,6 +16,47 @@
 .chip-icon { padding: 9px; border-radius: 999px; }
 .chip-icon svg { width: 17px; height: 17px; }
 
+/* ============ Account affordances (P14b) ============
+   chrome.css already owns the settings modal's Google-account row, so the
+   two new account entry points live here with it: the quiet chip beside the
+   gear, and the one-time offer that follows a first landed plan.
+   Both are token-only (no color literals, no face-identity geometry), so
+   capsule, lumen and folio each get them in their own re-tokened ground. */
+.acct-chip {
+  padding: 7px 12px; font-size: 11.5px; letter-spacing: 0.05em;
+  max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.acct-chip .acct-dot {
+  width: 6px; height: 6px; border-radius: 999px;
+  background: var(--accent); opacity: 0.75; flex: none;
+}
+
+/* The offer: a quiet card above the compose field. Never modal, never a
+   focus trap, never over the eyes — it sits low and can be ignored. */
+.signin-offer {
+  position: fixed; z-index: 40;
+  right: 16px; bottom: 16px; transform: translateY(10px);
+  width: min(360px, calc(100vw - 32px));
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 16px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--line); border-radius: 16px;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.signin-offer.show { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.signin-offer p {
+  margin: 0; font: 400 13px/1.5 var(--sans); color: var(--muted);
+}
+.signin-offer .signin-row { display: flex; align-items: center; gap: 8px; }
+.signin-offer .signin-note { font: 400 12px/1.4 var(--sans); color: var(--faint); }
+
+@media (prefers-reduced-motion: reduce) {
+  .signin-offer { transition: opacity 0.01s linear; transform: none; }
+  .signin-offer.show { transform: none; }
+}
+
 /* ============ Settings modal (P5-02) ============
    Centered dialog over a dimmed backdrop. Styled off the same Nocturne
    tokens as the rest of the app. Controls: on/off switches, a calendar

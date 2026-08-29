@@ -4527,6 +4527,134 @@
   }
 
   /* =====================================================================
+     Account affordance (P14b) — sign-in made discoverable, never a wall.
+
+     Guest-first stays: a first-time visitor still gets full value with no
+     account, and `migrate_guest_workspace` folds that guest workspace into
+     the account on the first sign-in. Two quiet entry points, no gate:
+
+       1. The chip beside the gear. Signed out it reads "Sign in"; signed in
+          it reads the stored first name and just opens Settings, where the
+          real account row (sign out, calendar) already lives.
+       2. One offer, once, after the FIRST plan that actually placed blocks —
+          the moment there is something worth keeping and cross-device
+          suddenly means something. Dismiss is remembered forever, exactly
+          like the insight consent: a no is a no.
+
+     Both reuse the existing /auth/signin flow; there is no second OAuth path.
+     ===================================================================== */
+  function createAccount(settingsUi) {
+    var OFFER_KEY = "focus.signin.offerDone";
+    var chip = document.getElementById("acct-chip");
+    var signedIn = false;
+    var settled = false;
+    var offer = null;
+    var pendingOffer = false;
+
+    function done() {
+      try { return localStorage.getItem(OFFER_KEY) === "1"; } catch (_) { return true; }
+    }
+    function markDone() {
+      try { localStorage.setItem(OFFER_KEY, "1"); } catch (_) {}
+    }
+
+    function startSignin(onFail) {
+      api("/auth/signin").then(function (r) {
+        if (r && r.auth_url) { window.location.href = r.auth_url; return; }
+        throw new Error("no auth url");
+      }).catch(function () {
+        if (onFail) onFail();
+      });
+    }
+
+    function paintChip(s) {
+      signedIn = !!(s && s.signed_in);
+      settled = true;
+      chip.hidden = false;
+      if (signedIn) {
+        var name = (s.name || "").trim().split(/\s+/)[0] || "Account";
+        chip.innerHTML = '<span class="acct-dot"></span>';
+        chip.appendChild(document.createTextNode(name));
+        chip.setAttribute("aria-label", "Account settings for " + name);
+        chip.title = (s.email || name) + " · signed in";
+        hideOffer();
+      } else {
+        chip.textContent = "Sign in";
+        chip.setAttribute("aria-label", "Sign in with Google");
+        chip.title = "Sign in with Google to keep your plan on every device";
+      }
+      if (!signedIn && pendingOffer) { pendingOffer = false; showOffer(); }
+    }
+
+    function refresh() {
+      fetch("/v1/session").then(function (r) { return r.json(); })
+        .then(paintChip).catch(function () { paintChip(null); });
+    }
+
+    chip.addEventListener("click", function () {
+      if (signedIn) { settingsUi.open(); return; }
+      markDone();                       // acting on it retires the offer too
+      startSignin(function () {
+        chip.textContent = "Sign in unavailable";
+        setTimeout(function () { if (!signedIn) chip.textContent = "Sign in"; }, 2600);
+      });
+    });
+
+    function buildOffer() {
+      offer = document.createElement("div");
+      offer.className = "signin-offer";
+      offer.setAttribute("role", "region");
+      offer.setAttribute("aria-label", "Sign in with Google");
+      offer.innerHTML =
+        '<p>Sign in with Google to keep this plan on your account, so your ' +
+        'phone sees the same week and Blink can reach you there. The same ' +
+        'sign-in carries the calendar permission, so nothing extra to grant.</p>' +
+        '<div class="signin-row">' +
+          '<button class="btn ghost" id="offer-signin" type="button">Continue with Google</button>' +
+          '<button class="btn ghost" id="offer-later" type="button">Not now</button>' +
+          '<span class="signin-note" id="offer-note" aria-live="polite"></span>' +
+        '</div>';
+      document.body.appendChild(offer);
+      offer.querySelector("#offer-later").addEventListener("click", function () {
+        markDone();                     // "not now" means never again
+        hideOffer();
+      });
+      offer.querySelector("#offer-signin").addEventListener("click", function () {
+        markDone();
+        startSignin(function () {
+          offer.querySelector("#offer-note").textContent =
+            "Sign-in isn't available right now. Your plan is safe as a guest.";
+        });
+      });
+    }
+
+    function hideOffer() {
+      if (offer) offer.classList.remove("show");
+    }
+
+    function showOffer() {
+      if (signedIn || done()) return;
+      if (!offer) buildOffer();
+      // Never steal focus: the card fades in where it stands and the user
+      // can keep typing straight through it.
+      offer.classList.add("show");
+    }
+
+    /* Called when a plan lands with blocks > 0. Waits for the reply to have
+       finished before it appears, and stays silent for a signed-in user, a
+       user who already dismissed it, or a session that hasn't settled yet. */
+    function offerAfterPlan() {
+      if (done()) return;
+      if (!settled) { pendingOffer = true; return; }
+      if (signedIn) return;
+      showOffer();
+    }
+
+    refresh();
+    return { refresh: refresh, offerAfterPlan: offerAfterPlan, hideOffer: hideOffer };
+  }
+
+  /* =====================================================================
      Reminders (P9-03d) — local notifications ~10 minutes before today's
      upcoming planned blocks, while a tab is open. Opt-in via the Settings
      toggle (which owns the Notification permission ask). setTimeout against
@@ -5475,6 +5603,9 @@
       }).catch(function () { /* unreachable server changes nothing */ });
     })();
     var settingsUi = createSettings(settings);
+    // The quiet account chip beside the gear, plus the one-time post-plan
+    // offer (P14b). Guest mode is untouched; this only makes the door visible.
+    var account = createAccount(settingsUi);
 
     // Google OAuth returns land here: sign-in (?signin=connected|error, plus
     // ?ws= which the boot block already consumed) and the calendar-only
@@ -5816,6 +5947,12 @@
           // blink -> the eyes park and the fresh plan materializes.
           eyes.emote("satisfied");
           stage.openSoon();
+          // P14b: a real plan just landed, so keeping it across devices now
+          // means something. One quiet offer, after the words, never during
+          // the first-run interview, never twice.
+          if (placed > 0 && !onboardingActive) {
+            setTimeout(function () { account.offerAfterPlan(); }, 900);
+          }
         }, decorOf(res));
         return;
       }
