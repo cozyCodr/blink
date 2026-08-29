@@ -84,6 +84,12 @@ def snapshot(store: FakeStore) -> Dict[str, Dict[str, Any]]:
         "last_schedule_report": store.last_schedule_report,
         "notification_budget": store.notification_budget,
         "notifications_sent": list(store.notifications_sent),
+        # P15-10: the companion's registered APNs devices ride the snapshot in
+        # `meta`, alongside google_tokens, so a Cloud Run restart does not
+        # silently stop every push. Same rule as the tokens: stored, never
+        # logged, never published on the event stream.
+        "notification_day": store.notification_day,
+        "devices": {k: dict(v) for k, v in store.devices.items()},
     }
     if _PERSIST_TOKENS:
         meta["google_tokens"] = store.google_tokens
@@ -153,6 +159,11 @@ def restore(store: FakeStore, sections: Dict[str, Dict[str, Any]]) -> FakeStore:
     if meta.get("notification_budget") is not None:
         store.notification_budget = meta["notification_budget"]
     store.notifications_sent = list(meta.get("notifications_sent") or [])
+    store.notification_day = meta.get("notification_day")
+    store.devices = {
+        k: dict(v) for k, v in (meta.get("devices") or {}).items()
+        if isinstance(v, dict) and v.get("token")
+    }
     if _PERSIST_TOKENS:
         store.google_tokens = meta.get("google_tokens")
     return store

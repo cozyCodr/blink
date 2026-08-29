@@ -63,6 +63,14 @@ class FakeStore:
         self.traces: List[Dict[str, Any]] = []
         self.notification_budget = 3
         self.notifications_sent: List[Dict[str, Any]] = []
+        # P15-10 companion push. Registered APNs devices, keyed by token, so
+        # registering the same token twice UPDATES rather than duplicates.
+        # Each row: {token, environment, platform, app_version, registered_at,
+        # last_seen_at}. Rides the snapshot's meta section.
+        self.devices: Dict[str, Dict[str, Any]] = {}
+        # The user's LOCAL calendar day (ISO) the current budget belongs to.
+        # None until the first budget-aware sweep; see reset_daily_budget.
+        self.notification_day: Optional[str] = None
         self._listeners: List[asyncio.Queue] = []
 
     def subscribe(self) -> asyncio.Queue:
@@ -294,16 +302,89 @@ class FakeStore:
         self.traces.append(entry)
         self._publish_event("trace_recorded", {"trigger": trigger, "kind": event_kind, "payload": payload})
 
-    def notify(self, body: str, reason: str, urgency: str = "normal") -> bool:
-        if self.notification_budget > 0:
-            self.notification_budget -= 1
-            entry = {"body": body, "reason": reason, "urgency": urgency}
-            self.notifications_sent.append(entry)
-            self._publish_event("notification_dispatched", entry)
+    # --- P15-10 registered devices ----------------------------------------
+
+    def register_device(self, token: str, environment: str = "production",
+                        platform: str = "ios",
+                        app_version: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Register (or refresh) one APNs device token. Returns the stored row,
+        or None when the token is unusable. Registering the same token twice is
+        an UPDATE, never a duplicate: the token is the key."""
+        key = (token or "").strip()
+        if not key:
+            return None
+        now = datetime.now(timezone.utc).isoformat()
+        existing = self.devices.get(key)
+        row = {
+            "token": key,
+            "environment": "sandbox" if environment == "sandbox" else "production",
+            "platform": platform or "ios",
+            "app_version": app_version,
+            "registered_at": (existing or {}).get("registered_at", now),
+            "last_seen_at": now,
+        }
+        self.devices[key] = row
+        # Token values are secrets. The event stream carries the COUNT only,
+        # exactly as set_google_tokens carries a boolean and never the bundle.
+        self._publish_event("device_registered", {"devices": len(self.devices)})
+        return row
+
+    def remove_device(self, token: str) -> bool:
+        """Forget one device token. True only when a row really went away."""
+        if token in self.devices:
+            del self.devices[token]
+            self._publish_event("device_removed", {"devices": len(self.devices)})
             return True
         return False
 
-    def reset_daily_budget(self):
+    def list_devices(self) -> List[Dict[str, Any]]:
+        return list(self.devices.values())
+
+    # --- the notification budget, the ONE place it is spent ----------------
+
+    def _spend_notification_budget(self, entry: Dict[str, Any]) -> bool:
+        """Decrement the daily budget and append one ledger row, or refuse.
+
+        Every notification this system sends — the deterministic triggers'
+        `notify` and the P15-10 push sweep alike — goes through here, so the
+        three-a-day cap has exactly one implementation and one ledger.
+        """
+        if self.notification_budget <= 0:
+            return False
+        self.notification_budget -= 1
+        entry = dict(entry)
+        entry.setdefault("at", datetime.now(timezone.utc).isoformat())
+        self.notifications_sent.append(entry)
+        self._publish_event("notification_dispatched", {
+            k: v for k, v in entry.items() if k != "body"
+        })
+        return True
+
+    def notify(self, body: str, reason: str, urgency: str = "normal") -> bool:
+        return self._spend_notification_budget(
+            {"body": body, "reason": reason, "urgency": urgency}
+        )
+
+    def record_push_sent(self, kind: str, key: str, reason: str,
+                         devices: int = 1, at: Optional[str] = None) -> bool:
+        """Spend one unit of the budget for a push that ALREADY landed.
+
+        Deliberately carries no copy and no token: `kind`, the per-day ledger
+        `key`, a reason and a device count. Callers must only reach this after
+        APNs accepted the send, so the ledger never claims a delivery that did
+        not happen.
+        """
+        entry = {"kind": kind, "key": key, "reason": reason,
+                 "devices": devices, "channel": "apns"}
+        if at:
+            # The SWEEP's instant, not the wall clock, so the fifteen-minute
+            # gap is measured in the same frame every other decision uses.
+            entry["at"] = at
+        return self._spend_notification_budget(entry)
+
+    def reset_daily_budget(self, day: Optional[str] = None):
         self.notification_budget = 3
+        if day is not None:
+            self.notification_day = day
 
 

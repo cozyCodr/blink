@@ -58,6 +58,7 @@ __all__ = [
     "resolve_zone",
     "is_known_zone",
     "local_date",
+    "local_hour",
     "local_today",
     "same_local_day",
     "day_bounds_utc",
@@ -110,6 +111,16 @@ def local_date(dt: datetime, tz: Optional[tzinfo] = None) -> date:
     zone, this is the old UTC behaviour exactly.
     """
     return _as_utc(dt).astimezone(tz or UTC).date()
+
+
+def local_hour(dt: datetime, tz: Optional[tzinfo] = None) -> int:
+    """The hour of the day (0-23) `dt` falls on, as seen from `tz`.
+
+    The companion's signal windows are stated as hours ("before 10am", "after
+    5pm"), and those hours belong to the user, not to UTC. Same degradation
+    rule as everything else here: no zone means UTC.
+    """
+    return _as_utc(dt).astimezone(tz or UTC).hour
 
 
 def local_today(now: datetime, tz: Optional[tzinfo] = None) -> date:

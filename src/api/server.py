@@ -54,6 +54,8 @@ from src.agent.triggers import (
 from src.agent.reconcile import execute_evening_reconcile
 from src.agent import conversation
 from src.agent import decision_log
+from src.agent import push
+from src.agent import push_scheduler
 from src.agent import tts
 from src.agent import auth as blink_auth
 from src.agent import google_calendar as gcal
@@ -2878,6 +2880,189 @@ async def trigger_routine(
     if brief_payload is not None:
         result["brief"] = brief_payload
     return result
+
+# --- P15-10 companion push: device registration (Gap 2) ---------------------
+
+class DeviceRegistration(BaseModel):
+    """What the companion sends after `didRegisterForRemoteNotifications`."""
+    apns_token: str = Field(min_length=8, max_length=256)
+    # Which APNs host will accept this token. A development build's token is
+    # only valid on the sandbox host, and sending it to production returns
+    # BadDeviceToken, so this is not cosmetic.
+    environment: str = Field(default="production", pattern="^(sandbox|production)$")
+    platform: str = Field(default="ios", max_length=32)
+    app_version: Optional[str] = Field(default=None, max_length=64)
+
+
+def _require_owner(request: Request, workspace_id: str) -> None:
+    """Only the workspace's own signed-in session may touch its devices.
+
+    Stricter than `_gate_signed_in_workspaces`, on purpose. That gate protects
+    `u_` workspaces and lets crypto-random guest ids through, which is right for
+    reading a plan. A device token is a delivery address, so registration
+    demands a real credential for THIS workspace whatever the id looks like,
+    and the companion has no guest mode anyway
+    (docs/COMPANION_ARCHITECTURE.md, Gap 1).
+    """
+    if _bound_workspace(request) != workspace_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Sign in to register a device for this workspace.",
+        )
+
+
+@app.post("/v1/workspaces/{workspace_id}/devices", status_code=status.HTTP_201_CREATED)
+def register_device(workspace_id: str, payload: DeviceRegistration, request: Request):
+    """Register (or refresh) one APNs device token for this workspace.
+
+    Registering the same token twice is an UPDATE, never a duplicate: APNs
+    tokens rotate, and a workspace with two rows for one phone would send that
+    phone two banners and spend two units of a three-unit budget.
+    """
+    _require_owner(request, workspace_id)
+    store = get_or_create_store(workspace_id)
+    row = store.register_device(
+        payload.apns_token,
+        environment=payload.environment,
+        platform=payload.platform,
+        app_version=payload.app_version,
+    )
+    if row is None:
+        raise HTTPException(status_code=422, detail="apns_token is empty.")
+    # Counts and a fingerprint only. A token value never reaches a log line.
+    decision_log.decision(
+        "push", workspace_id,
+        f"registered device fp={push.token_fingerprint(payload.apns_token)} "
+        f"env={row['environment']}, {len(store.devices)} device(s) on file")
+    return {
+        "registered": True,
+        "devices": len(store.devices),
+        "environment": row["environment"],
+        "platform": row["platform"],
+        "push_configured": push.is_configured(),
+    }
+
+
+@app.get("/v1/workspaces/{workspace_id}/devices")
+def list_devices(workspace_id: str, request: Request):
+    """The devices on file, WITHOUT their tokens.
+
+    A short fingerprint is enough for the app or a human to confirm "this phone
+    is registered"; echoing the token back would put a credential in a response
+    body and, eventually, in someone's terminal scrollback.
+    """
+    _require_owner(request, workspace_id)
+    store = get_or_create_store(workspace_id)
+    return {
+        "devices": [
+            {
+                "fingerprint": push.token_fingerprint(row["token"]),
+                "environment": row.get("environment"),
+                "platform": row.get("platform"),
+                "app_version": row.get("app_version"),
+                "registered_at": row.get("registered_at"),
+                "last_seen_at": row.get("last_seen_at"),
+            }
+            for row in store.list_devices()
+        ],
+        "push_configured": push.is_configured(),
+    }
+
+
+@app.delete("/v1/workspaces/{workspace_id}/devices/{token}")
+def delete_device(workspace_id: str, token: str, request: Request):
+    """Forget one device. Idempotent by report: `removed` says what really
+    happened rather than claiming success for a token that was never here.
+
+    ONE KNOWN LEAK, NAMED RATHER THAN HIDDEN: the token is a path segment (the
+    shape Gap 2 specifies), so uvicorn's own ACCESS log prints it, as it prints
+    every path. Blink's decision lines carry the fingerprint only. If that
+    access-log line ever matters, the fix is to move the token into a header
+    and keep this path as an alias, not to pretend the leak is not there.
+    """
+    _require_owner(request, workspace_id)
+    store = get_or_create_store(workspace_id)
+    removed = store.remove_device(token)
+    decision_log.decision(
+        "push", workspace_id,
+        f"unregistered device fp={push.token_fingerprint(token)} "
+        f"(removed={removed}), {len(store.devices)} device(s) left")
+    return {"removed": removed, "devices": len(store.devices)}
+
+
+# --- P15-10 companion push: the sweep (Gap 3) -------------------------------
+
+SWEEP_SECRET_HEADER = "x-blink-sweep-secret"
+
+
+def _brief_body(store, now: datetime) -> Optional[str]:
+    """The server's OWN morning-brief sentence, from the existing trigger.
+
+    The sweep never writes this sentence itself; it asks
+    `execute_morning_brief` for the same string `/trigger` puts in
+    `brief.notification_body`, so the push and the web brief cannot disagree.
+    """
+    tz = _tz(store)
+    today_blocks = sorted(
+        (b for b in store.blocks.values()
+         if b.status == "planned" and same_local_day(b.starts_at, now, tz)),
+        key=lambda b: b.starts_at,
+    )
+    res = execute_morning_brief(
+        commitments=store.get_active_commitments(),
+        tasks=store.get_ready_tasks(),
+        today_blocks=today_blocks,
+        ledger=ledger_for(store, now),
+        now=now,
+    )
+    return res.notification_body
+
+
+def _sweep_authorised(request: Request) -> bool:
+    """Cloud Scheduler's shared secret, compared in constant time.
+
+    NOT publicly triggerable, and it fails CLOSED: with `BLINK_SWEEP_SECRET`
+    unset there is no value a caller could send that would match, so an
+    unconfigured deployment has a sweep endpoint nobody can fire rather than
+    one everybody can.
+    """
+    expected = os.getenv("BLINK_SWEEP_SECRET", "")
+    if not expected:
+        return False
+    presented = request.headers.get(SWEEP_SECRET_HEADER, "")
+    return secrets.compare_digest(presented, expected)
+
+
+@app.post("/internal/sweep")
+def run_sweep(request: Request):
+    """Cloud Scheduler's five-minute tick: send what is due, to whom, now.
+
+    Deliberately outside `/v1/workspaces/…` so the tenancy gate never sees it
+    and never has to make an exception for it. Its own credential is the
+    shared secret above.
+    """
+    if not _sweep_authorised(request):
+        raise HTTPException(status_code=403, detail="Not authorised.")
+    now = _now()
+    report = push_scheduler.sweep(stores, now, brief_body_for=_brief_body)
+    # One line per sweep: counts and kinds. No ids, no copy, no tokens.
+    print(
+        f"[push sweep] {report.considered} workspace(s) with devices of "
+        f"{report.workspaces} loaded, sent {report.sent} "
+        f"({', '.join(f'{k}x{v}' for k, v in sorted(report.by_kind.items())) or 'none'}), "
+        f"pruned {report.pruned}",
+        flush=True,
+    )
+    return {
+        "swept_at": now.isoformat(),
+        "workspaces": report.workspaces,
+        "considered": report.considered,
+        "sent": report.sent,
+        "pruned": report.pruned,
+        "by_kind": report.by_kind,
+        "push_configured": push.is_configured(),
+    }
+
 
 # Privacy policy: a public page required for the Google OAuth consent screen's
 # production mode (homepage + privacy url). Plain static HTML, no data access.

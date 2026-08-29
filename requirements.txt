@@ -9,3 +9,8 @@ uvicorn
 python-dotenv
 pytest
 pytest-asyncio
+# P15-10 APNs push: httpx with HTTP/2 (Apple's push service speaks only HTTP/2)
+# and cryptography for the ES256 provider token. Both are already pulled in
+# transitively; pinned here because src/agent/push.py depends on them directly.
+httpx[http2]
+cryptography
