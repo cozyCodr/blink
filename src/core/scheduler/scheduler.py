@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, NamedTuple
 from src.types.entities import Commitment, Task, Block, BlockStatus
-from src.core.capacity.capacity_ledger import CapacityLedger
+from src.core.capacity.capacity_ledger import CapacityLedger, earliest_placement
 from src.core.scoring.priority_score import calculate_priority_score
 from src.core.utils.date_utils import TimeInterval, diff_minutes, subtract_intervals
 
@@ -88,11 +88,19 @@ def propose_schedule(
     topo_tasks = topological_sort(ready_tasks)
     sorted_tasks = sorted(topo_tasks, key=lambda t: task_scores.get(t.id, 0.0), reverse=True)
 
-    # 4. Greedy placement across free capacity windows
-    free_windows_by_day: Dict[str, List[TimeInterval]] = {
-        d.date: [w for w in d.free_windows]
-        for d in ledger.by_day
-    }
+    # 4. Greedy placement across free capacity windows.
+    # Defence in depth against scheduling into the past: even if a ledger were
+    # built from a midnight floor, windows that have already passed are dropped
+    # and a window straddling `now` is clipped to its remaining part.
+    floor = earliest_placement(now)
+    free_windows_by_day: Dict[str, List[TimeInterval]] = {}
+    for d in ledger.by_day:
+        usable: List[TimeInterval] = []
+        for w in d.free_windows:
+            if w.end <= floor:
+                continue  # wholly in the past: dropped, not clipped to zero
+            usable.append(TimeInterval(start=max(w.start, floor), end=w.end))
+        free_windows_by_day[d.date] = usable
     commitments_by_day: Dict[str, set] = {d.date: set() for d in ledger.by_day}
 
     placed_blocks: List[ProposedBlock] = []

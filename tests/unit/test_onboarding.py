@@ -118,10 +118,13 @@ class TestLedgerIntegration(unittest.TestCase):
         bare_total = ledger_for(bare, FIXED_NOW).total_available_minutes
         zoned_total = ledger_for(zoned, FIXED_NOW).total_available_minutes
         self.assertLess(zoned_total, bare_total)
-        # 5 weekdays x 480 min constrained inside the waking window; the 20%
-        # reserve shrinks with the free time, so the available delta is the
-        # constrained delta minus the reserve it releases: 480*5*0.8 = 1920.
-        self.assertEqual(bare_total - zoned_total, 1920)
+        # 5 weekdays of 09:00-17:00 zone inside the waking window. FIXED_NOW is
+        # Wednesday 12:00, and day 0 is clipped to the remaining day, so day 0
+        # only contributes 12:00-17:00 = 300 constrained min, not the full 480.
+        # The 20% reserve shrinks with the free time, so the available delta is
+        # the constrained delta minus the reserve it releases:
+        # (480*4 + 300) * 0.8 = 1776.
+        self.assertEqual(bare_total - zoned_total, 1776)
 
     def test_calendar_overlap_does_not_double_subtract(self):
         # A calendar busy interval INSIDE the work zone must change nothing:
