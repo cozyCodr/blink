@@ -85,6 +85,20 @@ public final class PlanComposer {
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty, !isSending, let session else { return }
         draft = ""
+        await deliver(message, for: session)
+    }
+
+    /// P18-04b — send a /turn message that did NOT come from the compose field:
+    /// the hands-free check-in loop's opener, and its spoken answers. Same
+    /// endpoint, same history thread, same one-in-flight guard; the draft is
+    /// left untouched so a half-typed line is never eaten by the voice loop.
+    public func sendMessage(_ text: String) async {
+        let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty, !isSending, let session else { return }
+        await deliver(message, for: session)
+    }
+
+    private func deliver(_ message: String, for session: BlinkSession) async {
         history.append(["role": "user", "content": message])
         await run {
             try await self.client.turn(message: message, history: self.history, for: session)

@@ -48,6 +48,24 @@ public final class VoiceCapture {
     /// permission sheets are still up does not start a ghost recording.
     @ObservationIgnored private var held = false
 
+    // MARK: The hands-free path (P18-04b)
+
+    /// True while `beginListening()` is driving this capture, so the same
+    /// recognition engine ends the utterance ON ITS OWN (final result, or a
+    /// short trailing silence) instead of waiting for a release. The tap-to-talk
+    /// `beginHold`/`endHold` path leaves this false and is untouched.
+    @ObservationIgnored private var autoMode = false
+    /// Reset on every non-empty partial; when it fires, the speaker has settled.
+    @ObservationIgnored private var silence: Task<Void, Never>?
+    /// The settled transcript, guaranteed non-empty, for the loop to auto-send.
+    @ObservationIgnored public var onAutoSettle: ((String) -> Void)?
+    /// The mic or recognizer could not listen in auto mode (denied, or no
+    /// capturable input). The loop degrades to typing on this.
+    @ObservationIgnored public var onAutoUnavailable: (() -> Void)?
+    /// "the user stopped talking" — a short pause after the last words. Short
+    /// enough to feel responsive, long enough to ride out a mid-sentence breath.
+    private static let trailingSilence: Duration = .milliseconds(1200)
+
     public nonisolated init() {}
 
     public var isRecording: Bool { phase == .recording }
@@ -79,6 +97,7 @@ public final class VoiceCapture {
             let speechOK = micOK ? await Self.requestSpeech() : false
             guard micOK, speechOK else {
                 self.phase = .denied
+                if self.autoMode { self.failAuto() }
                 return
             }
             // Released while the sheets were up: granted, but this hold is
@@ -103,12 +122,77 @@ public final class VoiceCapture {
         return text
     }
 
+    // MARK: The hands-free path (P18-04b)
+
+    /// Open the mic WITHOUT a hold, for the check-in voice loop. Asks for the
+    /// same permissions on the first ever use and starts the same streaming
+    /// recognition; the difference is only the ending — this path settles the
+    /// utterance itself (see the recognition callback and `armSilence`) and
+    /// calls `onAutoSettle`, where the hold path waits for a finger to lift.
+    ///
+    /// Denial and an unusable recognizer are NORMAL states here too: they end in
+    /// `onAutoUnavailable`, so the loop degrades to typing rather than trapping
+    /// someone in a mode that cannot hear them.
+    public func beginListening() {
+        guard phase == .idle else { return }
+        autoMode = true
+        beginHold()   // reuses the permission ask + `startRecognition`
+    }
+
+    /// Stop the hands-free mic without settling anything — the loop ended (Done,
+    /// backgrounded) or is handing back to typing. Safe from any phase.
+    public func cancelListening() {
+        silence?.cancel()
+        silence = nil
+        autoMode = false
+        held = false
+        if phase == .recording || phase == .requesting { stopRecognition() }
+        if phase == .recording { phase = .idle }
+    }
+
+    /// Called from the recognition callback on each non-empty partial: (re)arm
+    /// the trailing-silence timer. If no newer words arrive within the window,
+    /// the speaker has stopped and the utterance settles.
+    private func armSilence() {
+        silence?.cancel()
+        silence = Task { [weak self] in
+            try? await Task.sleep(for: Self.trailingSilence)
+            guard let self, !Task.isCancelled else { return }
+            self.settleAuto()
+        }
+    }
+
+    /// End the hands-free utterance and hand the transcript to the loop. Guards
+    /// keep it from ever firing an EMPTY answer: an empty settle is ignored and
+    /// the mic keeps listening, so silence auto-sends nothing and the loop waits
+    /// on real words (or the user's Done).
+    private func settleAuto() {
+        guard autoMode, phase == .recording else { return }
+        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        silence?.cancel()
+        silence = nil
+        autoMode = false
+        stopRecognition()
+        phase = .idle
+        onAutoSettle?(text)
+    }
+
+    /// The mic/recognizer could not listen in auto mode. Reset and tell the loop.
+    private func failAuto() {
+        silence?.cancel()
+        silence = nil
+        autoMode = false
+        onAutoUnavailable?()
+    }
+
     // MARK: The engine
 
     private func startRecognition() {
         let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
         guard let recognizer, recognizer.isAvailable else {
             phase = .unavailable
+            if autoMode { failAuto() }
             return
         }
         let engine = AVAudioEngine()
@@ -126,6 +210,7 @@ public final class VoiceCapture {
             guard format.channelCount > 0 else {
                 detailsLog("voice: no input channels, speech capture unavailable")
                 phase = .unavailable
+                if autoMode { failAuto() }
                 return
             }
             input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
@@ -136,6 +221,7 @@ public final class VoiceCapture {
         } catch {
             detailsLog("voice: audio engine would not start")
             phase = .unavailable
+            if autoMode { failAuto() }
             return
         }
         self.engine = engine
@@ -148,8 +234,34 @@ public final class VoiceCapture {
                 if let result {
                     // bestTranscription already folds final + interim.
                     self.transcript = result.bestTranscription.formattedString
+                    if self.autoMode {
+                        let heard = self.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if result.isFinal {
+                            // The recognizer declared the utterance complete.
+                            self.settleAuto()
+                        } else if !heard.isEmpty {
+                            // Real words landed: (re)start the "have they
+                            // stopped?" clock. Silence never arms on nothing, so
+                            // a silent mic simply keeps waiting, never auto-sends.
+                            self.armSilence()
+                        }
+                    }
                 }
                 if error != nil, self.phase == .recording {
+                    if self.autoMode {
+                        // The engine ended mid-listen. Settle what was actually
+                        // heard; if that is nothing, hand the loop back to typing
+                        // rather than send an empty turn.
+                        let heard = self.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if heard.isEmpty {
+                            self.stopRecognition()
+                            self.phase = .idle
+                            self.failAuto()
+                        } else {
+                            self.settleAuto()
+                        }
+                        return
+                    }
                     // Ended on its own (timeout, network). Keep what was
                     // heard; the release path settles it. Same recovery as
                     // the web's rec.onend (app.js:1191-1194).
@@ -161,6 +273,8 @@ public final class VoiceCapture {
     }
 
     private func stopRecognition() {
+        silence?.cancel()
+        silence = nil
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
         request?.endAudio()

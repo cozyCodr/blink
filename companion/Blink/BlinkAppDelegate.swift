@@ -88,6 +88,17 @@ final class BlinkAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
+        // P18-04b — tapping the evening check-in's BODY (not a button) opens the
+        // app into the hands-free voice check-in. Record the intent here; the
+        // Today screen picks it up when it becomes active, even on a cold launch
+        // this tap caused. The Done / Partly / Skip BUTTONS are unaffected: they
+        // still run their background writes through the handler below.
+        if response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+           response.notification.request.content.categoryIdentifier
+            == SignalKind.checkIn.categoryIdentifier {
+            CheckInLaunchRequest.request()
+        }
+
         await handler.handle(
             actionIdentifier: response.actionIdentifier,
             userInfo: response.notification.request.content.userInfo

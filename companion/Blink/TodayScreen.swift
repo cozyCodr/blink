@@ -53,6 +53,11 @@ struct TodayScreen: View {
     /// and the hold-to-talk capture. Text never waits on either.
     @State private var voice = AgentVoice()
     @State private var voiceCapture = VoiceCapture()
+    /// P18-04b: the hands-free evening check-in. Off until the person starts it
+    /// (the "Talk it through" affordance on the check-in card, or a tap on the
+    /// evening check-in notification). It drives voice + mic + composer in a
+    /// spoken back-and-forth and falls back to the typed flow if it cannot.
+    @State private var checkInLoop = CheckInVoiceLoop()
     /// P15-12: whether the software keyboard is up, so the eyes give ground
     /// instead of the compose field being pushed offscreen.
     @State private var keyboardUp = false
@@ -124,6 +129,8 @@ struct TodayScreen: View {
                     composeBar
                         .animation(reduceMotion ? nil : face.motion.swapAnimation,
                                    value: composer.question != nil)
+                        .animation(reduceMotion ? nil : face.motion.swapAnimation,
+                                   value: checkInLoop.isActive)
                 }
 
                 topBar
@@ -136,11 +143,20 @@ struct TodayScreen: View {
         // P15-12: the agent speaks the reply it just wrote, when the toggle
         // says to. The text is already on screen; audio failure changes
         // nothing (AgentVoice logs and stays quiet).
+        //
+        // P18-04b: while the hands-free check-in loop is running it owns the
+        // voice (forced on, and it opens the mic when the reply finishes), so
+        // the ordinary toggle-gated speak steps aside for it here.
         .onChange(of: composer.reply) { _, reply in
-            if let reply { voice.speak(reply, session: session) }
+            if let reply, !checkInLoop.isActive { voice.speak(reply, session: session) }
         }
         .task {
             composer.configure(session: session) { await store.refresh() }
+            checkInLoop.configure(
+                voice: voice, capture: voiceCapture, composer: composer, session: session)
+            // A tap on the evening check-in notification (even the cold launch
+            // it caused) asked for the hands-free check-in. Honour it once.
+            if CheckInLaunchRequest.consume() { checkInLoop.start() }
             #if DEBUG
             // P18-02 door: seed a calendar confirm exactly as the agent surfaces
             // one, so its render, YES→/calendar/events and "Not now" can be
@@ -199,8 +215,16 @@ struct TodayScreen: View {
         // the server; if the answer differs from what we hold, the arrange
         // above follows it. If it does not, nothing happens, which is right.
         .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
+            guard phase == .active else {
+                // P18-04b: leaving the app ends the hands-free loop. A spoken
+                // back-and-forth with nobody there is exactly what should stop.
+                checkInLoop.stop()
+                return
+            }
             Task { await store.refresh() }
+            // A notification tap can bring the app forward without a fresh
+            // `.task`; pick up the check-in intent here too.
+            if CheckInLaunchRequest.consume() { checkInLoop.start() }
         }
         // A background action wrote something. Re-read rather than assume:
         // the number on this screen is the server's number.
@@ -210,7 +234,20 @@ struct TodayScreen: View {
         // The person has started talking, or gone somewhere: the greeting has
         // done its job and gets out of the way.
         .onChange(of: composer.isSending) { _, sending in
-            if sending { retireGreeting() }
+            if sending {
+                retireGreeting()
+            } else if checkInLoop.isActive {
+                // P18-04b: a /turn just completed while the loop is running.
+                // Reading the composer's settled state (not a reply string that
+                // could repeat) is what advances the loop exactly one turn:
+                // speak the reply, or fall out on a question / failure.
+                checkInLoop.turnCompleted(
+                    reply: composer.reply,
+                    refused: composer.didRefuse,
+                    unreachable: composer.wasUnreachable,
+                    hasQuestion: composer.question != nil
+                )
+            }
         }
         .onChange(of: keyboardUp) { _, up in
             if up { retireGreeting() }
@@ -379,6 +416,10 @@ struct TodayScreen: View {
                     ForEach(pending) { block in
                         checkInRow(block)
                     }
+                    // P18-04b: the hands-free way through the same check-in. The
+                    // tap buttons above stay the fallback; this offers to just
+                    // talk it through, Blink asking and listening on its own.
+                    talkItThroughButton
                     if store.lastWriteFailed {
                         Text("That did not save. I will try again in a moment.")
                             .font(face.secondaryFont)
@@ -474,7 +515,12 @@ struct TodayScreen: View {
     /// answering it IS the reply.
     @ViewBuilder
     private var composeBar: some View {
-        if composer.question == nil {
+        if checkInLoop.isActive {
+            // P18-04b: while the spoken loop runs, the field steps aside for its
+            // status + Done control. There is nothing to type; the voice is the
+            // interface, and Done is the way out.
+            loopBar
+        } else if composer.question == nil {
             VStack(spacing: 0) {
                 // No divider, no chrome bar. The paper simply stops being
                 // paper: content scrolling underneath dissolves into the
@@ -487,12 +533,27 @@ struct TodayScreen: View {
                 .frame(height: face.layout.composeBarFade)
                 .allowsHitTesting(false)
 
-                PlanComposeField(
-                    composer: composer,
-                    prompt: composePrompt,
-                    voice: voiceCapture,
-                    onSend: { voice.stop() }   // sending interrupts the reply audio
-                )
+                VStack(spacing: face.layout.tightGap) {
+                    // P18-04b: the one honest line the loop leaves when it hands
+                    // back to typing (mic or speech denied, or TTS unavailable).
+                    // Quiet, and it clears itself the moment the person acts.
+                    if let line = checkInLoop.fellBackLine {
+                        Text(line)
+                            .font(face.metaFont)
+                            .foregroundStyle(face.faint)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity)
+                    }
+                    PlanComposeField(
+                        composer: composer,
+                        prompt: composePrompt,
+                        voice: voiceCapture,
+                        onSend: {
+                            voice.stop()               // sending interrupts the reply audio
+                            checkInLoop.clearFellBack()  // the person moved on
+                        }
+                    )
+                }
                 .padding(.horizontal, face.layout.screenMargin)
                 .padding(.bottom, face.layout.rowGap)
                 .background(face.ground)
@@ -772,6 +833,80 @@ struct TodayScreen: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("See your plan")
+    }
+
+    // MARK: The hands-free check-in (P18-04b)
+
+    /// Starts the spoken check-in loop. An outline control, the same quiet
+    /// register as "See your week": it invites, it does not shout.
+    private var talkItThroughButton: some View {
+        Button {
+            retireGreeting()
+            checkInLoop.start()
+        } label: {
+            Text("Talk it through")
+                .font(face.bodyFont)
+                .foregroundStyle(face.accent)
+                .frame(maxWidth: .infinity, minHeight: face.layout.minTapTarget)
+                .background(
+                    RoundedRectangle(cornerRadius: face.cornerStyle.nominalRadius, style: .continuous)
+                        .fill(Color.clear)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: face.cornerStyle.nominalRadius, style: .continuous)
+                                .stroke(face.line, lineWidth: 1))
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Talk through the check-in with Blink")
+    }
+
+    /// The bar that replaces the compose field WHILE the loop runs: a quiet word
+    /// for what it is doing right now, and a decisive way out. Tapping Done ends
+    /// the loop at once (it also ends when the app goes to the background).
+    private var loopBar: some View {
+        VStack(spacing: 0) {
+            LinearGradient(
+                colors: [face.ground.opacity(0), face.ground],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: face.layout.composeBarFade)
+            .allowsHitTesting(false)
+
+            HStack(spacing: face.layout.tightGap) {
+                Text(loopStatus)
+                    .font(face.secondaryFont)
+                    .foregroundStyle(face.muted)
+                Spacer()
+                Button {
+                    checkInLoop.stop()
+                } label: {
+                    Text("Done")
+                        .font(face.bodyFont)
+                        .foregroundStyle(face.ink)
+                        .frame(minHeight: face.layout.minTapTarget)
+                        .padding(.horizontal, face.layout.pillPaddingH * 2)
+                        .background(Capsule().fill(face.control))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("End the spoken check-in")
+            }
+            .padding(.horizontal, face.layout.screenMargin)
+            .padding(.bottom, face.layout.rowGap)
+            .background(face.ground)
+        }
+        .transition(reduceMotion ? .identity : .opacity)
+    }
+
+    /// The honest word for the loop's current step. Not a claim of any outcome,
+    /// just what the phone is doing with the voice this instant.
+    private var loopStatus: String {
+        switch checkInLoop.phase {
+        case .listening: return "Listening"
+        case .speaking: return "Speaking"
+        case .opening, .sending: return "Thinking"
+        case .off: return ""
+        }
     }
 
     // MARK: Chrome
