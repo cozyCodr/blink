@@ -19,6 +19,11 @@ from src.core import localtime
 from src.core.scheduler.scheduler import propose_schedule
 from src.core.validator.validator import validate_state
 from src.core.scoring.priority_score import calculate_priority_score
+from src.core.capacity.capacity_ledger import build_capacity_ledger
+from src.core.calendar.calendar_sync import constraints_to_intervals
+from src.core.zones import zones_to_intervals
+from src.core.utils.date_utils import TimeInterval
+from src.types.entities import Block
 
 
 def _confirm_question(question: str, why: str, field: str, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -592,6 +597,241 @@ def log_session_outcome(workspace_id: str, block_id: str, status: str, minutes: 
         return {"status": "error", "error_message": str(e)}
 
 
+# --- P19-03: reschedule today's missed / past-due sessions (store-only) ------
+# A real two-phase tool: propose_reschedule deterministically finds today's
+# missed / past-due sessions, computes where they would move using the SAME
+# greedy scheduler the disruption rebalancer uses, and returns a confirm with a
+# summary built from the REAL placements (the model never invents a time). Only
+# after a yes does reschedule_confirmed replay the stored batch: cancel the old
+# blocks, commit the new ones. NOTHING touches Google Calendar here (that mirror
+# is P19-04/05); every reply speaks only of a PLAN change ("moved N in your
+# plan"), never a calendar change. reschedule_confirmed ends in "_confirmed" so
+# `agent._block_unconfirmed_writes` structurally blocks it inside an agent turn.
+
+# A stashed batch is a per-turn confirm handle; it goes stale fast so a token
+# left lying around can never quietly re-place sessions much later.
+_RESCHEDULE_TTL_MINUTES = 30
+
+
+def _fmt_local_time(dt: datetime, tz) -> str:
+    """A naive-UTC instant as a local 12-hour wall-clock label, e.g. '3:00 PM'.
+    Leading zero stripped so the summary reads the way a person would say it."""
+    local = dt.replace(tzinfo=timezone.utc).astimezone(tz)
+    return local.strftime("%I:%M %p").lstrip("0")
+
+
+def _join_times(labels) -> str:
+    """'3:00 PM', '3:00 PM and 5:00 PM', '3:00 PM, 5:00 PM and 6:00 PM'."""
+    labels = list(labels)
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return labels[0]
+    return ", ".join(labels[:-1]) + " and " + labels[-1]
+
+
+def _reschedule_placements(store, now: datetime):
+    """Deterministically compute where today's missed / past-due sessions would
+    move — READ-ONLY, mutating nothing in the store.
+
+    Returns (tz, missed_blocks, proposed_blocks). `missed_blocks` uses the exact
+    P19-02 definition (server._today_unresolved_blocks / conversation
+    ._state_context): a block on the user's LOCAL today that is either `missed`
+    OR still `planned` with its end already past. `proposed_blocks` are the new
+    placements the greedy scheduler found in FUTURE free capacity — computed over
+    COPIES of the affected tasks and a ledger that already subtracts real
+    constraints, no-touch zones AND the sessions still on the plan, so a moved
+    session never lands on top of one that is still standing."""
+    tz = localtime.resolve_zone(getattr(store.get_profile(), "timezone", None))
+    missed = sorted(
+        (b for b in store.blocks.values()
+         if localtime.same_local_day(b.starts_at, now, tz)
+         and (b.status == "missed"
+              or (b.status == "planned" and b.ends_at < now))),
+        key=lambda b: b.starts_at,
+    )
+    if not missed:
+        return tz, [], []
+    missed_ids = {b.id for b in missed}
+    # De-duped affected tasks, in first-seen order, as COPIES set 'ready' so the
+    # scheduler will place them without the store's own task objects being
+    # touched at propose time.
+    seen_tasks: list[str] = []
+    tasks_to_place = []
+    for b in missed:
+        if b.task_id in seen_tasks:
+            continue
+        seen_tasks.append(b.task_id)
+        t = store.tasks.get(b.task_id)
+        if t is None:
+            continue
+        tasks_to_place.append(t.model_copy(update={"status": "ready"}))
+    # Future capacity that already respects real busy time, no-touch zones, and
+    # the still-standing sessions (passed in as busy so nothing double-books).
+    busy = constraints_to_intervals(list(store.constraints.values()), start_date=now, days=7)
+    busy += zones_to_intervals(list(store.zones.values()), start_date=now, days=7)
+    for b in store.blocks.values():
+        if b.status == "planned" and b.id not in missed_ids and b.ends_at > now:
+            busy.append(TimeInterval(start=b.starts_at, end=b.ends_at))
+    ledger = build_capacity_ledger(start_date=now, days=7, constraints=busy, calendar_busy=[])
+    sched = propose_schedule(store.get_active_commitments(), tasks_to_place, ledger, now)
+    return tz, missed, sched.blocks
+
+
+def propose_reschedule(workspace_id: str) -> Dict[str, Any]:
+    """Propose re-placing the focus sessions the user MISSED or left undone today
+    into later free time, WITHOUT changing anything yet.
+
+    Call this when the user asks to reschedule, replan, move, or "make up" the
+    sessions they didn't get to today ("reschedule the two I missed", "move what
+    I didn't do to later", "can we replan today's slips"). It deterministically
+    finds today's past-due / missed sessions and computes real new times in the
+    user's actual free capacity — you never pick the times yourself. It returns a
+    confirm question the user must approve; nothing on the plan changes until they
+    say yes and reschedule_confirmed runs. This only re-places sessions inside
+    Blink's own plan; it does not touch Google Calendar.
+
+    If there is nothing from today that is past its time and still unresolved, or
+    if there is no open room to move anything into, this returns an honest message
+    (status success, rescheduled false) instead of a confirm — surface that and
+    stop; never claim a move that did not happen.
+
+    Args:
+        workspace_id: The workspace whose missed sessions to reschedule.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        now = now_naive()
+        tz, missed, placements = _reschedule_placements(store, now)
+        if not missed:
+            return {
+                "status": "success",
+                "rescheduled": False,
+                "message": ("Nothing from today needs rescheduling — no sessions "
+                            "are past their time and still unresolved."),
+            }
+        if not placements:
+            return {
+                "status": "success",
+                "rescheduled": False,
+                "message": ("I couldn't find open room later to move your missed "
+                            "sessions into. Free up some time or shorten them and "
+                            "ask me again."),
+            }
+        # Build the move list + summary from the REAL placements. Each placement
+        # is paired back to one missed block of the same task, and ONLY those old
+        # blocks are cancelled on confirm — a missed session the scheduler could
+        # not place is left honestly untouched, never dropped.
+        moves = []
+        used_old: set = set()
+        for pb in placements:
+            old = next(
+                (b for b in missed if b.task_id == pb.task_id and b.id not in used_old),
+                None,
+            )
+            if old is not None:
+                used_old.add(old.id)
+            moves.append({
+                "old_block_id": old.id if old is not None else None,
+                "task_id": pb.task_id,
+                "task": _session_title(store, store.blocks.get(old.id)) if old is not None
+                        else _session_title(store, pb),
+                "start": pb.starts_at.isoformat(),
+                "end": pb.ends_at.isoformat(),
+            })
+        n = len(placements)
+        times = _join_times(_fmt_local_time(pb.starts_at, tz) for pb in placements)
+        summary = f"Move {n} session{'s' if n != 1 else ''} to {times}"
+        batch = {
+            "created_at": now.isoformat(),
+            "old_block_ids": [m["old_block_id"] for m in moves if m["old_block_id"]],
+            "new_blocks": [
+                {
+                    "id": pb.id,
+                    "task_id": pb.task_id,
+                    "starts_at": pb.starts_at.isoformat(),
+                    "ends_at": pb.ends_at.isoformat(),
+                    "plan_version": pb.plan_version,
+                }
+                for pb in placements
+            ],
+        }
+        token = store.stash_reschedule(batch)
+        return _confirm_question(
+            question=f"{summary}?",
+            why="I never move sessions on your plan without a yes first.",
+            field="reschedule",
+            config={"action": "reschedule", "token": token, "summary": summary, "moves": moves},
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "error_message": str(e)}
+
+
+def reschedule_confirmed(workspace_id: str, token: str) -> Dict[str, Any]:
+    """Apply the reschedule the user just confirmed. Call this ONLY after an
+    explicit yes to propose_reschedule, with the token from that confirm's config.
+
+    It replays the single-use batch: cancels the old missed / past-due blocks and
+    commits the new placements into Blink's plan. It performs ZERO Google Calendar
+    work — the moved blocks stay calendar-unmirrored. Returns the REAL counts
+    (`moved`, `cancelled`) so the reply is built only from what actually changed.
+
+    The token is single-use and short-lived: an unknown, already-used, or expired
+    token returns an honest error (rescheduled false), never a fabricated move.
+    Compose the reply as a PLAN change only ("moved N in your plan"), never as a
+    calendar change.
+
+    Args:
+        workspace_id: The workspace the reschedule belongs to.
+        token: The single-use token from propose_reschedule's confirm config.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        batch = store.take_reschedule(token)
+        if not batch:
+            return {
+                "status": "error",
+                "rescheduled": False,
+                "error_message": ("That reschedule expired or was already applied. "
+                                  "Ask me to reschedule again."),
+            }
+        try:
+            created = datetime.fromisoformat(batch.get("created_at", ""))
+        except (TypeError, ValueError):
+            created = None
+        if created is not None and (now_naive() - created) > timedelta(minutes=_RESCHEDULE_TTL_MINUTES):
+            return {
+                "status": "error",
+                "rescheduled": False,
+                "error_message": ("That reschedule expired before you confirmed it. "
+                                  "Ask me to reschedule again."),
+            }
+        new_blocks = [
+            Block(
+                id=nb["id"],
+                workspace_id=workspace_id,
+                task_id=nb["task_id"],
+                starts_at=datetime.fromisoformat(nb["starts_at"]),
+                ends_at=datetime.fromisoformat(nb["ends_at"]),
+                plan_version=int(nb.get("plan_version", 1)),
+                # gcal_event_id stays None: this item does ZERO calendar work.
+            )
+            for nb in batch.get("new_blocks", [])
+        ]
+        # Cancel-before-commit ordering: the old session is retired first so a
+        # moved task never briefly holds two live blocks.
+        cancelled = store.cancel_blocks(batch.get("old_block_ids", []))
+        store.commit_blocks(new_blocks)
+        return {
+            "status": "success",
+            "rescheduled": True,
+            "moved": len(new_blocks),
+            "cancelled": cancelled,
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "error_message": str(e)}
+
+
 # The tool set exposed to the agent. Keep small (ADK guidance: ~10-20 max).
 # Calendar writes are two-phase: the propose_* tools only ask; the *_confirmed
 # tools execute and must never be called before the user answers yes. The read
@@ -616,4 +856,11 @@ ALL_TOOLS = [
     # timer-measured ones are never re-asked) and log each self-reported outcome.
     list_todays_sessions,
     log_session_outcome,
+    # P19-03: reschedule today's missed / past-due sessions. Two-phase like the
+    # calendar writes: propose_reschedule only asks (surfaced by _PROPOSE_TOOLS);
+    # reschedule_confirmed executes and is structurally blocked inside an agent
+    # turn by _block_unconfirmed_writes (its name ends "_confirmed"). Store-only:
+    # no Google Calendar interaction here.
+    propose_reschedule,
+    reschedule_confirmed,
 ]

@@ -165,11 +165,12 @@ def _build_context(workspace_id: str, context_note: Optional[str], now: datetime
 
 # Tools that can return a `confirm` question the runtime must surface and stop
 # on. The three calendar proposals gate a real write; `web_search` (P17-03)
-# gates the first live search behind the user's permission. All four surface the
+# gates the first live search behind the user's permission; `propose_reschedule`
+# (P19-03) gates re-placing today's missed sessions in the plan. All surface the
 # SAME way: the confirm rides to the frontend and the turn stops.
 _PROPOSE_TOOLS = (
     "propose_create_event", "propose_edit_event", "propose_delete_event",
-    "web_search",
+    "web_search", "propose_reschedule",
 )
 
 

@@ -2764,6 +2764,58 @@ def calendar_write_event(workspace_id: str, payload: CalendarEventRequest):
         raise HTTPException(status_code=502, detail=result.get("error_message", "Calendar write failed."))
     return result
 
+
+class RescheduleRequest(BaseModel):
+    """P19-03: the two-phase reschedule contract, twinning CalendarEventRequest.
+
+    Phase 1 (no confirm) asks propose_reschedule for the confirm question; phase
+    2 (`confirm=true` + the `token` from that confirm's config) applies the move.
+    """
+    confirm: bool = False
+    token: Optional[str] = None
+
+
+@app.post("/v1/workspaces/{workspace_id}/reschedule")
+def reschedule_endpoint(workspace_id: str, payload: RescheduleRequest):
+    """Confirm-gated reschedule of today's missed / past-due sessions. Without
+    `confirm=true` this returns the propose_reschedule confirm question (or an
+    honest 'nothing to do' message); with `confirm=true` and the token it applies
+    the move and answers with the REAL counts.
+
+    Store-only (P19-03): this never touches Google Calendar, so the reply speaks
+    only of the plan — "Moved N sessions in your plan." — never a calendar
+    change. A stale/expired/used token degrades to an honest line, never a
+    fabricated success."""
+    get_or_create_store(workspace_id)  # ensure the workspace exists
+
+    if not payload.confirm:
+        # Phase 1: hand back the confirm question (or the honest no-op message).
+        return tools.propose_reschedule(workspace_id)
+
+    # Phase 2: the user confirmed. Replay the single-use batch.
+    result = tools.reschedule_confirmed(workspace_id, payload.token or "")
+    if result.get("status") != "success":
+        # Stale/expired/used token: honest 200 message, never a fabricated move.
+        return {
+            "type": "message",
+            "text": result.get("error_message",
+                               "That reschedule expired. Ask me to reschedule again."),
+        }
+    moved = int(result.get("moved", 0))
+    sess = "session" if moved == 1 else "sessions"
+    if moved == 0:
+        text = "Nothing moved — those sessions couldn't be re-placed. Ask me to try again."
+    else:
+        text = f"Moved {moved} {sess} in your plan."
+        text = conversation.naturalize_outcome(text, [str(moved)])
+    return {
+        "type": "replanned",
+        "text": text,
+        "moved": moved,
+        "cancelled": int(result.get("cancelled", 0)),
+    }
+
+
 class WebSearchRequest(BaseModel):
     """P17-03: the browser's YES to the agent's web_search proposal. Carries the
     `query` from question.config; `mode` rides the thinking profile like every

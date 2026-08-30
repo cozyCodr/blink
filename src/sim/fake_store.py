@@ -1,5 +1,6 @@
 # src/sim/fake_store.py
 import asyncio
+import uuid
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
 from src.types.entities import (
@@ -71,6 +72,14 @@ class FakeStore:
         # The user's LOCAL calendar day (ISO) the current budget belongs to.
         # None until the first budget-aware sweep; see reset_daily_budget.
         self.notification_day: Optional[str] = None
+        # P19-03: single-use reschedule batches, keyed by an opaque token. Each
+        # entry is a fully computed move (old block ids to cancel + new block
+        # placements) stashed by propose_reschedule and replayed once by
+        # reschedule_confirmed. Deliberately transient and NOT snapshotted: a
+        # token is a per-turn confirm handle, never durable state, so it never
+        # rides the Firestore snapshot or the event stream (same discipline as
+        # google_tokens: the confirm gate, not the store, is the source of truth).
+        self.pending_reschedule: Dict[str, Dict[str, Any]] = {}
         self._listeners: List[asyncio.Queue] = []
 
     def subscribe(self) -> asyncio.Queue:
@@ -182,6 +191,46 @@ class FakeStore:
             if b.task_id in self.tasks:
                 self.tasks[b.task_id].status = "scheduled"
         self._publish_event("blocks_committed", {"count": len(new_blocks)})
+
+    def cancel_blocks(self, block_ids) -> int:
+        """Mark the given blocks 'cancelled', preserving them as history.
+
+        The reschedule cancel path (P19-03), mirroring what `_apply_disruption`
+        does inline for a mid-day rebalance: a missed / past-due block is not
+        deleted (that would erase the record that it was ever planned), it is
+        moved to status 'cancelled'. Unlike `drop_planned_blocks`, this touches
+        blocks in ANY non-terminal status (a 'missed' block is no longer
+        'planned'), which is exactly why the reschedule needs it. Returns the
+        number of blocks actually cancelled.
+        """
+        cancelled = 0
+        for bid in block_ids:
+            b = self.blocks.get(bid)
+            if b is not None and b.status != "cancelled":
+                b.status = "cancelled"
+                cancelled += 1
+        if cancelled:
+            self._publish_event("blocks_cancelled", {"count": cancelled})
+        return cancelled
+
+    def stash_reschedule(self, batch: Dict[str, Any]) -> str:
+        """Store one computed reschedule batch under a fresh opaque token and
+        return the token (P19-03). The batch is whatever propose_reschedule
+        computed (old block ids + new placements); this only mints the handle and
+        holds it. No event is published: a pending confirm is not state the rest
+        of the system should react to."""
+        token = uuid.uuid4().hex
+        self.pending_reschedule[token] = dict(batch)
+        return token
+
+    def take_reschedule(self, token: str) -> Optional[Dict[str, Any]]:
+        """Pop the reschedule batch for `token`, or None if unknown/already used.
+
+        Single-use by construction: the token is removed on the way out, so a
+        second confirm with the same token can only get None. reschedule_confirmed
+        turns that None into an honest 'expired' error rather than a fabricated
+        move."""
+        return self.pending_reschedule.pop((token or "").strip(), None)
 
     def log_outcome(self, block_id: str, status: BlockStatus,
                     actual_minutes: Optional[int] = None,
