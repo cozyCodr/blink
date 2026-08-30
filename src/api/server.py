@@ -341,6 +341,20 @@ def get_workspace_state(workspace_id: str):
         "memory_version": store.memory.version
     }
 
+def _block_with_why(store, b):
+    """P17-02: a block's JSON, enriched with the owning commitment's why + stake.
+
+    Degrades cleanly: a block whose task or commitment is missing simply carries
+    no why (and no stake), never a guessed one."""
+    d = b.model_dump(mode="json")
+    task = store.tasks.get(b.task_id)
+    comm = store.commitments.get(task.commitment_id) if task is not None else None
+    if comm is not None:
+        d["commitment_why"] = comm.why
+        d["stake"] = comm.stake
+    return d
+
+
 @app.get("/v1/workspaces/{workspace_id}/details")
 def get_workspace_details(
     workspace_id: str,
@@ -400,7 +414,11 @@ def get_workspace_details(
         "profile": store.get_profile().model_dump(mode="json"),
         "commitments": [c.model_dump(mode="json") for c in store.commitments.values()],
         "tasks": [t.model_dump(mode="json") for t in store.tasks.values()],
-        "blocks": [b.model_dump(mode="json") for b in store.blocks.values()],
+        # P17-02: each block carries the owning commitment's `why` and `stake`
+        # (block -> task -> commitment) so a client CAN render the personal why
+        # beside a card without re-walking the graph itself. `why` is null until
+        # captured, and never invented.
+        "blocks": [_block_with_why(store, b) for b in store.blocks.values()],
         "constraints": [c.model_dump(mode="json") for c in store.constraints.values()],
         "questions": [q.model_dump(mode="json") for q in store.questions.values()],
         "milestones": milestones_json,
@@ -531,7 +549,7 @@ async def _ingest_unstructured_text(
     cls = classify_goal(payload.text, use_llm=llm.current_mode() == llm.MODE_DEEP)
     if cls.label == "needs_elicitation":
         profile = store.get_profile()
-        q = next_elicitation(payload.text, profile, now)
+        q = next_elicitation(payload.text, profile, now, commitment=comm)
         return {
             "status": "eliciting",
             "commitment_id": comm.id,
@@ -1606,7 +1624,7 @@ def _turn(workspace_id: str, payload: TurnRequest,
             open_ended=True,
         )
         store.add_commitment(comm)
-        q = next_elicitation(message, store.get_profile(), now)
+        q = next_elicitation(message, store.get_profile(), now, commitment=comm)
         if q is not None:
             finish_naming(comm)
             return {"type": "question", "question": q, "session": {"commitment_id": comm.id, "goal": message}}
@@ -2045,32 +2063,70 @@ def elicit_answer(workspace_id: str, payload: ElicitAnswerRequest):
             get_or_create_store(workspace_id), _answer_echo(payload.value), res)
 
 
-def _elicit_answer(workspace_id: str, payload: ElicitAnswerRequest):
-    """Record one elicitation answer, then either ask the next question or, when
-    the profile is full, synthesize the plan and schedule it."""
-    store = get_or_create_store(workspace_id)
-    now = _now()
-    store.update_profile(**{payload.field: payload.value})
+def _clean_why(value) -> Optional[str]:
+    """P17-02: the captured personal why, cleaned to one short line, or None.
 
-    q = next_elicitation(payload.goal, store.get_profile(), now)
-    if q is not None:
-        return {"type": "question", "question": q, "session": {"commitment_id": payload.commitment_id, "goal": payload.goal}}
+    A skip sentinel ({"__skip": true}), a null, or anything that is not a
+    non-blank string returns None. This is the truthfulness gate: an answer that
+    does not parse to a real sentence stores NOTHING, so no reminder can ever
+    speak a why the user did not actually give."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split()).strip()
+    if not text:
+        return None
+    return text[:280]
 
-    # P9-04: profile is full. For a learnable goal, try ONE search-grounded
-    # step to find real courses before synthesis. find_courses returns [] on
-    # ANY failure (LLM down, search tool unavailable, nothing usable,
-    # non-learnable goal), in which case synthesis runs exactly as before.
-    candidates = find_courses(payload.goal, store.get_profile(), now)
+
+def _store_commitment_why(store, commitment_id: str, value) -> None:
+    """Write a captured why onto the commitment, or nothing (a first-class skip)."""
+    why = _clean_why(value)
+    if why and store.commitments.get(commitment_id) is not None:
+        store.set_commitment_why(commitment_id, why)
+
+
+def _courses_or_synthesize(store, workspace_id: str, commitment_id: str,
+                           goal: str, now: datetime):
+    """P9-04: the tail shared once the elicitation beats are done. For a
+    learnable goal, try ONE search-grounded step to find real courses before
+    synthesis. find_courses returns [] on ANY failure (LLM down, search tool
+    unavailable, nothing usable, non-learnable goal), in which case synthesis
+    runs exactly as before."""
+    candidates = find_courses(goal, store.get_profile(), now)
     if candidates:
         return {
             "type": "courses",
             "text": ("I went looking and found real courses that fit. Pick the "
                      "ones you want the plan built around, or skip them."),
             "courses": candidates,
-            "session": {"commitment_id": payload.commitment_id, "goal": payload.goal},
+            "session": {"commitment_id": commitment_id, "goal": goal},
         }
+    return _synthesize_and_schedule(store, workspace_id, commitment_id, goal, now)
 
-    return _synthesize_and_schedule(store, workspace_id, payload.commitment_id, payload.goal, now)
+
+def _elicit_answer(workspace_id: str, payload: ElicitAnswerRequest):
+    """Record one elicitation answer, then either ask the next question or, when
+    the profile is full, synthesize the plan and schedule it."""
+    store = get_or_create_store(workspace_id)
+    now = _now()
+
+    # P17-02: the personal why rides the COMMITMENT, not the profile, and it is
+    # the terminal beat: store it (or honour the skip) and go straight on, never
+    # re-asking it. A blank/unparseable answer stores nothing.
+    if payload.field == "why":
+        _store_commitment_why(store, payload.commitment_id, payload.value)
+        return _courses_or_synthesize(store, workspace_id, payload.commitment_id,
+                                      payload.goal, now)
+
+    store.update_profile(**{payload.field: payload.value})
+
+    commitment = store.commitments.get(payload.commitment_id)
+    q = next_elicitation(payload.goal, store.get_profile(), now, commitment=commitment)
+    if q is not None:
+        return {"type": "question", "question": q, "session": {"commitment_id": payload.commitment_id, "goal": payload.goal}}
+
+    return _courses_or_synthesize(store, workspace_id, payload.commitment_id,
+                                  payload.goal, now)
 
 
 @app.post("/v1/workspaces/{workspace_id}/elicit/courses")
@@ -3012,6 +3068,33 @@ def delete_device(workspace_id: str, token: str, request: Request):
 SWEEP_SECRET_HEADER = "x-blink-sweep-secret"
 
 
+def _reminder_phrase(fallback, *, why, stake, task_title, minutes_until=None, kind=""):
+    """P17-02: the sweep's stake-tuned reminder phraser (model-judges/code-computes).
+
+    The deterministic sweep composes the grounded `fallback` (the plain
+    what+when line) and the grounded tokens; this hands them to the P9-00
+    naturalizer, which keeps the task title and the REAL minute count verbatim,
+    leans on the user's OWN `why`, and returns `fallback` unchanged when the
+    model is down, drops a required token, or truncates. No `why` means the
+    fallback comes straight back, so a no-why signal never changes at all."""
+    if not why:
+        return fallback
+    facts = []
+    must_keep = []
+    if task_title:
+        facts.append(f"The session is: {task_title}.")
+        must_keep.append(task_title)
+    if minutes_until is not None:
+        word = push_scheduler.spelled(minutes_until)
+        facts.append(f"It starts in {word} minutes from now.")
+        must_keep.append(word)
+    elif kind == "check_in":
+        facts.append("That session has just ended; you're asking how it went.")
+    return conversation.naturalize_reminder(
+        fallback, why=why, stake=stake,
+        facts="\n".join(facts), must_keep=must_keep)
+
+
 def _brief_body(store, now: datetime) -> Optional[str]:
     """The server's OWN morning-brief sentence, from the existing trigger.
 
@@ -3061,7 +3144,8 @@ def run_sweep(request: Request):
     if not _sweep_authorised(request):
         raise HTTPException(status_code=403, detail="Not authorised.")
     now = _now()
-    report = push_scheduler.sweep(stores, now, brief_body_for=_brief_body)
+    report = push_scheduler.sweep(stores, now, brief_body_for=_brief_body,
+                                  phrase_fn=_reminder_phrase)
     # One line per sweep: counts and kinds. No ids, no copy, no tokens.
     print(
         f"[push sweep] {report.considered} workspace(s) with devices of "

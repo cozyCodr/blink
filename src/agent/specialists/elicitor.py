@@ -19,7 +19,7 @@ from typing import Callable, Dict, List, Optional, Any
 
 from src.agent import llm, voice
 from src.agent.conversation import ClarifyQuestion, ClarifyOption
-from src.types.entities import UserProfile
+from src.types.entities import Commitment, UserProfile
 
 
 # --- Deterministic gap order: platforms before courses, then the scalars. ---
@@ -98,6 +98,21 @@ def _target_timeline_question() -> ClarifyQuestion:
     )
 
 
+def _why_question() -> ClarifyQuestion:
+    # P17-02: ONE gentle, skippable beat at the end of the gap sequence. Free
+    # text (a reason is an open string, never an enum), stored on the COMMITMENT
+    # rather than the profile. Skipping is first-class: a blank answer leaves
+    # `why` None and reminders keep the plain what+when line.
+    return ClarifyQuestion(
+        question="One more thing: why does this matter to you? One line. It changes how I'll remind you.",
+        field="why",
+        input_type="free_text",
+        options=[],
+        allow_free_text=True,
+        why="Your reason is what I'll lean on when a session's coming up.",
+    )
+
+
 _QUESTION_BUILDERS: Dict[str, Callable[[], ClarifyQuestion]] = {
     "platforms": _platforms_question,
     "current_level": _current_level_question,
@@ -141,20 +156,31 @@ def next_elicitation(
     goal: str,
     profile: UserProfile,
     now: Optional[datetime] = None,
+    commitment: Optional[Commitment] = None,
 ) -> Optional[Dict[str, Any]]:
     """Emit the next single elicitation question for a vague goal, or None.
 
-    Inspects `profile` for the first gap in `_GAP_ORDER` (platforms first). If
-    nothing is missing, returns None: enough context is gathered and a later
-    step does plan synthesis. Otherwise it builds the deterministic
-    `ClarifyQuestion` for that gap, then tries to warm its phrasing for THIS
-    goal via Gemini while keeping the deterministic options as ground truth.
+    Inspects `profile` for the first gap in `_GAP_ORDER` (platforms first). When
+    the profile is full, offers ONE last skippable beat (the personal `why`) if
+    a `commitment` is given and it has none yet; otherwise returns None and a
+    later step does plan synthesis. Gap questions build a deterministic
+    `ClarifyQuestion`, then try to warm the phrasing for THIS goal via Gemini
+    while keeping the deterministic options as ground truth.
 
     Returns the question as a dict with added keys {"type": "question",
     "field": <field>}, mirroring `conversation.ask_next_clarification`.
     """
     field = _first_missing_field(profile)
     if field is None:
+        # Profile is full. The why beat is terminal and offered ONCE: only when
+        # we hold a commitment that has no captured why yet. A skip (handled at
+        # the answer site) leaves `why` None and never re-asks.
+        if commitment is not None and not getattr(commitment, "why", None):
+            payload = _why_question().model_dump()
+            payload["type"] = "question"
+            payload["field"] = "why"
+            payload["skippable"] = True
+            return payload
         return None
 
     base = _QUESTION_BUILDERS[field]()

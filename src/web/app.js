@@ -6319,7 +6319,11 @@
           });
           return;
         }
-        showEcho(echoValue(value));
+        // P17-02: the personal-why beat is skippable, emitting the {__skip:true}
+        // sentinel. A skip posts a null value, which the server treats as a
+        // first-class skip (no why stored, reminders keep the plain line).
+        var skipped = !!(value && value.__skip);
+        showEcho(skipped ? "Skip" : echoValue(value));
         agent.set("thinking");
         surface.pending(startTurn());
         beginRequest();
@@ -6330,7 +6334,7 @@
             commitment_id: session && session.commitment_id,
             goal: session && session.goal,
             field: question.field,
-            value: value,
+            value: skipped ? null : value,
             mode: thinkingMode(),
           }),
         }).then(heldDispatch).catch(fail);

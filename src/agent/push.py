@@ -103,6 +103,8 @@ def build_payload(
     block_id: Optional[str] = None,
     task_title: Optional[str] = None,
     insight_id: Optional[str] = None,
+    commitment_why: Optional[str] = None,
+    stake: Optional[int] = None,
 ) -> Dict[str, Any]:
     """The remote payload, byte-compatible with the device-composed signal.
 
@@ -120,6 +122,13 @@ def build_payload(
         context["block_id"] = block_id
     if task_title:
         context["task_title"] = task_title
+    # P17-02: the owning commitment's why and stake ride the payload so a client
+    # CAN render the personal why. Omitted when absent (a missing key and a null
+    # read identically), so a no-why signal carries exactly what it did before.
+    if commitment_why:
+        context["commitment_why"] = commitment_why
+    if stake is not None:
+        context["stake"] = stake
     if insight_id:
         context["insight_id"] = insight_id
     return {

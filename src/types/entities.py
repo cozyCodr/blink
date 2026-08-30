@@ -30,6 +30,13 @@ class Commitment(BaseModel):
     title: str = Field(..., alias="title")
     kind: CommitmentKind
     stake: Literal[1, 2, 3, 4, 5]
+    # P17-02: the personal WHY this commitment exists, in the user's own words,
+    # one short sentence. None until told; NEVER invented (same discipline as
+    # UserProfile.name / .timezone). Reminders speak it, tuned by `stake`, only
+    # when it is present; absent, they fall back to the plain what+when line and
+    # nothing is fabricated. It rides the Firestore snapshot automatically via
+    # the same model_dump/model_validate path as every other commitment field.
+    why: Optional[str] = None
     deadline: Optional[datetime] = None
     open_ended: bool = False
     status: CommitmentStatus = "active"
@@ -177,6 +184,9 @@ class Milestone(BaseModel):
     target_hours: float = 0.0
     completed_hours: float = 0.0
     status: MilestoneStatus = "planned"
+    # P17-02: same discipline as Commitment.why. The personal reason this
+    # milestone matters, in the user's words. None until told; never invented.
+    why: Optional[str] = None
     created_at: datetime = Field(default_factory=now_utc)
 
 # P9-08 life memory: where a zone came from. "onboarding" = the first-run

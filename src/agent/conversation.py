@@ -293,6 +293,16 @@ def _state_context(workspace_id: str, for_user: bool = False) -> str:
         "it plainly, like: I hit the gym at 6pm on Tuesdays. Never say "
         "something was saved or noted unless the state above already shows it."
     )
+    # P17-02: the same guard for the personal WHY. Chat cannot write it; it is
+    # captured only in the goal-setup beat. So you may acknowledge a reason the
+    # user shares, but never claim you saved it or will remind them with it
+    # unless a commitment above already carries that why.
+    lines.append(
+        "You cannot save the personal reason a goal matters (its why) from "
+        "chat; that is captured only when a goal is being set up. If the user "
+        "tells you why something matters, you may acknowledge it warmly, but "
+        "do not claim you stored it or will remind them with it."
+    )
     return "\n".join(lines)
 
 
@@ -380,6 +390,68 @@ def _looks_complete(candidate: str) -> bool:
         return False
     trimmed = trimmed.rstrip("\"'’”)]}»")
     return trimmed.endswith((".", "!", "?", "…"))
+
+
+# P17-02: how a reminder's ONE line leans on the commitment's stake (1-5). The
+# stake decides tone only; the facts and the user's own `why` decide content.
+_STAKE_TONE = {
+    5: "This is a big moment for them. Be steadying and warm, and pile on no pressure.",
+    4: "This matters to them. Be encouraging and calm.",
+    3: "Keep it matter-of-fact and light.",
+    2: "Keep it easy and low-key.",
+    1: "Keep it light, almost playful, with zero pressure.",
+}
+
+
+def naturalize_reminder(
+    fallback: str,
+    *,
+    why: Optional[str],
+    stake: Optional[int],
+    facts: str,
+    must_keep: List[str],
+) -> str:
+    """P17-02: phrase ONE stake-tuned reminder line, same guard as naturalize_outcome.
+
+    This is the P9-00 pattern applied to a nudge / check-in: the caller owns the
+    grounded FACTS and the honest `fallback` template; the model only phrases,
+    tuned by `stake`, and grounded in the user's OWN `why`. Every string in
+    `must_keep` must survive verbatim (the task title, the real minute count),
+    so a rephrase can never make a false claim.
+
+    The `fallback` (the plain what+when line) comes back UNCHANGED when there is
+    no `why`, when the model is unavailable, when it drops a required token, or
+    when it truncates. Truth never degrades; only variety does. A reminder can
+    therefore never speak a motivation the user did not give."""
+    if not why:
+        return fallback
+    try:
+        system = voice.build_system_instruction(now_naive())
+        tone = _STAKE_TONE.get(int(stake) if stake else 3, _STAKE_TONE[3])
+        user = (
+            "Write ONE short reminder line to the user, in your voice, from "
+            "these facts and nothing else:\n"
+            f"{facts}\n"
+            f"Their reason this matters, in their own words: {why}\n"
+            f"Tone: {tone}\n"
+            "Use only their words for the reason; invent no new motivation, "
+            "number, or promise. "
+            + (
+                "Keep each of these exactly as written: "
+                + ", ".join(f'"{m}"' for m in must_keep) + "."
+                if must_keep else ""
+            )
+        )
+        model, level = llm.step_profile(llm.STEP_NATURALIZE)
+        candidate = voice.scrub(llm.generate_text(system, user,
+                                                  model=model, thinking_level=level))
+    except llm.LlmUnavailable:
+        return fallback
+    if not candidate or any(m not in candidate for m in must_keep):
+        return fallback
+    if not _looks_complete(candidate):
+        return fallback  # truncated mid-sentence; the template is complete and honest
+    return candidate
 
 
 def naturalize_outcome(text: str, required: List[str]) -> str:

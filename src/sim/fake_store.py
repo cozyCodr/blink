@@ -99,6 +99,20 @@ class FakeStore:
         self.commitments[c.id] = c
         self._publish_event("commitment_added", {"commitment_id": c.id, "title": c.title})
 
+    def set_commitment_why(self, commitment_id: str, why: str) -> Optional[Commitment]:
+        """P17-02: store the captured personal why on a commitment.
+
+        The caller (the elicit `why` beat) owns cleaning and the skip rule; this
+        only writes a real, already-validated line. Returns the commitment, or
+        None when the id is unknown."""
+        c = self.commitments.get(commitment_id)
+        if c is None:
+            return None
+        c.why = why
+        c.updated_at = datetime.now(timezone.utc)
+        self._publish_event("commitment_updated", {"commitment_id": c.id})
+        return c
+
     def add_task(self, t: Task):
         self.tasks[t.id] = t
         self._publish_event("task_added", {"task_id": t.id, "title": t.title})

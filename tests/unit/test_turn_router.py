@@ -87,10 +87,19 @@ class TestTurnRouter(unittest.TestCase):
         self.assertEqual(b["type"], "question")
         self.assertEqual(b["question"]["field"], "target_timeline")
 
-        # target_timeline fills the profile -> a plan comes back.
+        # target_timeline fills the profile -> the last beat is the personal why
+        # (P17-02): one skippable question, stored on the commitment.
         b = answer("target_timeline", "6 months")
+        self.assertEqual(b["type"], "question")
+        self.assertEqual(b["question"]["field"], "why")
+        self.assertTrue(b["question"]["skippable"])
+
+        # Answering the why fills it in and tips into synthesis.
+        b = answer("why", "I want to switch careers by next year.")
         # synthesize_plan degrades to empty offline, so assert type, not counts.
         self.assertEqual(b["type"], "planned")
+        comm = server.stores[self.ws].commitments[session["commitment_id"]]
+        self.assertEqual(comm.why, "I want to switch careers by next year.")
 
     def test_question_routes_to_conversation(self):
         r = self.client.post(

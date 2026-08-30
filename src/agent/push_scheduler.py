@@ -83,6 +83,11 @@ class DueSignal(NamedTuple):
     task_title: Optional[str] = None
     subtitle: Optional[str] = None
     reason: str = ""
+    # P17-02: the owning commitment's captured why and its 1-5 stake, threaded
+    # so the payload can carry them for a client to render. None when the
+    # commitment never captured a why.
+    commitment_why: Optional[str] = None
+    stake: Optional[int] = None
 
 
 def ledger_key(day: date, kind: str, subject: Optional[str]) -> str:
@@ -94,6 +99,33 @@ def ledger_key(day: date, kind: str, subject: Optional[str]) -> str:
 def _task_title(store, block) -> Optional[str]:
     task = store.tasks.get(block.task_id)
     return task.title if task is not None else None
+
+
+def _commitment_of(store, block):
+    """The commitment a block belongs to (block -> task -> commitment), or None.
+
+    P17-02: this is how a reminder reaches the personal why. Degrades to None at
+    every missing link, so a broken chain simply yields the plain what+when line.
+    """
+    task = store.tasks.get(block.task_id)
+    if task is None:
+        return None
+    return store.commitments.get(getattr(task, "commitment_id", None))
+
+
+def _spoken(phrase_fn, fallback: str, *, why, stake, task_title, minutes_until, kind) -> str:
+    """P17-02: hand the grounded tokens to the injected phraser, or keep the
+    honest template. The phraser owns the truthfulness guards (required tokens,
+    offline fallback); we only call it when there is a real why to speak, and we
+    keep the template on any surprise."""
+    if phrase_fn is None or not why:
+        return fallback
+    try:
+        line = phrase_fn(fallback, why=why, stake=stake, task_title=task_title,
+                         minutes_until=minutes_until, kind=kind)
+    except Exception:
+        return fallback
+    return line or fallback
 
 
 def _todays_planned(store, now: datetime, tz) -> List:
@@ -152,7 +184,7 @@ def roll_budget_if_new_day(store, now: datetime, tz) -> bool:
 
 # --- deciding ---------------------------------------------------------------
 
-def due_signal(store, now: datetime, *, brief_body_for=None) -> Optional[DueSignal]:
+def due_signal(store, now: datetime, *, brief_body_for=None, phrase_fn=None) -> Optional[DueSignal]:
     """The one signal that is due for this workspace right now, or None.
 
     Ordered by how time-critical each kind is: a nudge is about a specific
@@ -163,6 +195,11 @@ def due_signal(store, now: datetime, *, brief_body_for=None) -> Optional[DueSign
     `brief_body_for(store, now)` supplies the server's OWN `notification_body`
     (`src/agent/triggers.py`, `execute_morning_brief`). It is injected rather
     than imported so this function stays testable without a capacity ledger.
+
+    `phrase_fn` (P17-02) is the model phraser for a stake-tuned line when the
+    owning commitment has a captured why. Injected, like `brief_body_for`, so
+    the decision path stays fully testable offline: with `phrase_fn=None` every
+    body is the honest deterministic template, unchanged from before.
     """
     tz = resolve_zone(store.get_profile().timezone)
     day = local_date(now, tz)
@@ -178,14 +215,21 @@ def due_signal(store, now: datetime, *, brief_body_for=None) -> Optional[DueSign
             if _already_sent(store, key):
                 continue
             title = _task_title(store, block)
+            comm = _commitment_of(store, block)
+            why = getattr(comm, "why", None) if comm else None
+            stake = getattr(comm, "stake", None) if comm else None
             # Every claim in this sentence is a field we are holding: the title
             # came off the task the block points at, and the number is the real
-            # remaining minutes, computed, not assumed.
-            body = (f"{title} starts in {spelled(minutes)} minutes."
-                    if title else
-                    f"Your next session starts in {spelled(minutes)} minutes.")
+            # remaining minutes, computed, not assumed. This template is also the
+            # fallback the phraser degrades to.
+            canned = (f"{title} starts in {spelled(minutes)} minutes."
+                      if title else
+                      f"Your next session starts in {spelled(minutes)} minutes.")
+            body = _spoken(phrase_fn, canned, why=why, stake=stake,
+                           task_title=title, minutes_until=minutes, kind="nudge")
             return DueSignal(kind="nudge", key=key, body=body,
                              block_id=block.id, task_title=title,
+                             commitment_why=why, stake=stake,
                              reason="session starting soon")
 
     # 2. The evening check-in: after 5pm local, ENDED blocks still unanswered.
@@ -196,12 +240,18 @@ def due_signal(store, now: datetime, *, brief_body_for=None) -> Optional[DueSign
             key = ledger_key(day, "check_in", block.id)
             if not _already_sent(store, key):
                 title = _task_title(store, block)
+                comm = _commitment_of(store, block)
+                why = getattr(comm, "why", None) if comm else None
+                stake = getattr(comm, "stake", None) if comm else None
                 # A question asserts nothing about the session beyond its
                 # existence, which is the only thing we know.
-                body = (f"How did {title} go?" if title
-                        else "How did that session go?")
+                canned = (f"How did {title} go?" if title
+                          else "How did that session go?")
+                body = _spoken(phrase_fn, canned, why=why, stake=stake,
+                               task_title=title, minutes_until=None, kind="check_in")
                 return DueSignal(kind="check_in", key=key, body=body,
                                  block_id=block.id, task_title=title,
+                                 commitment_why=why, stake=stake,
                                  reason="unresolved blocks after the check-in hour")
 
     # 3. The morning brief: before 10am local, only when today HAS sessions.
@@ -231,11 +281,13 @@ class WorkspaceSweep(NamedTuple):
 
 
 def sweep_workspace(store, now: datetime, *, brief_body_for=None,
-                    config=None, sender=None) -> WorkspaceSweep:
+                    config=None, sender=None, phrase_fn=None) -> WorkspaceSweep:
     """Decide, send, spend, prune, log — for one workspace.
 
     `sender` defaults to `push.send_to_devices` and exists so a test can drive
-    the whole decision path with no network and no key at all.
+    the whole decision path with no network and no key at all. `phrase_fn`
+    (P17-02) is the optional stake-tuned reminder phraser, threaded to
+    `due_signal`; None keeps the honest deterministic templates.
     """
     workspace_id = store.workspace_id
     devices = store.list_devices()
@@ -251,7 +303,7 @@ def sweep_workspace(store, now: datetime, *, brief_body_for=None,
         return WorkspaceSweep(workspace_id, None, False, "within the 15 minute gap",
                               len(devices), 0)
 
-    signal = due_signal(store, now, brief_body_for=brief_body_for)
+    signal = due_signal(store, now, brief_body_for=brief_body_for, phrase_fn=phrase_fn)
     if signal is None:
         return WorkspaceSweep(workspace_id, None, False, "nothing due", len(devices), 0)
 
@@ -260,6 +312,8 @@ def sweep_workspace(store, now: datetime, *, brief_body_for=None,
         subtitle=signal.subtitle,
         block_id=signal.block_id,
         task_title=signal.task_title,
+        commitment_why=signal.commitment_why,
+        stake=signal.stake,
     )
     fanout_fn = sender or push.send_to_devices
     try:
@@ -309,7 +363,7 @@ class SweepReport(NamedTuple):
 
 
 def sweep(stores: Dict[str, Any], now: datetime, *, brief_body_for=None,
-          config=None, sender=None) -> SweepReport:
+          config=None, sender=None, phrase_fn=None) -> SweepReport:
     """Walk every workspace that has registered devices."""
     considered = 0
     sent = 0
@@ -320,7 +374,7 @@ def sweep(stores: Dict[str, Any], now: datetime, *, brief_body_for=None,
             continue
         considered += 1
         result = sweep_workspace(store, now, brief_body_for=brief_body_for,
-                                 config=config, sender=sender)
+                                 config=config, sender=sender, phrase_fn=phrase_fn)
         pruned += result.pruned
         if result.sent and result.kind:
             sent += 1
