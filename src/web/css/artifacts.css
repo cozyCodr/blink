@@ -1,0 +1,189 @@
+/* artifacts.css — Conversational artifacts (P20-02): tool trace lines, search
+   sources, session cards, move cards. Load order is index.html's link order;
+   this file is a new feature area appended after now.css.
+   Rule: new styles go in the file that owns the feature, never back into one blob.
+
+   THE LAW (mirrors app.js): no payload, no artifact. Everything in here styles
+   DOM that app.js only builds when the reply really carried the field, so an
+   empty reply costs nothing. All colors and faces ride tokens.css vars. */
+
+/* ---- The two landing zones ------------------------------------------------
+   #p-art sits above the words (trace, sources); the cards land in #p-extra
+   below them. #p-art joins the surface's 140ms mode cross-fade so artifacts
+   ease out with the words they belong to (same values as conversation.css
+   gives .said/.why/#p-extra). */
+.surface #p-art {
+  display: flex; flex-direction: column; gap: 10px;
+  max-width: 34em; margin: 0 auto 10px;
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+.surface.swap #p-art { opacity: 0; transform: translateY(5px); }
+.surface #p-art:empty { display: none; }
+
+/* ---- Shared deal-in (the clarify kit's beat, restated for artifacts) ------
+   Same choreography as clarify.css clarifyDeal: 0.26s, 40ms apart, in reading
+   order. fill-mode is `backwards`, NOT `both` — the hidden pose is needed
+   during the stagger delay, but transform must let go the instant a row
+   lands, so nothing outranks a later hover. */
+.trace > *, .source-chips > *, .art-cards > * {
+  animation: artDeal 0.26s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+.trace > :nth-child(1),  .source-chips > :nth-child(1),  .art-cards > :nth-child(1)  { animation-delay: 0ms; }
+.trace > :nth-child(2),  .source-chips > :nth-child(2),  .art-cards > :nth-child(2)  { animation-delay: 40ms; }
+.trace > :nth-child(3),  .source-chips > :nth-child(3),  .art-cards > :nth-child(3)  { animation-delay: 80ms; }
+.trace > :nth-child(4),  .source-chips > :nth-child(4),  .art-cards > :nth-child(4)  { animation-delay: 120ms; }
+.trace > :nth-child(5),  .source-chips > :nth-child(5),  .art-cards > :nth-child(5)  { animation-delay: 160ms; }
+.trace > :nth-child(6),  .source-chips > :nth-child(6),  .art-cards > :nth-child(6)  { animation-delay: 200ms; }
+.trace > :nth-child(7),  .source-chips > :nth-child(7),  .art-cards > :nth-child(7)  { animation-delay: 240ms; }
+.trace > :nth-child(n+8), .source-chips > :nth-child(n+8), .art-cards > :nth-child(n+8) { animation-delay: 280ms; }
+@keyframes artDeal {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ---- (c) Tool lines: the turn's real work, said quietly -------------------
+   A mono column, small and calm. The check is the accent's one moment; the
+   summary stays faint — this is a receipt, not a headline. */
+.trace {
+  display: flex; flex-direction: column; gap: 3px;
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.5;
+  text-align: left;
+}
+.trace-line {
+  display: flex; align-items: baseline; gap: 7px;
+  color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.trace-tool { color: var(--muted); flex: none; }
+.trace-check { color: var(--accent); flex: none; }
+.trace-sum { color: var(--faint); overflow: hidden; text-overflow: ellipsis; }
+
+/* ---- (d) Search artifact: the query line + source chips -------------------
+   The query renders ONLY when the reply data carries it (app.js gates it);
+   the chips carry a favicon-stand-in dot and the bare domain, each a real
+   link opening in a new tab. */
+.search-art { display: flex; flex-direction: column; gap: 8px; }
+.search-query {
+  display: inline-flex; align-items: center; gap: 8px;
+  align-self: center;
+  font-family: var(--mono); font-size: 12px; color: var(--muted);
+  background: var(--control); border: 1px solid var(--line);
+  border-radius: 999px; padding: 5px 14px;
+  max-width: 100%; overflow: hidden;
+}
+.search-glyph { color: var(--accent); flex: none; }
+.search-q { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-chips {
+  display: flex; flex-wrap: wrap; gap: 6px; justify-content: center;
+}
+.source-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  text-decoration: none;
+  background: var(--control); border: 1px solid var(--line);
+  border-radius: 999px; padding: 3px 10px;
+  transition: border-color 0.2s ease, color 0.2s ease;
+}
+.source-chip::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%; flex: none;
+  background: var(--accent);
+  box-shadow: 0 0 6px rgba(var(--glow-rgb), 0.4);
+}
+.source-chip:hover { border-color: var(--accent); color: var(--text); }
+.source-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---- (a)/(b) The cards: calendar tile + body ------------------------------
+   One horizontal card per session or move, stacked and dealt in. The tile is
+   the date made physical: accent strip naming the day, big number, small
+   time. */
+.art-cards {
+  display: flex; flex-direction: column; gap: 10px;
+  max-width: 34em; margin: 12px auto 0;
+  text-align: left;
+}
+.art-card {
+  display: flex; align-items: stretch; gap: 14px;
+  background: var(--control); border: 1px solid var(--line);
+  border-radius: 12px; padding: 10px;
+}
+.art-tile {
+  flex: none; width: 62px;
+  display: flex; flex-direction: column; align-items: center;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 9px; overflow: hidden;
+}
+.art-tile-wd {
+  align-self: stretch; text-align: center;
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em;
+  padding: 3px 0 2px;
+  background: color-mix(in srgb, var(--accent) 26%, var(--surface));
+  color: var(--accent-bright);
+}
+.art-tile-day {
+  font-family: var(--sans); font-weight: 600; font-size: 22px;
+  line-height: 1.15; color: var(--text); margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.art-tile-time {
+  font-family: var(--mono); font-size: 9.5px; color: var(--faint);
+  padding: 1px 2px 5px; white-space: nowrap;
+}
+.art-body {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 4px;
+  justify-content: center; align-items: flex-start;
+}
+.art-title {
+  font-family: var(--sans); font-weight: 600; font-size: 14.5px;
+  color: var(--text); overflow-wrap: anywhere;
+}
+.art-when {
+  display: flex; align-items: baseline; gap: 7px;
+  font-family: var(--mono); font-size: 12px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.art-why {
+  font-family: var(--serif); font-style: italic; font-size: 13.5px;
+  color: var(--muted); line-height: 1.4;
+}
+.art-chip {
+  display: inline-block;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-bright);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 999px; padding: 2px 9px; margin-top: 2px;
+}
+
+/* Move cards: the old time struck through and dimmed toward alert, the new
+   time glowing in the accent chip. The retry note is warm and honest, never
+   a claim of success. */
+.art-old {
+  text-decoration: line-through;
+  color: color-mix(in srgb, var(--alert) 55%, var(--faint));
+}
+.art-arrow { color: var(--faint); }
+.art-new {
+  color: var(--accent-bright);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 999px; padding: 1px 8px;
+  box-shadow: 0 0 10px rgba(var(--glow-rgb), 0.22);
+}
+.art-note {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--warm); margin-top: 2px;
+}
+.art-cal-note {
+  font-family: var(--serif); font-style: italic; font-size: 13px;
+  color: var(--warm); text-align: center; margin-top: 8px;
+}
+
+/* Every animated feature ships its reduced-motion handling beside the
+   animation it guards (frontend-standards). The stagger is presentation
+   only; content lands complete either way. */
+@media (prefers-reduced-motion: reduce) {
+  .trace > *, .source-chips > *, .art-cards > * { animation: none; }
+  .surface #p-art { transition: none; }
+}

@@ -365,6 +365,15 @@
     var pWhy = document.getElementById("p-why");
     var pExtra = document.getElementById("p-extra");
     var eyesEl = document.querySelector(".eyes");
+    /* P20-02: the artifact rows. #p-art sits ABOVE the words (tool trace,
+       search sources) and is built here rather than in index.html so the
+       markup contract stays the three rows it always was; the cards that
+       land BELOW the words ride #p-extra like reply-actions do. Every mode
+       reset clears both — an artifact never outlives its reply. */
+    var pArt = document.createElement("div");
+    pArt.id = "p-art";
+    panel.insertBefore(pArt, pSaid);
+    function clearArtifacts() { pArt.innerHTML = ""; }
     var timers = [];
     var activeType = null;   // in-flight type-on: {el, text, done} (P7-01 fix)
     function clearTimers() {
@@ -491,7 +500,7 @@
     // any polling; where it is missing the render paths below still call sync.
     if (typeof ResizeObserver === "function") {
       var ro = new ResizeObserver(syncEdgeFades);
-      ro.observe(panel); ro.observe(pSaid); ro.observe(pExtra);
+      ro.observe(panel); ro.observe(pSaid); ro.observe(pExtra); ro.observe(pArt);
     }
 
     // Keep the caret / latest word in view while a long reply grows past the
@@ -543,6 +552,7 @@
         if (!still(seq, "compose")) return;
         pSaid.textContent = "";
         pWhy.textContent = "";
+        clearArtifacts();
         // The compose row (P8-01d, rebuilt by P11-02b): the ruled field and
         // the pill Send. The attach "+" left this row for the dock trio,
         // where it stands beside the mic and the keyboard as one of the
@@ -585,6 +595,7 @@
         pSaid.innerHTML = '<span class="caret">▍</span>';
         pWhy.textContent = "";
         pExtra.innerHTML = "";
+        clearArtifacts();
         show();
       });
     }
@@ -604,6 +615,8 @@
         if (!still(seq, "speak")) return;
         pWhy.textContent = "";
         pExtra.innerHTML = "";
+        clearArtifacts();
+        applyPreArtifacts(decor);   // P20-02: trace/sources land with the words
         show();
         typeInto(pSaid, text, function () {
           // P11-08: this path types PLAIN text, so run the finished string back
@@ -618,6 +631,7 @@
               applyActions(decor.actions);
             } catch (_) {}
           }
+          applyPostArtifacts(decor);   // P20-02: cards deal in below the words
           if (done) done();
         }, seq);
       });
@@ -802,6 +816,202 @@
       pExtra.appendChild(row);
     }
 
+    /* =================================================================
+       P20-02: conversational artifacts. THE LAW: no payload, no artifact.
+       Every function below renders ONLY from fields that are present and
+       well-formed, and silently renders nothing otherwise — a backend that
+       has not started sending these yet costs zero pixels. All text lands
+       via textContent (titles, summaries, domains are DATA, never markup).
+
+       Two landing zones, both cleared on every mode reset:
+         #p-art  (above the words)  — tool trace lines, search sources
+         #p-extra (below the words) — session cards, move cards
+       ================================================================= */
+    function mk(tag, cls, text) {
+      var n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text != null) n.textContent = text;
+      return n;
+    }
+    function artDate(iso) {
+      if (typeof iso !== "string" || !iso) return null;
+      var d = new Date(iso);
+      return isNaN(d) ? null : d;
+    }
+    function artTime(d) {
+      return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    }
+    // The calendar tile: accent strip (weekday / TODAY), big day number,
+    // small time. Rendered only when the datetime really parses — a tile is
+    // a claim about a date, so no date means no tile (zero hallucinated
+    // datetimes; the body still renders beside an absent tile).
+    function artTile(d) {
+      if (!d) return null;
+      var tile = mk("div", "art-tile");
+      var now = new Date();
+      var today = d.getFullYear() === now.getFullYear() &&
+                  d.getMonth() === now.getMonth() &&
+                  d.getDate() === now.getDate();
+      var wd = today ? "TODAY"
+             : d.toLocaleDateString(undefined, { weekday: "short" }).toUpperCase();
+      tile.appendChild(mk("span", "art-tile-wd", wd));
+      tile.appendChild(mk("span", "art-tile-day", String(d.getDate())));
+      tile.appendChild(mk("span", "art-tile-time", artTime(d)));
+      return tile;
+    }
+
+    // (c) Tool lines: the turn's real tool calls, as a quiet mono column.
+    // Known tools get plain words; an unknown one is humanized, never hidden
+    // (the trace is a truth record — see agent-governance).
+    var TOOL_WORDS = {
+      list_calendar_events: "reading your calendar",
+      get_capacity: "measuring free time",
+      propose_schedule_for_workspace: "drafting a plan",
+      list_todays_sessions: "checking today's sessions",
+      web_search: "searching the web",
+      propose_reschedule: "planning the moves",
+    };
+    function toolWords(name) {
+      var key = String(name || "");
+      if (TOOL_WORDS[key]) return TOOL_WORDS[key];
+      return key.replace(/[_-]+/g, " ").trim();
+    }
+    function applyTrace(trace) {
+      if (!Array.isArray(trace) || !trace.length) return;
+      var col = mk("div", "trace");
+      trace.forEach(function (t) {
+        if (!t || typeof t !== "object") return;
+        var words = toolWords(t.tool);
+        if (!words && !t.summary) return;
+        var line = mk("div", "trace-line");
+        if (words) line.appendChild(mk("span", "trace-tool", words));
+        line.appendChild(mk("span", "trace-check", "✓"));
+        if (t.summary) line.appendChild(mk("span", "trace-sum", String(t.summary)));
+        col.appendChild(line);
+      });
+      if (col.childNodes.length) pArt.appendChild(col);
+    }
+
+    // (d) Search artifact: source chips (dot + domain) above the reply, and
+    // the query line only when the reply data actually carries the query.
+    function artDomain(url) {
+      try {
+        var u = new URL(String(url));
+        if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+        return { href: u.href, domain: u.hostname.replace(/^www\./, "") };
+      } catch (_) { return null; }
+    }
+    function applySearch(sources, query) {
+      var cited = [];
+      (Array.isArray(sources) ? sources : []).forEach(function (s) {
+        if (!s || typeof s !== "object" || !s.url) return;
+        var d = artDomain(s.url);
+        if (d) cited.push(d);
+      });
+      if (!cited.length) return;
+      var wrap = mk("div", "search-art");
+      if (query) {
+        var q = mk("div", "search-query");
+        q.appendChild(mk("span", "search-glyph", "⌕"));
+        q.appendChild(mk("span", "search-q", String(query)));
+        wrap.appendChild(q);
+      }
+      var row = mk("div", "source-chips");
+      cited.forEach(function (c) {
+        var chip = mk("a", "source-chip", c.domain);
+        chip.href = c.href;
+        chip.target = "_blank";
+        chip.rel = "noopener noreferrer";
+        row.appendChild(chip);
+      });
+      wrap.appendChild(row);
+      pArt.appendChild(wrap);
+    }
+
+    // (a) Session cards: one horizontal card per planned session — tile on
+    // the left, title / mono span / why on the right, and the calendar chip
+    // ONLY when the server says calendar === true (truthful, like emotions).
+    function applySessions(artifacts) {
+      var list = artifacts && artifacts.sessions;
+      if (!Array.isArray(list) || !list.length) return;
+      var col = mk("div", "art-cards");
+      list.forEach(function (s) {
+        if (!s || typeof s !== "object") return;
+        var start = artDate(s.starts_at), end = artDate(s.ends_at);
+        if (!s.title && !start) return;   // nothing real to show
+        var card = mk("div", "art-card");
+        var tile = artTile(start);
+        if (tile) card.appendChild(tile);
+        var body = mk("div", "art-body");
+        if (s.title) body.appendChild(mk("div", "art-title", String(s.title)));
+        if (start && end) {
+          var mins = Math.round((end - start) / 60000);
+          body.appendChild(mk("div", "art-when",
+            artTime(start) + " to " + artTime(end) + " · " + mins + "m"));
+        }
+        if (s.why) body.appendChild(mk("div", "art-why", String(s.why)));
+        if (s.calendar === true) {
+          body.appendChild(mk("span", "art-chip art-chip-cal", "On your calendar"));
+        }
+        card.appendChild(body);
+        col.appendChild(card);
+      });
+      if (col.childNodes.length) pExtra.appendChild(col);
+    }
+
+    // (b) Move cards: old time struck through, arrow, new time in the accent
+    // chip. calendar: "moved" earns the chip, "partial"/"failed" the honest
+    // warm retry note, "none" nothing at all — the card claims exactly what
+    // the server did (never claim actions not taken).
+    function applyMoves(moves, note) {
+      if (!Array.isArray(moves) || !moves.length) return;
+      var col = mk("div", "art-cards");
+      moves.forEach(function (m) {
+        if (!m || typeof m !== "object") return;
+        var oldD = artDate(m.old_start), newD = artDate(m.new_start);
+        if (!m.title && !newD) return;
+        var card = mk("div", "art-card art-move");
+        var tile = artTile(newD);
+        if (tile) card.appendChild(tile);
+        var body = mk("div", "art-body");
+        if (m.title) body.appendChild(mk("div", "art-title", String(m.title)));
+        if (oldD || newD) {
+          var when = mk("div", "art-when");
+          if (oldD) when.appendChild(mk("span", "art-old", artTime(oldD)));
+          if (oldD && newD) when.appendChild(mk("span", "art-arrow", "→"));
+          if (newD) when.appendChild(mk("span", "art-new", artTime(newD)));
+          body.appendChild(when);
+        }
+        if (m.calendar === "moved") {
+          body.appendChild(mk("span", "art-chip art-chip-cal", "Calendar moved"));
+        } else if (m.calendar === "partial" || m.calendar === "failed") {
+          body.appendChild(mk("span", "art-note", "Calendar retrying"));
+        }
+        card.appendChild(body);
+        col.appendChild(card);
+      });
+      if (!col.childNodes.length) return;
+      pExtra.appendChild(col);
+      if (note) pExtra.appendChild(mk("div", "art-cal-note", String(note)));
+    }
+
+    // The two halves, in paint order. Pre lands with the first words (the
+    // trace reads as "here is how I got this"); post lands once the words
+    // have, beside applyActions, so cards never deal in over a half-typed
+    // sentence. Both are hard-gated on their payloads being present.
+    function applyPreArtifacts(decor) {
+      if (!decor) return;
+      try { applyTrace(decor.trace); } catch (_) {}
+      try { applySearch(decor.sources, decor.query); } catch (_) {}
+      keepLatestVisible();
+    }
+    function applyPostArtifacts(decor) {
+      if (!decor) return;
+      try { applySessions(decor.artifacts); } catch (_) {}
+      try { applyMoves(decor.moves, decor.calendar_note); } catch (_) {}
+      keepLatestVisible();
+    }
+
     function speakSynced(text, audio, done, decor, token) {
       var seq = gate(token, "speakSynced");
       // An older reply's late audio: the words are not landing, so the voice
@@ -823,6 +1033,8 @@
       try { console.debug("[surface] syncedNow:", (text || "").slice(0, 40)); } catch (_) {}
       pWhy.textContent = "";
       pExtra.innerHTML = "";
+      clearArtifacts();
+      applyPreArtifacts(decor);   // P20-02: trace/sources land with the words
       show();
 
       var spans = buildWordSpans(text);
@@ -857,6 +1069,7 @@
         if (sync === run) stopSynced(); else run.revealAll();
         // the prominent action lands once the words have, never over them
         try { applyActions(decor && decor.actions); } catch (_) {}
+        applyPostArtifacts(decor);   // P20-02: cards deal in below the words
         if (done) done();
       }
       run.finish = finish;
@@ -925,6 +1138,7 @@
         pSaid.innerHTML = '<span class="caret">▍</span>';
         pWhy.textContent = "";
         pExtra.innerHTML = "";
+        clearArtifacts();
         show();
       });
     }
@@ -945,6 +1159,7 @@
         pSaid.textContent = "";
         pWhy.textContent = question.why || "";
         pExtra.innerHTML = "";
+        clearArtifacts();
 
         // The panel owns the question/why lines, so hand the control a copy with
         // them blanked — otherwise renderClarifyQuestion would repeat the prompt.
@@ -5973,8 +6188,25 @@
     // The additive decoration fields, or null. Absent = the reply renders
     // exactly as it did before P11-08 (degradation is free).
     function decorOf(res) {
-      if (!res || (!res.refs && !res.actions)) return null;
-      return { refs: res.refs || null, actions: res.actions || null };
+      if (!res) return null;
+      // P20-02: the additive artifact payloads ride the same decoration seam
+      // as refs/actions. Each is null when absent, and the surface renders
+      // NOTHING for a null (no payload, no artifact).
+      var hasArt = res.trace ||
+                   (res.artifacts && res.artifacts.sessions) ||
+                   res.moves ||
+                   (res.sources && res.sources.length);
+      if (!res.refs && !res.actions && !hasArt) return null;
+      return {
+        refs: res.refs || null,
+        actions: res.actions || null,
+        trace: res.trace || null,
+        artifacts: res.artifacts || null,
+        moves: res.moves || null,
+        calendar_note: res.calendar_note || null,
+        sources: res.sources || null,
+        query: res.query || null,
+      };
     }
 
     function dispatch(res) {
@@ -6343,7 +6575,16 @@
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ query: wsCfg.query, mode: thinkingMode() }),
-          }).then(heldDispatch).catch(fail);
+          }).then(function (r) {
+            // P20-02: the search artifact shows the query that actually ran.
+            // The server reply carries the sources; the query it answers is
+            // the one THIS request posted, so tag it on only when the reply
+            // is a cited one and the server did not name it itself.
+            if (r && r.sources && r.sources.length && !r.query && wsCfg.query) {
+              r.query = wsCfg.query;
+            }
+            heldDispatch(r);
+          }).catch(fail);
           return;
         }
         // P19-06: a reschedule confirm the agent surfaced through /turn commits
