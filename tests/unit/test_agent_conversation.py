@@ -162,5 +162,67 @@ class TestClarifyAndTools(unittest.TestCase):
         self.assertIn("state", out["text"].lower())
 
 
+class TestStateContextMissedSessions(unittest.TestCase):
+    """P19-02: the model's grounded context lists today's missed / past-due
+    unresolved sessions so a "reschedule the ones I missed" turn has a referent.
+    Deterministic — `now_naive` is pinned so the local-day filter is stable."""
+
+    def setUp(self):
+        from datetime import datetime
+        from unittest import mock
+        reg.stores.clear()
+        llm.set_client(_RaisingClient())
+        self.ws = "ws_reschedule"
+        self.store = reg.get_or_create_store(self.ws)
+        # Pin "now" to a mid-afternoon instant so the past-due filter is stable
+        # regardless of the wall clock the suite runs at (default tz is UTC).
+        self.now = datetime(2026, 8, 30, 18, 0, 0)
+        self._patch = mock.patch.object(conversation, "now_naive",
+                                        return_value=self.now)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        llm.set_client(None)
+        reg.stores.clear()
+
+    def _add_block(self, bid, task_id, title, start, end, status):
+        from src.types.entities import Block
+        self.store.add_task(Task(
+            id=task_id, workspace_id=self.ws, commitment_id="c_1",
+            title=title, estimate_minutes=60, status="scheduled"))
+        self.store.blocks[bid] = Block(
+            id=bid, workspace_id=self.ws, task_id=task_id,
+            starts_at=start, ends_at=end, status=status)
+
+    def test_lists_missed_and_past_due_by_title(self):
+        from datetime import datetime
+        # missed today, past-due planned today, and a future planned block (the
+        # future one must NOT be listed).
+        self._add_block("b_missed", "t_missed", "Deep work",
+                        datetime(2026, 8, 30, 9, 0), datetime(2026, 8, 30, 10, 0),
+                        status="missed")
+        self._add_block("b_pastdue", "t_pastdue", "Write intro",
+                        datetime(2026, 8, 30, 14, 0), datetime(2026, 8, 30, 15, 0),
+                        status="planned")
+        self._add_block("b_future", "t_future", "Evening review",
+                        datetime(2026, 8, 30, 20, 0), datetime(2026, 8, 30, 21, 0),
+                        status="planned")
+        ctx = conversation._state_context(self.ws, for_user=False)
+        self.assertIn("missed or left undone", ctx)
+        self.assertIn("Deep work", ctx)
+        self.assertIn("Write intro", ctx)
+        self.assertNotIn("Evening review", ctx)
+
+    def test_no_line_when_no_missed_sessions(self):
+        from datetime import datetime
+        # Only a future planned block: nothing missed, so the line is absent.
+        self._add_block("b_future", "t_future", "Evening review",
+                        datetime(2026, 8, 30, 20, 0), datetime(2026, 8, 30, 21, 0),
+                        status="planned")
+        ctx = conversation._state_context(self.ws, for_user=False)
+        self.assertNotIn("missed or left undone", ctx)
+
+
 if __name__ == "__main__":
     unittest.main()

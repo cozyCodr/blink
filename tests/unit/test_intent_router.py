@@ -81,6 +81,20 @@ class TestIntentHeuristic(unittest.TestCase):
             classify_intent("what do you think about politics").label, "chat"
         )
 
+    def test_reschedule_phrasing_does_not_crash_and_is_safe(self):
+        # P19-02: no deterministic guard exists for reschedule (the model
+        # classifies it). The heuristic fallback must not crash on such
+        # phrasing and must return a valid, safe label. "reschedule the 2 I
+        # didn't get to" carries no imperative-command opener or duration, so
+        # the conservative fallback lands it on chat, which is acceptable.
+        res = classify_intent("reschedule the 2 I didn't get to")
+        self.assertIn(
+            res.label,
+            {"chat", "plan_goal", "concrete_tasks", "disruption", "checkin",
+             "whatif", "focus", "teach", "calendar", "reschedule"},
+        )
+        self.assertEqual(res.label, "chat")
+
 
 class TestIntentLlmPath(unittest.TestCase):
     def tearDown(self):
@@ -99,6 +113,18 @@ class TestIntentLlmPath(unittest.TestCase):
         # LLM raises -> heuristic runs -> concrete for an imperative command.
         res = classify_intent("schedule dentist Tuesday 3pm")
         self.assertEqual(res.label, "concrete_tasks")
+
+    def test_llm_can_return_reschedule(self):
+        # P19-02: the model owns reschedule classification. When it labels a
+        # "reschedule the ones I missed" message as reschedule, that label maps
+        # straight through classify_intent (no deterministic guard intercepts).
+        canned = Intent(
+            label="reschedule",
+            reason="Re-place today's missed sessions into later free time.",
+        )
+        llm.set_client(_CannedClient(canned))
+        res = classify_intent("reschedule the 2 I didn't get to")
+        self.assertEqual(res.label, "reschedule")
 
 
 if __name__ == "__main__":

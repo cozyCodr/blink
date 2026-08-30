@@ -285,6 +285,34 @@ def _state_context(workspace_id: str, for_user: bool = False) -> str:
     # confirmation appeared, the time didn't parse.
     if for_user:
         return "\n".join(lines)
+    # P19-02 reschedule referent: today's missed / past-due unresolved sessions,
+    # so a "reschedule the ones I didn't get to" turn has a concrete referent.
+    # A block counts when it is explicitly `missed`, OR it is still `planned`
+    # but its end is already in the past (same local day as now) — the same
+    # local-day rule the check-in uses (server._today_unresolved_blocks). Facts
+    # only, no instruction; when there are none this adds nothing.
+    _now = now_naive()
+    _tz = localtime.resolve_zone(getattr(store.get_profile(), "timezone", None))
+    missed = sorted(
+        (b for b in store.blocks.values()
+         if localtime.same_local_day(b.starts_at, _now, _tz)
+         and (b.status == "missed"
+              or (b.status == "planned" and b.ends_at < _now))),
+        key=lambda b: b.starts_at,
+    )
+    if missed:
+        def _block_title(b):
+            t = store.tasks.get(b.task_id)
+            return t.title if t else "This session"
+        desc = "; ".join(
+            f"{_block_title(b)} "
+            f"({b.starts_at.replace(tzinfo=timezone.utc).astimezone(_tz):%H:%M})"
+            for b in missed
+        )
+        lines.append(
+            "Today's sessions the user planned but missed or left undone (past "
+            "their time and not yet resolved): " + desc + "."
+        )
     lines.append(
         "You cannot save, change, or remove no-touch zones or memories from "
         "chat; zones are saved only through a separate confirmation step. If "

@@ -17,6 +17,11 @@ Three intents:
                       ran over", "I'm sick today", "I lost my morning"), so the
                       agent should rebalance. Pure mood ("I'm tired") without a
                       schedule impact stays `chat` — empathy first, not replans.
+- `reschedule`      = the user wants to re-place TODAY's already-missed / undone
+                      sessions into later free time ("reschedule the 2 I didn't
+                      get to", "move what I missed to later"). DISTINCT from
+                      `disruption` (an external shock, not the missed sessions
+                      themselves) and from `concrete_tasks` (describing NEW work).
 - `whatif`          = a hypothetical weekly-pace question with a deterministic
                       number of hours ("what if I only did 4 hours a week"), so
                       the pure pacing core projects the landing dates (P9-05).
@@ -46,7 +51,7 @@ from src.agent.specialists.zone_teach import parse_taught_zone
 
 IntentLabel = Literal[
     "chat", "plan_goal", "concrete_tasks", "disruption", "checkin", "whatif",
-    "focus", "teach", "calendar"
+    "focus", "teach", "calendar", "reschedule"
 ]
 
 
@@ -59,6 +64,8 @@ class Intent(BaseModel):
             "anything ambiguous. plan_goal = a loose aspirational goal to plan. "
             "concrete_tasks = specific schedulable tasks or an imperative command. "
             "disruption = life happened and today's schedule is impacted. "
+            "reschedule = the user wants to re-place today's already-missed or "
+            "undone sessions into later free time. "
             "checkin = the user wants to review how today went. "
             "whatif = a hypothetical weekly-pace question with a number of hours. "
             "focus = the user wants to start working right now (start a timed "
@@ -93,6 +100,15 @@ Classify the user's message into exactly one of these intents.
   sessions". NOT disruption: pure mood with no schedule impact — "I'm tired",
   "rough day" — those are chat (empathy first; only replan when the message says
   time was actually lost or must be cleared).
+- reschedule: the user wants to RE-PLACE today's sessions they already MISSED or
+  did not get to — moving those undone sessions into later free time. Examples:
+  "reschedule the 2 I didn't get to", "move what I missed to later", "replan the
+  ones I skipped", "can you push the sessions I missed to tonight". This is about
+  the user's OWN already-planned focus sessions that went undone. NOT disruption
+  (an external shock like "I got sick" or "I lost my morning" — that clears or
+  rebalances time, it does not name already-missed sessions to move). NOT
+  concrete_tasks (which describes NEW work to schedule, not existing sessions to
+  re-place).
 - checkin: the user wants to REVIEW how today actually went, block by block.
   Examples: "how did today go", "how was today", "let's do the evening
   check-in", "how did I do today". NOT checkin: "what's on today" (that is a
@@ -419,7 +435,7 @@ def classify_intent(text: str, use_llm: bool = True) -> Intent:
     user_content = (
         f"<message>\n{text.strip()}\n</message>\n\n"
         "Classify the preceding message as chat, plan_goal, concrete_tasks, "
-        "disruption, checkin, whatif, focus, teach, or calendar."
+        "disruption, reschedule, checkin, whatif, focus, teach, or calendar."
     )
     try:
         # flash-lite (P9-06): routing runs on every turn and only picks a

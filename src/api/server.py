@@ -1477,6 +1477,30 @@ def _turn(workspace_id: str, payload: TurnRequest,
         reply.setdefault("type", "message")
         return reply
 
+    if intent.label == "reschedule":
+        # P19-02: the user wants to re-place TODAY's already-missed / undone
+        # sessions into later free time ("reschedule the 2 I didn't get to",
+        # "move what I missed to later"). This item lays only the routing +
+        # context; the actual reschedule TOOL arrives in P19-03. Until it lands
+        # this runs the general agent, an acceptable intermediate state: the
+        # missed sessions are named in its grounded context (see
+        # conversation._state_context), and the degrade discipline holds — with
+        # no tool to move anything, the model can talk about the missed sessions
+        # but must never claim a move it didn't make. The context note states
+        # the CAPABILITY in general terms, naming no tool; when P19-03's tool
+        # lands the model picks it up from the tool's own docstring.
+        note = (
+            "The user wants to re-place today's missed or undone focus sessions "
+            "into later free time. The sessions still open are listed in the "
+            "grounded state above. Re-placing them into open room later is "
+            "something you can help with; never claim you moved or rescheduled "
+            "a session unless a tool actually returned that it moved."
+        )
+        reply = agent_runtime.run_chat_turn(
+            workspace_id, message, payload.history, context_note=note)
+        reply.setdefault("type", "message")
+        return reply
+
     if intent.label == "disruption":
         # P9-01 "life happens": the user says today's time is gone — run the
         # existing rebalancer autonomously and answer with the REAL outcome
