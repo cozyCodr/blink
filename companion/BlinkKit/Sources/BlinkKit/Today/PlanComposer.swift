@@ -153,6 +153,13 @@ public final class PlanComposer {
             await confirmReschedule(yes)
             return
         }
+        // P18-02b: a web_search confirm used to fall through to the calendar
+        // guard below and silently return — Yes and Not now both did nothing
+        // on the phone (user report, 2026-08-31). Route it like the web does.
+        if question.field == "web_search" {
+            await confirmWebSearch(yes)
+            return
+        }
         guard let session, question.field.hasPrefix("calendar_") else { return }
         let config = question.config
         self.question = nil
@@ -254,6 +261,53 @@ public final class PlanComposer {
             // Refused or unreachable: honestly, the plan did not change.
             answerEcho = nil
             reply = "I couldn't reschedule those sessions, so nothing changed."
+        }
+    }
+
+    /// Answer a web_search confirm the AGENT surfaced through `/turn`
+    /// (P18-02b). Like the other agent confirms this has NO ElicitSession. The
+    /// YES posts the pending query (from `question.config.query`) to
+    /// `/web-search`, which remembers consent and runs the grounded search; the
+    /// reply rendered is the SERVER'S own cited sentence, via the shared
+    /// dispatch. "Not now" searches nothing and consent stays unset, so a later
+    /// explicit ask may re-offer. Mirrors the web's branch (app.js:6554-6588).
+    private func confirmWebSearch(_ yes: Bool) async {
+        guard let session, let question, !isSending,
+              question.field == "web_search" else { return }
+        let query = question.config?.query
+        self.question = nil
+        clearArtifacts()
+
+        guard yes else {
+            // Not now: search nothing, plan with what's known.
+            answerEcho = "Not now"
+            reply = "Okay, I'll plan with what I already know."
+            return
+        }
+        guard let query, !query.isEmpty else {
+            // A search confirm with no query to run cannot honestly search.
+            reply = "I lost track of what to search for. Ask me again and I'll look it up."
+            return
+        }
+
+        answerEcho = "Yes"
+        isSending = true
+        didRefuse = false
+        wasUnreachable = false
+        defer { isSending = false }
+        do {
+            let res = try await client.webSearch(query: query, for: session)
+            // The server composed and cited the reply; render it verbatim.
+            answerEcho = nil
+            await dispatch(res)
+        } catch DetailsError.notSignedIn {
+            needsSignIn = true
+        } catch DetailsError.cancelled {
+            return
+        } catch {
+            // Refused or unreachable: honestly, no search ran.
+            answerEcho = nil
+            reply = "I couldn't reach the web just now, so I didn't search."
         }
     }
 

@@ -59,9 +59,11 @@ public struct TurnQuestionConfig: Decodable, Sendable, Equatable {
     public let end: String?
     // reschedule confirm: the single-use token the YES replays
     public let token: String?
+    // web_search confirm: the pending query the YES runs (P18-02b)
+    public let query: String?
 
     enum CodingKeys: String, CodingKey {
-        case min, max, step, unit, action, summary, start, end, token
+        case min, max, step, unit, action, summary, start, end, token, query
         case eventID = "event_id"
     }
 
@@ -77,6 +79,7 @@ public struct TurnQuestionConfig: Decodable, Sendable, Equatable {
         start = try c.decodeIfPresent(String.self, forKey: .start)
         end = try c.decodeIfPresent(String.self, forKey: .end)
         token = try c.decodeIfPresent(String.self, forKey: .token)
+        query = try c.decodeIfPresent(String.self, forKey: .query)
     }
 }
 
@@ -397,6 +400,22 @@ extension BlinkDetailsClient {
             path: "reschedule",
             body: ["confirm": true, "token": token],
             label: "reschedule",
+            session: session
+        )
+    }
+
+    /// `POST /v1/workspaces/{ws}/web-search {query}` — a web_search confirm's
+    /// YES (P18-02b). The endpoint remembers consent and runs Gemini's own
+    /// Google Search grounding, answering with a normal typed reply (cited
+    /// sources and all), exactly as the web's askQuestion branch posts it.
+    public func webSearch(
+        query: String,
+        for session: BlinkSession
+    ) async throws -> TurnResponse {
+        try await post(
+            path: "web-search",
+            body: ["query": query],
+            label: "web-search",
             session: session
         )
     }
