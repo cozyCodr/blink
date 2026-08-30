@@ -64,6 +64,7 @@ from src.agent import google_calendar as gcal
 from src.agent import tools
 from src.sim.fake_store import FakeStore
 from src.api.webhook import webhook_dispatcher, WebhookSubscription
+from src.api.calendar_mirror import mirror_commit, mirror_cancel
 
 app = FastAPI(
     title="Warden API",
@@ -480,7 +481,11 @@ def _schedule_current(store, workspace_id: str, now: datetime) -> int:
     sched = propose_schedule(store.get_active_commitments(), store.get_ready_tasks(), ledger, now)
     # Replace semantics: a task being (re)scheduled gets its old planned blocks
     # dropped so repeated ingest/turn/synthesis passes never duplicate blocks.
-    store.drop_planned_blocks({pb.task_id for pb in sched.blocks})
+    dropped = store.drop_planned_blocks({pb.task_id for pb in sched.blocks})
+    # Cancel-before-create (P19-04): delete the dropped blocks' calendar events
+    # BEFORE the replacement events are created, so a replaced task never
+    # briefly holds two events. Best-effort; never raises into the commit.
+    mirror_cancel(store, workspace_id, dropped)
     new_blocks = [
         Block(
             id=pb.id,
@@ -493,6 +498,10 @@ def _schedule_current(store, workspace_id: str, now: datetime) -> int:
         for pb in sched.blocks
     ]
     store.commit_blocks(new_blocks)
+    # Mirror the committed blocks to Google Calendar (P19-04). Runs AFTER the
+    # unconditional internal commit; a CalendarUnavailable is swallowed so the
+    # plan stands even if the calendar can't be reached.
+    mirror_commit(store, workspace_id, new_blocks)
     store.last_schedule_report = {
         "utilization_pct": sched.diagnostics.get("utilization_pct"),
         "total_planned_minutes": sched.diagnostics.get("total_planned_minutes"),
@@ -754,9 +763,14 @@ def _apply_disruption(store, workspace_id: str, reason: str, notes, now: datetim
         reason=reason,
         notes=notes
     )
+    cancelled_blocks = []
     for cid in rebalance_res.cancelled_block_ids:
         if cid in store.blocks:
             store.blocks[cid].status = "cancelled"
+            cancelled_blocks.append(store.blocks[cid])
+    # Cancel-before-create (P19-04): drop the cancelled blocks' calendar events
+    # BEFORE the replacements are created. Best-effort; never raises.
+    mirror_cancel(store, workspace_id, cancelled_blocks)
     new_blocks = [
         Block(
             id=pb.id,
@@ -769,6 +783,8 @@ def _apply_disruption(store, workspace_id: str, reason: str, notes, now: datetim
         for pb in rebalance_res.new_blocks
     ]
     store.commit_blocks(new_blocks)
+    # Mirror the committed blocks to Google Calendar (P19-04), after commit.
+    mirror_commit(store, workspace_id, new_blocks)
     store.record_disruption(rebalance_res.disruption)
     return trigger_res, rebalance_res, new_blocks
 

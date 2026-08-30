@@ -167,23 +167,27 @@ class FakeStore:
     def get_ready_tasks(self) -> List[Task]:
         return [t for t in self.tasks.values() if t.status in ("ready", "scheduled", "in_progress")]
 
-    def drop_planned_blocks(self, task_ids) -> int:
+    def drop_planned_blocks(self, task_ids) -> List[Block]:
         """Remove still-'planned' blocks for the given tasks (replace-on-reschedule).
 
         Only blocks with status 'planned' are dropped; done/partial/missed/
-        cancelled blocks are history and are never touched. Returns the number
-        of blocks removed.
+        cancelled blocks are history and are never touched. Returns the dropped
+        Block objects (P19-04) so the caller can mirror_cancel their Google
+        Calendar events before the replacement blocks are created; the list is
+        empty when nothing was removed, so a truthiness check still works.
         """
         wanted = set(task_ids)
         stale = [
-            bid for bid, b in self.blocks.items()
+            (bid, b) for bid, b in self.blocks.items()
             if b.task_id in wanted and b.status == "planned"
         ]
-        for bid in stale:
+        dropped: List[Block] = []
+        for bid, b in stale:
+            dropped.append(b)
             del self.blocks[bid]
-        if stale:
-            self._publish_event("blocks_dropped", {"count": len(stale)})
-        return len(stale)
+        if dropped:
+            self._publish_event("blocks_dropped", {"count": len(dropped)})
+        return dropped
 
     def commit_blocks(self, new_blocks: List[Block]):
         for b in new_blocks:
