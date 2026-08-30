@@ -72,6 +72,11 @@ class Constraint(BaseModel):
     starts_at: str
     ends_at: str
     hardness: ConstraintHardness = "hard"
+    # P17-01: provenance for synced events, e.g. {"provider": "google",
+    # "event_id": "<real Google id>"}. This is how a calendar edit/delete
+    # reaches the RIGHT Google event: the internal constraint id is a local
+    # uuid, so the real id has to ride along or a delete/patch 404s.
+    source_ref: Optional[Dict[str, Any]] = None
     created_at: datetime = Field(default_factory=now_utc)
 
 BlockStatus = Literal["planned", "done", "partial", "missed", "cancelled"]

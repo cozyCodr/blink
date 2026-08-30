@@ -16,6 +16,10 @@ class ParsedCalendarEvent(NamedTuple):
     starts_at: datetime
     ends_at: datetime
     is_all_day: bool
+    # The provider's own event id (Google's event id), when the source has one.
+    # None for ICS/other sources. Carried so a synced event can be edited or
+    # deleted against the real provider id later (P17-01).
+    event_id: Optional[str] = None
 
 def _parse_ics_datetime(val: str) -> datetime:
     """Parses standard iCalendar date/datetime formats (e.g., 20260820T140000Z)."""
@@ -64,6 +68,12 @@ def events_to_constraints(
     """Converts parsed calendar events into Warden Constraint entities."""
     constraints: List[Constraint] = []
     for ev in events:
+        # Preserve the provider event id (Google's) so a later edit/delete
+        # reaches the real event, not the local uuid (P17-01).
+        source_ref = (
+            {"provider": "google", "event_id": ev.event_id}
+            if getattr(ev, "event_id", None) else None
+        )
         constraints.append(Constraint(
             id=str(uuid.uuid4()),
             workspace_id=workspace_id,
@@ -71,7 +81,8 @@ def events_to_constraints(
             kind="one_off",
             starts_at=ev.starts_at.isoformat(),
             ends_at=ev.ends_at.isoformat(),
-            hardness=hardness
+            hardness=hardness,
+            source_ref=source_ref,
         ))
     return constraints
 

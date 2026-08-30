@@ -285,8 +285,9 @@ def list_calendar_events(workspace_id: str, days: int = 7) -> Dict[str, Any]:
 
     These are the events synced from the user's connected Google Calendar. Use this to answer
     "what's on my calendar", "what's coming up", or to check real commitments before scheduling
-    near them. Times are the user's LOCAL wall-clock. An empty list means nothing is synced for
-    that window; never invent an event.
+    near them. Times are the user's LOCAL wall-clock. Each event carries an "id" you pass to
+    propose_edit_event / propose_delete_event to act on that specific event. An empty list means
+    nothing is synced for that window; never invent an event.
 
     Args:
         workspace_id: The workspace whose synced calendar to read.
@@ -311,7 +312,15 @@ def list_calendar_events(workspace_id: str, days: int = 7) -> Dict[str, Any]:
                 continue
             local_start = start.replace(tzinfo=timezone.utc).astimezone(tz)
             local_end = end.replace(tzinfo=timezone.utc).astimezone(tz)
+            # The handle the agent passes to propose_edit_event/propose_delete_event
+            # is the REAL Google event id (from the synced provenance), so a
+            # confirmed edit/delete lands on the actual event. Falls back to the
+            # local constraint id only when provenance is missing (never for a
+            # Google-synced event).
+            src = getattr(c, "source_ref", None) or {}
+            handle = src.get("event_id") or cid
             events.append({
+                "id": handle,
                 "title": c.title,
                 "start_local": local_start.isoformat(),
                 "end_local": local_end.isoformat(),

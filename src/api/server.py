@@ -53,6 +53,7 @@ from src.agent.triggers import (
 )
 from src.agent.reconcile import execute_evening_reconcile
 from src.agent import conversation
+from src.agent import agent_runtime
 from src.agent import decision_log
 from src.agent import push
 from src.agent import push_scheduler
@@ -1478,11 +1479,13 @@ def _turn(workspace_id: str, payload: TurnRequest,
         reply.setdefault("type", "message")
         return reply
 
-    if intent.label == "chat":
+    if intent.label in ("chat", "calendar"):
         # P9-00: deterministic routing decides WHERE the message goes, never
         # HOW the reply sounds. When the viewing guard fired, tell the model
         # what's actually happening on screen so the reply stays conversational
         # instead of collapsing into a canned line.
+        # P17-01: `calendar` (add/move/edit/delete/read a real Google Calendar
+        # event) shares the agent path with `chat`; the agent selects the tool.
         note = None
         if _VIEWING.search(message or ""):
             note = (
@@ -1493,7 +1496,16 @@ def _turn(workspace_id: str, payload: TurnRequest,
                 "so don't enumerate them, and never claim you scheduled or "
                 "changed anything."
             )
-        reply = conversation.respond(workspace_id, message, payload.history, context_note=note)
+        # P17-01: the general chat turn runs through the real ADK agent, so a
+        # message that wants a tool the deterministic specialists do not own
+        # (calendar create/edit/delete/move, capacity, list events) is served by
+        # the model selecting and invoking that tool the ADK way. A propose_*
+        # confirm surfaces as a confirm question and stops (the write happens
+        # only through the confirm endpoint on a yes); a plain answer is a
+        # message. When ADK / Gemini is unavailable it degrades to grounded chat,
+        # which never claims a calendar action.
+        reply = agent_runtime.run_chat_turn(
+            workspace_id, message, payload.history, context_note=note)
         reply.setdefault("type", "message")
         return reply
 

@@ -6278,6 +6278,47 @@
       eyes.emote("curious", 0);         // held until the answer submits (P7-03)
       surface.ask(question, function (value) {
         if (busy) { hint.pulse("One at a time, still thinking…"); return; }
+        // P17-01: a calendar confirm the agent surfaced through /turn commits
+        // its YES against the EXISTING confirm-gated write endpoint, carrying
+        // the pending action in question.config (action/event_id/summary/
+        // start/end). This is the only place the write actually lands; the
+        // generic /elicit/answer path below never touches the calendar. "Not
+        // now" (false) dismisses without writing, and no reply ever claims a
+        // calendar change that did not return success.
+        if (question.input_type === "confirm" &&
+            typeof question.field === "string" &&
+            question.field.indexOf("calendar_") === 0) {
+          if (value !== true) {                    // Not now
+            showEcho("Not now");
+            var skipLine = "Okay, I'll leave your calendar as it is.";
+            history.push({ role: "assistant", content: skipLine });
+            deliverReply(skipLine, onSpoken);
+            return;
+          }
+          showEcho("Yes");
+          agent.set("thinking");
+          surface.pending(startTurn());
+          beginRequest();
+          var writeBody = { confirm: true };
+          var cfg = question.config || {};
+          Object.keys(cfg).forEach(function (k) { writeBody[k] = cfg[k]; });
+          api("/calendar/events", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(writeBody),
+          }).then(function () {
+            var action = cfg.action || "";
+            var line = action === "delete" ? "Done, that's off your calendar now."
+                     : action === "edit"   ? "Done, I've updated that event."
+                     :                        "Done, it's on your calendar now.";
+            if (window.FocusRefresh) window.FocusRefresh();   // capacity changed
+            heldDispatch({ type: "message", text: line });
+          }).catch(function () {
+            heldDispatch({ type: "message",
+              text: "I couldn't reach your calendar to make that change, so nothing changed." });
+          });
+          return;
+        }
         showEcho(echoValue(value));
         agent.set("thinking");
         surface.pending(startTurn());

@@ -346,7 +346,8 @@ def google_event_to_parsed(ev: Dict[str, Any]) -> ParsedCalendarEvent:
         # Guard against zero/negative spans (e.g. malformed all-day of one day).
         end_dt = start_dt + timedelta(hours=1)
     return ParsedCalendarEvent(
-        title=title, starts_at=start_dt, ends_at=end_dt, is_all_day=all_day
+        title=title, starts_at=start_dt, ends_at=end_dt, is_all_day=all_day,
+        event_id=ev.get("id"),
     )
 
 

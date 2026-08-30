@@ -46,7 +46,7 @@ from src.agent.specialists.zone_teach import parse_taught_zone
 
 IntentLabel = Literal[
     "chat", "plan_goal", "concrete_tasks", "disruption", "checkin", "whatif",
-    "focus", "teach"
+    "focus", "teach", "calendar"
 ]
 
 
@@ -64,7 +64,10 @@ class Intent(BaseModel):
             "focus = the user wants to start working right now (start a timed "
             "focus session on the current or next planned block). "
             "teach = the user states a standing fact about their life with a "
-            "concrete time, for the agent to remember."
+            "concrete time, for the agent to remember. "
+            "calendar = the user wants to add, move, edit, delete, or read a real "
+            "Google Calendar event, or asks what's on their calendar / how much "
+            "free time they have."
         ),
     )
     reason: str = Field(description="One short sentence explaining the label.")
@@ -108,6 +111,15 @@ Classify the user's message into exactly one of these intents.
   "I sleep at 11", "remember I have gym at 6 on Tuesdays", "my mornings are
   for the gym". NOT teach: questions, one-off appointments (concrete_tasks),
   or facts with no time at all ("I like quiet" is chat).
+- calendar: the user wants to act on their REAL Google Calendar — add, move,
+  reschedule, edit, or delete an event on it, or read it. Examples: "add
+  dentist to my calendar tomorrow 3 to 4", "move my 3pm to 4pm", "remove my
+  dentist event", "delete the standup from my calendar", "what's on my
+  calendar", "how much free time do I have this week". This differs from
+  concrete_tasks (which captures internal to-do work to schedule into free
+  time): calendar means touching or reading the connected Google Calendar
+  itself. When the message clearly names the calendar or an existing event to
+  change, prefer calendar.
 
 When unsure, choose chat. Only pick plan_goal for a clear aspirational goal,
 only pick concrete_tasks for clearly schedulable tasks or an imperative command,
@@ -407,7 +419,7 @@ def classify_intent(text: str, use_llm: bool = True) -> Intent:
     user_content = (
         f"<message>\n{text.strip()}\n</message>\n\n"
         "Classify the preceding message as chat, plan_goal, concrete_tasks, "
-        "disruption, checkin, whatif, focus, or teach."
+        "disruption, checkin, whatif, focus, teach, or calendar."
     )
     try:
         # flash-lite (P9-06): routing runs on every turn and only picks a

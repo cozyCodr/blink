@@ -9,6 +9,9 @@ through the same tools. See .agents/rules/adk-standards.md.
 """
 from __future__ import annotations
 
+from typing import Any, Dict, Optional
+
+from src.agent import llm
 from src.agent.voice import PERSONA, VOICE_RULES
 from src.agent.tools import ALL_TOOLS
 from src.agent.llm import MODEL_FLASH
@@ -25,6 +28,55 @@ except ImportError:  # pragma: no cover - offline fallback
                 setattr(self, k, v)
 
 
+def _block_unconfirmed_writes(
+    tool: Any, args: Dict[str, Any], tool_context: Any
+) -> Optional[Dict[str, Any]]:
+    """ADK before_tool_callback: STRUCTURALLY enforce the confirm-gate.
+
+    P17-01: a `*_confirmed` tool writes to the user's real Google Calendar, so
+    it must never run inside an agent turn — the agent surfaces a `propose_*`
+    confirm question and STOPS, and the write happens only through the separate
+    confirm endpoint after an explicit "yes". Returning a dict here short-circuits
+    the tool (ADK never invokes it) with an honest error, so no reasoning slip or
+    prompt injection can make the model fabricate a "yes" and write in one turn.
+    The instruction says the same thing; this is the belt to that suspenders.
+    """
+    name = getattr(tool, "name", "") or ""
+    if name.endswith("_confirmed"):
+        return {
+            "status": "error",
+            "error_message": (
+                "Blocked: writing to the calendar needs an explicit user 'yes' "
+                "through the confirm step. Surface the propose_* confirm question "
+                "and stop; never call a *_confirmed tool in the same turn."
+            ),
+        }
+    return None
+
+
+def _orchestrator_generate_config():
+    """temperature 1.0 + the chat-tier thinking budget, or None offline.
+
+    gemini-config.md: Gemini 3.x keeps temperature at 1.0. The thinking level
+    comes from the active profile's chat/tool-routing step (STEP_CHAT_RESPOND),
+    which is flash/low in BOTH the fast and deep profiles — the agent's turn is
+    a conversational, tool-selecting turn, and deep mode makes Blink decide
+    better, never talk slower. None on an SDK without the types, so the agent
+    falls back to model defaults rather than exploding at import.
+    """
+    try:
+        from google.genai import types
+        _model, level = llm.step_profile(llm.STEP_CHAT_RESPOND, mode=llm.MODE_FAST)
+        return types.GenerateContentConfig(
+            temperature=1.0,
+            thinking_config=types.ThinkingConfig(
+                thinking_level=llm._effective_thinking_level(level, MODEL_FLASH)
+            ),
+        )
+    except Exception:  # pragma: no cover - offline / older SDK
+        return None
+
+
 ORCHESTRATOR_INSTRUCTION = f"""{PERSONA}
 
 How you work:
@@ -39,6 +91,18 @@ How you work:
 - Silence is a valid output. If nothing is at risk, say so briefly or say nothing.
 - Degrade cleanly. If data is missing, plan what you safely can and name the gap. Never invent.
 
+Calendar writes are two-phase and gated. To add, move, edit, or delete a real
+calendar event, call the matching propose_ tool (propose_create_event,
+propose_edit_event, propose_delete_event). That returns a confirm question for
+the user; surface it and STOP. NEVER call a _confirmed tool in the same turn,
+and never before the user has said yes. Reading the calendar
+(list_calendar_events) never needs a confirm. Only report a calendar change as
+done when a _confirmed tool actually returned status success; if you only
+proposed it, say you are asking first, not that it is done.
+
+Pass workspace_id to every tool call. The current workspace_id is given to you
+in the context block of each turn.
+
 {VOICE_RULES}"""
 
 root_agent = LlmAgent(
@@ -50,4 +114,8 @@ root_agent = LlmAgent(
     ),
     instruction=ORCHESTRATOR_INSTRUCTION,
     tools=ALL_TOOLS,
+    generate_content_config=_orchestrator_generate_config(),
+    # Structural confirm-gate: a *_confirmed calendar write can never run inside
+    # an agent turn (P17-01). The write happens only through the confirm endpoint.
+    before_tool_callback=_block_unconfirmed_writes,
 )
