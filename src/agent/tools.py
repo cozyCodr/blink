@@ -772,14 +772,19 @@ def reschedule_confirmed(workspace_id: str, token: str) -> Dict[str, Any]:
     explicit yes to propose_reschedule, with the token from that confirm's config.
 
     It replays the single-use batch: cancels the old missed / past-due blocks and
-    commits the new placements into Blink's plan. It performs ZERO Google Calendar
-    work — the moved blocks stay calendar-unmirrored. Returns the REAL counts
-    (`moved`, `cancelled`) so the reply is built only from what actually changed.
+    commits the new placements into Blink's plan, then mirrors the change onto
+    Google Calendar best-effort (delete the old sessions' events, create events
+    for the new placements — cancel before create). The calendar mirror is
+    best-effort: if the calendar is not connected or a write fails, the plan move
+    still stands and the calendar counts simply reflect what actually landed.
+    Returns the REAL counts — `moved`, `cancelled`, and the separate calendar
+    truths `calendar_created` / `calendar_deleted` / `calendar_failures` — so the
+    reply is built only from what actually changed, never from intent.
 
     The token is single-use and short-lived: an unknown, already-used, or expired
     token returns an honest error (rescheduled false), never a fabricated move.
-    Compose the reply as a PLAN change only ("moved N in your plan"), never as a
-    calendar change.
+    Compose the reply as TWO separate truths — the plan move and the calendar
+    result — and never claim a calendar change that did not happen.
 
     Args:
         workspace_id: The workspace the reschedule belongs to.
@@ -818,15 +823,36 @@ def reschedule_confirmed(workspace_id: str, token: str) -> Dict[str, Any]:
             )
             for nb in batch.get("new_blocks", [])
         ]
-        # Cancel-before-commit ordering: the old session is retired first so a
-        # moved task never briefly holds two live blocks.
-        cancelled = store.cancel_blocks(batch.get("old_block_ids", []))
+        # Local import avoids a module-load cycle: calendar_mirror imports
+        # _session_title from this module.
+        from src.api.calendar_mirror import mirror_cancel, mirror_commit
+
+        old_ids = batch.get("old_block_ids", [])
+        # Cancel-before-create ordering, calendar included: delete the OLD
+        # sessions' Google Calendar events BEFORE the new placements land (and
+        # before their events are created), so a moved task never briefly holds
+        # two live events. The old blocks still live in the store (cancel_blocks
+        # only marks status), so the mirror can still read their gcal_event_id.
+        #
+        # Best-effort throughout: mirror_cancel / mirror_commit swallow
+        # CalendarUnavailable internally, so a calendar failure NEVER aborts or
+        # raises out of the plan move. The plan commit below is the load-bearing
+        # truth; the calendar mirror is a second, separately-reported truth.
+        cancel_mirror = mirror_cancel(store, workspace_id, old_ids)
+        cancelled = store.cancel_blocks(old_ids)
         store.commit_blocks(new_blocks)
+        commit_mirror = mirror_commit(store, workspace_id, new_blocks)
         return {
             "status": "success",
             "rescheduled": True,
             "moved": len(new_blocks),
             "cancelled": cancelled,
+            # Two separate truths, from the REAL mirror counts (never intent):
+            # what actually changed on Google Calendar, so the endpoint composes
+            # a reply that claims only what happened.
+            "calendar_created": cancel_mirror.created + commit_mirror.created,
+            "calendar_deleted": cancel_mirror.deleted + commit_mirror.deleted,
+            "calendar_failures": len(cancel_mirror.failures) + len(commit_mirror.failures),
         }
     except Exception as e:  # pragma: no cover - defensive
         return {"status": "error", "error_message": str(e)}

@@ -2798,10 +2798,13 @@ def reschedule_endpoint(workspace_id: str, payload: RescheduleRequest):
     honest 'nothing to do' message); with `confirm=true` and the token it applies
     the move and answers with the REAL counts.
 
-    Store-only (P19-03): this never touches Google Calendar, so the reply speaks
-    only of the plan — "Moved N sessions in your plan." — never a calendar
-    change. A stale/expired/used token degrades to an honest line, never a
-    fabricated success."""
+    Calendar mirror (P19-05): a confirmed reschedule best-effort rewrites Google
+    Calendar — deletes the old sessions' events and creates the new placements.
+    The reply is composed as TWO separate truths from REAL counts: the plan move
+    and the calendar result. When no calendar is connected the mirror no-ops and
+    the reply speaks only of the plan; a partial calendar failure reports only
+    what actually landed. A stale/expired/used token degrades to an honest line,
+    never a fabricated success."""
     get_or_create_store(workspace_id)  # ensure the workspace exists
 
     if not payload.confirm:
@@ -2819,16 +2822,45 @@ def reschedule_endpoint(workspace_id: str, payload: RescheduleRequest):
         }
     moved = int(result.get("moved", 0))
     sess = "session" if moved == 1 else "sessions"
+    # Two separate truths, both from REAL returned counts (P19-05): the plan move
+    # above, and what the calendar mirror ACTUALLY did below. We never claim a
+    # calendar change that did not happen (agent-governance: degrade-never-
+    # fabricate). `landed` = events successfully created on the calendar (the new
+    # sessions the user will see); `failed` > 0 means some writes didn't go through.
+    landed = int(result.get("calendar_created", 0))
+    deleted = int(result.get("calendar_deleted", 0))
+    failed = int(result.get("calendar_failures", 0))
+    attempted = landed > 0 or deleted > 0 or failed > 0
+
     if moved == 0:
         text = "Nothing moved — those sessions couldn't be re-placed. Ask me to try again."
-    else:
+    elif not attempted:
+        # No calendar connected / no scope: the mirror no-opped. Plan-only truth,
+        # with NO calendar claim.
         text = f"Moved {moved} {sess} in your plan."
+        text = conversation.naturalize_outcome(text, [str(moved)])
+    elif failed == 0:
+        # The calendar fully caught up with the plan move.
+        text = f"Moved {moved} {sess} in your plan, and updated your calendar."
+        text = conversation.naturalize_outcome(text, [str(moved)])
+    elif landed > 0:
+        # Partial: some calendar writes landed, some failed. Say only what landed.
+        text = (f"Moved {moved} {sess} in your plan. Updated {landed} on your "
+                f"calendar; I'll retry the rest.")
+        text = conversation.naturalize_outcome(text, [str(moved), str(landed)])
+    else:
+        # Every calendar write failed. The plan move stands; claim no calendar change.
+        text = (f"Moved {moved} {sess} in your plan. I couldn't update your "
+                f"calendar; I'll retry.")
         text = conversation.naturalize_outcome(text, [str(moved)])
     return {
         "type": "replanned",
         "text": text,
         "moved": moved,
         "cancelled": int(result.get("cancelled", 0)),
+        "calendar_created": landed,
+        "calendar_deleted": deleted,
+        "calendar_failures": failed,
     }
 
 
