@@ -41,6 +41,10 @@ struct AppRoot: View {
         #if DEBUG
         if UserDefaults.standard.bool(forKey: "blinkDebugSignInStates") {
             DebugSignInStatesScreen()
+        } else if let planVariant = UserDefaults.standard.string(forKey: "blinkDebugPlan") {
+            // P18-01: the native plan surface against hand-built sample data, so
+            // the Day, Week and empty states can be inspected without a login.
+            DebugPlanRehearsalScreen(variant: planVariant)
         } else if let workspace = UserDefaults.standard.string(forKey: "blinkDebugWorkspace"),
                   !workspace.hasPrefix("u_") {
             // S1 against a GUEST workspace on a local server.

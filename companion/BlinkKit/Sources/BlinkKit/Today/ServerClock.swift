@@ -66,6 +66,36 @@ public struct ServerClock: Sendable, Equatable {
     /// The user's current local hour.
     public var localHourNow: Int { localHour(of: now) }
 
+    /// Minutes since local midnight, 0 to 1439, in the user's zone. The plan's
+    /// vertical timeline maps a block to a position with this, so it lands on
+    /// the same hour the clock time reads (`clockTime`) — one zone, one answer.
+    public func localMinuteOfDay(of instant: Date) -> Int {
+        let c = calendar.dateComponents([.hour, .minute], from: instant)
+        return (c.hour ?? 0) * 60 + (c.minute ?? 0)
+    }
+
+    /// The user's current minute-of-day, for the now-line.
+    public var localMinuteOfDayNow: Int { localMinuteOfDay(of: now) }
+
+    /// The short weekday and day-of-month for a `YYYY-MM-DD` the server
+    /// published, read in the user's zone so the plan's day headers agree with
+    /// every clock time on the same screen. A string the server did not shape
+    /// as a date returns empty rather than a guessed one.
+    public func calendarDay(from day: String) -> (weekdayShort: String, dayNumber: Int) {
+        let parser = DateFormatter()
+        parser.calendar = Calendar(identifier: .gregorian)
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.timeZone = timeZone
+        parser.dateFormat = "yyyy-MM-dd"
+        guard let date = parser.date(from: day) else { return ("", 0) }
+        let dayNumber = calendar.component(.day, from: date)
+        let label = DateFormatter()
+        label.timeZone = timeZone
+        label.locale = .autoupdatingCurrent
+        label.setLocalizedDateFormatFromTemplate("EEE")
+        return (label.string(from: date).uppercased(), dayNumber)
+    }
+
     // MARK: Formatting
 
     /// A clock time in the user's zone, e.g. "9:41 AM".

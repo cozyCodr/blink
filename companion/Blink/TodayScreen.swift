@@ -27,7 +27,6 @@ import BlinkKit
 // BlinkKit/Today/RecordedOutcome.swift.
 struct TodayScreen: View {
     @Environment(\.face) private var face
-    @Environment(\.openURL) private var openURL
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @Environment(FaceProvider.self) private var faces
@@ -64,6 +63,11 @@ struct TodayScreen: View {
     /// return from sign-in; this is the same event, worn visually.
     @State private var greetingShowing = true
     @State private var showingSettings = false
+    /// P18-01: the native plan surface (Day + Week). Reached from the timeline
+    /// door in the top bar, from "See your week", and raised automatically the
+    /// moment a plan with placed blocks lands. Viewing the plan never leaves
+    /// the app any more.
+    @State private var showingPlan = false
 
     init(
         identity: BlinkIdentity,
@@ -257,6 +261,18 @@ struct TodayScreen: View {
                 .environment(faces)
                 .face(face)
         }
+        // P18-01: the plan, native, rising over the paper the way the web's
+        // horizon rises into the space the eyes vacate.
+        .sheet(isPresented: $showingPlan) {
+            PlanScreen(plan: store.plan)
+                .environment(faces)
+                .face(face)
+        }
+        // A plan with placed blocks just landed: show it, once per landing.
+        .onChange(of: composer.planLandings) { _, _ in
+            retireGreeting()
+            showingPlan = true
+        }
     }
 
     // MARK: The greeting
@@ -320,7 +336,8 @@ struct TodayScreen: View {
                     Text("Nothing planned for today, and that is allowed.")
                         .font(face.bodyFont)
                         .foregroundStyle(face.ink)
-                    webButton("See your week", prominent: false)
+                    // P18-01: the week is native now. This used to open the web.
+                    planButton("See your week")
                 }
 
             case .nextSession(let session):
@@ -717,26 +734,28 @@ struct TodayScreen: View {
         return formatter.string(from: instant)
     }
 
-    // MARK: Out to the web
+    // MARK: Into the plan (native, P18-01)
 
-    private func webButton(_ title: String, prominent: Bool) -> some View {
+    /// The outline button that opens the native plan. Replaces the old
+    /// "See your week" web door on the nothing-planned card.
+    private func planButton(_ title: String) -> some View {
         Button {
-            openURL(BlinkAPI.baseURL())
+            showingPlan = true
         } label: {
             Text(title)
                 .font(face.bodyFont)
-                .foregroundStyle(prominent ? face.ground : face.accent)
+                .foregroundStyle(face.accent)
                 .frame(maxWidth: .infinity, minHeight: face.layout.minTapTarget)
                 .background(
                     RoundedRectangle(cornerRadius: face.cornerStyle.nominalRadius, style: .continuous)
-                        .fill(prominent ? face.accent : Color.clear)
+                        .fill(Color.clear)
                         .overlay(
                             RoundedRectangle(cornerRadius: face.cornerStyle.nominalRadius, style: .continuous)
-                                .stroke(prominent ? Color.clear : face.line, lineWidth: 1)
-                        )
+                                .stroke(face.line, lineWidth: 1))
                 )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("See your plan")
     }
 
     // MARK: Chrome
@@ -788,6 +807,23 @@ struct TodayScreen: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Settings")
                 Spacer()
+                // P18-01: the always-there door into the native plan. The web's
+                // peek handle, worn as a quiet glyph up here where it cannot
+                // collide with the compose bar at the bottom.
+                Button {
+                    retireGreeting()
+                    showingPlan = true
+                } label: {
+                    Image(systemName: "calendar.day.timeline.left")
+                        .font(face.bodyFont)
+                        .foregroundStyle(face.faint)
+                        .frame(width: face.layout.minTapTarget,
+                               height: face.layout.minTapTarget,
+                               alignment: .topTrailing)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("See your plan")
             }
             Spacer()
         }

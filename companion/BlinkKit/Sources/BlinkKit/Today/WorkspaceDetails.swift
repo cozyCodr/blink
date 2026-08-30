@@ -89,11 +89,95 @@ public struct TaskPayload: Codable, Sendable, Equatable, Identifiable {
         case commitmentID = "commitment_id"
         case title
     }
+
+    /// Memberwise, for the cache round trip and for tests.
+    public init(id: String, commitmentID: String, title: String) {
+        self.id = id
+        self.commitmentID = commitmentID
+        self.title = title
+    }
 }
 
 public struct CommitmentPayload: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let title: String
+
+    /// Memberwise, for the cache round trip and for tests.
+    public init(id: String, title: String) {
+        self.id = id
+        self.title = title
+    }
+}
+
+/// One free stretch inside a ledger day, `src/api/server.py:437-439`.
+/// Both bounds are naive UTC, read through `ServerClock` like every other date.
+public struct FreeWindowPayload: Codable, Sendable, Equatable {
+    /// Naive UTC.
+    public let start: Date
+    /// Naive UTC.
+    public let end: Date
+
+    public init(start: Date, end: Date) {
+        self.start = start
+        self.end = end
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        start = try ServerClock.date(from: c.decode(String.self, forKey: .start))
+        end = try ServerClock.date(from: c.decode(String.self, forKey: .end))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(ServerClock.string(from: start), forKey: .start)
+        try c.encode(ServerClock.string(from: end), forKey: .end)
+    }
+
+    enum CodingKeys: String, CodingKey { case start, end }
+
+    /// The span in minutes. Arithmetic, not judgement.
+    public var minutes: Int { max(0, Int(end.timeIntervalSince(start) / 60)) }
+}
+
+/// One day of the capacity ledger, `src/api/server.py:429-443`. The plan view
+/// reads two fields off it: the `available` free minutes and the `free_windows`
+/// it published, which draw the "open water" the day still has. The other four
+/// (`gross`, `constrained`, `calendar`, `reserve`) are deliberately left on the
+/// wire — the plan does not draw them, so it does not decode them.
+public struct LedgerDayPayload: Codable, Sendable, Equatable, Identifiable {
+    public var id: String { date }
+    /// The user's local calendar day, `YYYY-MM-DD`.
+    public let date: String
+    /// Free minutes the ledger computed for this day, BEFORE placement. The
+    /// plan never quotes this beside a full run — see `PlanDay.openMinutes`.
+    public let available: Int?
+    public let freeWindows: [FreeWindowPayload]
+
+    enum CodingKeys: String, CodingKey {
+        case date, available
+        case freeWindows = "free_windows"
+    }
+
+    public init(date: String, available: Int?, freeWindows: [FreeWindowPayload]) {
+        self.date = date
+        self.available = available
+        self.freeWindows = freeWindows
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        date = try c.decode(String.self, forKey: .date)
+        available = try c.decodeIfPresent(Int.self, forKey: .available)
+        freeWindows = try c.decodeIfPresent([FreeWindowPayload].self, forKey: .freeWindows) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(date, forKey: .date)
+        try c.encodeIfPresent(available, forKey: .available)
+        try c.encode(freeWindows, forKey: .freeWindows)
+    }
 }
 
 /// The details bundle, as far as S1 is concerned.
@@ -116,10 +200,15 @@ public struct WorkspaceDetails: Codable, Sendable, Equatable {
     public let blocks: [BlockPayload]
     public let tasks: [TaskPayload]
     public let commitments: [CommitmentPayload]
+    /// The capacity ledger, one entry per day the server planned over. The plan
+    /// view reads its free windows as "open water"; every other screen ignores
+    /// it. Empty until the server has answered with a real plan.
+    public let ledgerDays: [LedgerDayPayload]
 
     enum CodingKeys: String, CodingKey {
         case workspaceID = "workspace_id"
         case today, now, timezone, streak, onboarded, blocks, tasks, commitments
+        case ledgerDays = "ledger_days"
     }
 
     public init(from decoder: Decoder) throws {
@@ -133,6 +222,7 @@ public struct WorkspaceDetails: Codable, Sendable, Equatable {
         blocks = try c.decodeIfPresent([BlockPayload].self, forKey: .blocks) ?? []
         tasks = try c.decodeIfPresent([TaskPayload].self, forKey: .tasks) ?? []
         commitments = try c.decodeIfPresent([CommitmentPayload].self, forKey: .commitments) ?? []
+        ledgerDays = try c.decodeIfPresent([LedgerDayPayload].self, forKey: .ledgerDays) ?? []
     }
 
     /// Memberwise, for the cache's own round trip and for tests. Encoding is
@@ -146,7 +236,8 @@ public struct WorkspaceDetails: Codable, Sendable, Equatable {
         onboarded: Bool,
         blocks: [BlockPayload],
         tasks: [TaskPayload],
-        commitments: [CommitmentPayload]
+        commitments: [CommitmentPayload],
+        ledgerDays: [LedgerDayPayload] = []
     ) {
         self.workspaceID = workspaceID
         self.today = today
@@ -157,6 +248,7 @@ public struct WorkspaceDetails: Codable, Sendable, Equatable {
         self.blocks = blocks
         self.tasks = tasks
         self.commitments = commitments
+        self.ledgerDays = ledgerDays
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -170,6 +262,7 @@ public struct WorkspaceDetails: Codable, Sendable, Equatable {
         try c.encode(blocks, forKey: .blocks)
         try c.encode(tasks, forKey: .tasks)
         try c.encode(commitments, forKey: .commitments)
+        try c.encode(ledgerDays, forKey: .ledgerDays)
     }
 
     // MARK: Joins

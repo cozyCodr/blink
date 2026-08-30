@@ -43,6 +43,10 @@ public final class PlanComposer {
     public private(set) var needsSignIn = false
     /// The first placed plan of this session, not yet shown. See `consumeHeart`.
     public private(set) var heartPending = false
+    /// Bumps every time a plan with placed blocks lands, so Today can raise the
+    /// native plan surface on it (P18-01). A counter, not a flag: two plans in
+    /// a row are two openings, and a plain re-read never moves it.
+    public private(set) var planLandings = 0
 
     // MARK: Configuration
 
@@ -158,9 +162,13 @@ public final class PlanComposer {
             elicit = nil
             // Grounded: the server's own count of placed blocks, first time
             // this session. Never recomputed here.
-            if !heartFired, (res.blocksScheduled ?? 0) > 0 {
-                heartFired = true
-                heartPending = true
+            if (res.blocksScheduled ?? 0) > 0 {
+                if !heartFired {
+                    heartFired = true
+                    heartPending = true
+                }
+                // Every landed plan raises the plan surface, not just the first.
+                planLandings += 1
             }
             await onPlanChanged?()
 

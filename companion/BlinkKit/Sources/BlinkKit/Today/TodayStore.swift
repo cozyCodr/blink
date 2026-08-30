@@ -28,6 +28,10 @@ public final class TodayStore {
     // MARK: What the screen reads
 
     public private(set) var state: TodayState?
+    /// The whole plan (Day + Week), for the native plan surface (P18-01).
+    /// Derived from the SAME payload `state` is, at the same three moments, so
+    /// the plan a person peeks at is never a different truth than Today's card.
+    public private(set) var plan: PlanModel?
     public private(set) var freshness: Freshness = .nothing
     /// A request is genuinely in flight. The eyes may think while this is
     /// true, and only while it is true.
@@ -104,6 +108,7 @@ public final class TodayStore {
         if state == nil, let cached = cache.load(workspaceID: session.workspaceID) {
             details = cached.details
             state = TodayState(details: cached.details)
+            plan = PlanModel(details: cached.details)
             freshness = .cached(receivedAt: cached.receivedAt)
             // Deliberately NOT celebrating off the cache. A cached payload is
             // not a server response arriving; it is what we already knew.
@@ -125,6 +130,7 @@ public final class TodayStore {
             let hadSomethingBefore = details != nil
             details = fresh
             state = TodayState(details: fresh)
+            plan = PlanModel(details: fresh)
             freshness = .live
             planFingerprint = TodayStore.fingerprint(of: fresh)
             cache.save(fresh, receivedAt: receivedAt, workspaceID: session.workspaceID)
@@ -153,6 +159,7 @@ public final class TodayStore {
             if state == nil {
                 details = cached.details
                 state = TodayState(details: cached.details)
+                plan = PlanModel(details: cached.details)
                 markAllSeen(in: cached.details)
             }
             freshness = .cached(receivedAt: cached.receivedAt)
