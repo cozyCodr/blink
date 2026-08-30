@@ -191,10 +191,17 @@ struct PlanScreen: View {
     /// Only the marks the levels can actually draw, named out loud. The web's
     /// rule: the legend can never promise a mark that is not on the canvas.
     private var legend: some View {
-        HStack(spacing: face.layout.rowGap) {
+        // One word each so the row stays even (the honest "told me about" now
+        // reads "Reported": the timer MEASURED it, or you REPORTED it). Evenly
+        // distributed and never wrapping, so the key sits calm at the foot of
+        // the plan (user, 2026-08-30).
+        HStack(spacing: 0) {
             legendMark(PlanFillSwatch(kind: .measured, face: face), "Measured")
-            legendMark(PlanFillSwatch(kind: .reported, face: face), "Told me about")
+            Spacer(minLength: face.layout.rowGap)
+            legendMark(PlanFillSwatch(kind: .reported, face: face), "Reported")
+            Spacer(minLength: face.layout.rowGap)
             legendMark(PlanFillSwatch(kind: .planned, face: face), "Planned")
+            Spacer(minLength: face.layout.rowGap)
             legendMark(
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
                     .fill(face.accent.opacity(0.16))
@@ -203,13 +210,15 @@ struct PlanScreen: View {
         .font(face.metaFont)
         .foregroundStyle(face.faint)
         .frame(maxWidth: .infinity)
-        .padding(.top, 2)
+        .padding(.top, face.layout.rowGap)
     }
 
     private func legendMark<Swatch: View>(_ swatch: Swatch, _ label: String) -> some View {
         HStack(spacing: 5) {
             swatch
             Text(label)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(label)
