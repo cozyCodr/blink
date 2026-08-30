@@ -56,7 +56,15 @@ public enum TodayCard: Equatable, Sendable {
     /// "work done" would claim an outcome nobody recorded, so it gets its own
     /// honest line instead.
     case endedAwaitingCheckIn([PendingBlock])
-    /// Today had blocks, every one of them is answered, none are left.
+    /// Today had planned work and at least one block ended without getting
+    /// done — it was already logged `missed`. Nothing is running, nothing is
+    /// ahead, and nothing is waiting on a check-in, so the misses are settled;
+    /// this is not a re-ask. But they did not happen, and calling the day
+    /// "work done" over them is the exact false-"done" the governance rules
+    /// forbid. So the misses get named honestly, with an offer to move them.
+    case missedToday([PendingBlock])
+    /// Today had blocks and every one of them is done or partial — nothing was
+    /// missed, nothing is left. The only case that may say "work done".
     case workDone
 }
 
@@ -172,12 +180,36 @@ public struct TodayState: Equatable, Sendable {
                 )
             }
 
-        if pending.isEmpty {
+        if !pending.isEmpty {
+            return clock.localHourNow >= checkInHour
+                ? .checkIn(pending)
+                : .endedAwaitingCheckIn(pending)
+        }
+
+        // Nothing is running, nothing is ahead, nothing is awaiting a
+        // check-in — so every remaining today block is already resolved:
+        // done, partial, or missed (cancelled were filtered out at the top).
+        //
+        // "Work done" may ONLY be said when they are ALL done or partial. A
+        // single `missed` block did NOT get done: it dropped out of `pending`
+        // (which is `planned` only) the moment it was logged missed, and
+        // reading that empty `pending` as "done" is the "work done over a
+        // miss" lie the user hit on their phone. Misses get truth, not a false
+        // "done" (.agents/rules/agent-governance.md).
+        let missed = todays
+            .filter { $0.status == .missed }
+            .map {
+                PendingBlock(
+                    id: $0.id,
+                    title: details.task(for: $0)?.title,
+                    endedAt: $0.endsAt,
+                    plannedMinutes: $0.plannedMinutes
+                )
+            }
+        if missed.isEmpty {
             return .workDone
         }
-        return clock.localHourNow >= checkInHour
-            ? .checkIn(pending)
-            : .endedAwaitingCheckIn(pending)
+        return .missedToday(missed)
     }
 
     private static func makeCard(_ block: BlockPayload, details: WorkspaceDetails) -> SessionCard {

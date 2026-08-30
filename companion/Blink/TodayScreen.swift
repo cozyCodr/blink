@@ -441,6 +441,24 @@ struct TodayScreen: View {
                     }
                 }
 
+            case .missedToday(let missed):
+                surface {
+                    // No "work done" over a miss (agent-governance.md). Name
+                    // what did not happen, plainly and without shame, and offer
+                    // the one useful next move: put it back on the calendar.
+                    Text(missed.count == 1
+                         ? "You didn't get to one session today. Want me to move it to later?"
+                         : "You didn't get to \(missed.count) sessions today. Want me to move them to later?")
+                        .font(face.bodyFont)
+                        .foregroundStyle(face.ink)
+                    ForEach(missed) { block in
+                        Text(block.title ?? "One session")
+                            .font(face.secondaryFont)
+                            .foregroundStyle(face.muted)
+                    }
+                    rescheduleMissedButton
+                }
+
             case .workDone:
                 surface {
                     Text("That's today's work done.")
@@ -833,6 +851,34 @@ struct TodayScreen: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("See your plan")
+    }
+
+    /// Starts a reschedule for today's missed sessions by asking the agent, in
+    /// plain words, through the SAME /turn path the compose field uses. This is
+    /// the only place the copy "moves" anything: the button does not write a
+    /// plan itself, it hands the request to Blink, which routes it into the
+    /// reschedule intent the backend supports (P19-02/03) and lands the new
+    /// plan back through `store.refresh()`.
+    private var rescheduleMissedButton: some View {
+        Button {
+            retireGreeting()
+            Task { await composer.sendMessage("Reschedule the sessions I missed today") }
+        } label: {
+            Text("Move them to later")
+                .font(face.bodyFont)
+                .foregroundStyle(face.accent)
+                .frame(maxWidth: .infinity, minHeight: face.layout.minTapTarget)
+                .background(
+                    RoundedRectangle(cornerRadius: face.cornerStyle.nominalRadius, style: .continuous)
+                        .fill(Color.clear)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: face.cornerStyle.nominalRadius, style: .continuous)
+                                .stroke(face.line, lineWidth: 1))
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(composer.isSending)
+        .accessibilityLabel("Move the sessions you missed today to later")
     }
 
     // MARK: The hands-free check-in (P18-04b)

@@ -12,7 +12,8 @@ let package = Package(
         .library(name: "BlinkKit", targets: ["BlinkKit"])
     ],
     targets: [
-        .target(name: "BlinkKit")
+        .target(name: "BlinkKit"),
+        .testTarget(name: "BlinkKitTests", dependencies: ["BlinkKit"])
     ],
     // Language mode 5, matching the app target. Moving BlinkKit to strict
     // Swift 6 concurrency is a deliberate step, not something to inherit by
