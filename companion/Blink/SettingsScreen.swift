@@ -29,6 +29,14 @@ struct SettingsScreen: View {
     /// (UserDefaults; AgentVoice re-reads it per utterance).
     @AppStorage(AgentVoice.storageKey) private var voiceEnabled = false
 
+    // DEBUG-only rehearsal doors, moved here off the main Today screen (user,
+    // 2026-08-30): developer tools, not something a person using Blink should
+    // see. Absent entirely from a Release build.
+    #if DEBUG
+    @State private var showingBeats = false
+    @State private var showingSignals = false
+    #endif
+
     var body: some View {
         ZStack {
             face.ground.ignoresSafeArea()
@@ -41,6 +49,9 @@ struct SettingsScreen: View {
                     voiceSection
                     account
                     links
+                    #if DEBUG
+                    developerSection
+                    #endif
                 }
                 .padding(face.layout.screenMargin)
             }
@@ -52,7 +63,38 @@ struct SettingsScreen: View {
                 onSignedOut()
             }
         }
+        #if DEBUG
+        .sheet(isPresented: $showingBeats) {
+            DebugEmotionRehearsalScreen()
+                .environment(faces)
+                .face(face)
+        }
+        .sheet(isPresented: $showingSignals) {
+            DebugSignalRehearsalScreen(session: session)
+                .face(face)
+        }
+        #endif
     }
+
+    #if DEBUG
+    /// The emotion-beat and signal rehearsal screens, reachable only from here
+    /// in a DEBUG build. They used to sit on the Today screen's top bar; a
+    /// person testing Blink should never see them, so they moved behind
+    /// Settings and vanish from Release entirely.
+    private var developerSection: some View {
+        VStack(alignment: .leading, spacing: face.layout.rowGap) {
+            sectionLabel("DEVELOPER")
+            Button("Emotion beats") { showingBeats = true }
+                .font(face.bodyFont)
+                .foregroundStyle(face.accent)
+                .frame(minHeight: face.layout.minTapTarget, alignment: .leading)
+            Button("Signal rehearsal") { showingSignals = true }
+                .font(face.bodyFont)
+                .foregroundStyle(face.accent)
+                .frame(minHeight: face.layout.minTapTarget, alignment: .leading)
+        }
+    }
+    #endif
 
     private var header: some View {
         HStack {

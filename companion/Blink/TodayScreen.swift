@@ -64,10 +64,6 @@ struct TodayScreen: View {
     /// return from sign-in; this is the same event, worn visually.
     @State private var greetingShowing = true
     @State private var showingSettings = false
-    @State private var showingRehearsal = false
-    #if DEBUG
-    @State private var showingSignals = false
-    #endif
 
     init(
         identity: BlinkIdentity,
@@ -261,17 +257,6 @@ struct TodayScreen: View {
                 .environment(faces)
                 .face(face)
         }
-        #if DEBUG
-        .sheet(isPresented: $showingRehearsal) {
-            DebugEmotionRehearsalScreen()
-                .environment(faces)
-                .face(face)
-        }
-        .sheet(isPresented: $showingSignals) {
-            DebugSignalRehearsalScreen(session: session)
-                .face(face)
-        }
-        #endif
     }
 
     // MARK: The greeting
@@ -794,19 +779,15 @@ struct TodayScreen: View {
                         .frame(width: face.layout.minTapTarget,
                                height: face.layout.minTapTarget,
                                alignment: .topLeading)
+                        // Without this, only the gear's thin strokes are
+                        // hittable, not the 44pt frame — the "incredibly hard
+                        // to tap Settings" report (2026-08-30). Rectangle makes
+                        // the whole minTapTarget square the touch area.
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Settings")
                 Spacer()
-                #if DEBUG
-                Button("beats") { showingRehearsal = true }
-                    .font(face.metaFont)
-                    .foregroundStyle(face.faint)
-                Button("signals") { showingSignals = true }
-                    .font(face.metaFont)
-                    .foregroundStyle(face.faint)
-                    .padding(.leading, face.layout.tightGap)
-                #endif
             }
             Spacer()
         }

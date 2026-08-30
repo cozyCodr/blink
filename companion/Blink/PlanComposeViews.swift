@@ -108,39 +108,41 @@ struct PlanComposeField: View {
         .accessibilityLabel("Send to Blink")
     }
 
-    /// HOLD to record (a zero-distance drag is the hold, exactly what the
-    /// web's pointerdown/pointerup pair is); release settles the transcript
-    /// into the field for review. A hold while denied explains once.
+    /// TAP to start listening, tap again to stop. Hands-free, so you are not
+    /// pinning a small button down the whole time you talk — the hold gesture
+    /// that preceded this was awkward on a phone (user, 2026-08-30). The
+    /// transcript streams into the draft live and settles there for review on
+    /// stop. A tap while denied explains once, then stays quiet. A light haptic
+    /// marks each start and stop so the toggle feels definite without looking.
     private func micButton(_ voice: VoiceCapture) -> some View {
-        Image(systemName: isListening ? "waveform" : "mic")
-            .font(face.bodyFont.weight(.semibold))
-            .foregroundStyle(isListening ? face.ground : face.accent)
-            .frame(width: face.layout.minTapTarget, height: face.layout.minTapTarget)
-            .background(
-                Circle()
-                    .fill(isListening ? face.accent : face.control)
-                    .overlay(Circle().stroke(face.line, lineWidth: 1))
-            )
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        guard !isListening, !composer.isSending else { return }
-                        if voice.limitationLine != nil {
-                            // Cannot listen. Say so once, then stay quiet.
-                            if !voice.explained { voice.markExplained() }
-                            return
-                        }
-                        voice.beginHold()
-                    }
-                    .onEnded { _ in
-                        let text = voice.endHold()
-                        if !text.isEmpty { composer.draft = text }
-                        if voice.limitationLine != nil, !voice.explained {
-                            voice.markExplained()
-                        }
-                    }
-            )
-            .accessibilityLabel(isListening ? "Listening. Release to review." : "Hold to talk")
+        Button {
+            if isListening {
+                let text = voice.endHold()
+                if !text.isEmpty { composer.draft = text }
+                return
+            }
+            guard !composer.isSending else { return }
+            if voice.limitationLine != nil {
+                // Cannot listen. Say so once, then stay quiet.
+                if !voice.explained { voice.markExplained() }
+                return
+            }
+            voice.beginHold()
+        } label: {
+            Image(systemName: isListening ? "waveform" : "mic")
+                .font(face.bodyFont.weight(.semibold))
+                .foregroundStyle(isListening ? face.ground : face.accent)
+                .frame(width: face.layout.minTapTarget, height: face.layout.minTapTarget)
+                .background(
+                    Circle()
+                        .fill(isListening ? face.accent : face.control)
+                        .overlay(Circle().stroke(face.line, lineWidth: 1))
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .sensoryFeedback(.impact(weight: .light), trigger: isListening)
+        .accessibilityLabel(isListening ? "Listening. Tap to stop." : "Tap to talk")
     }
 }
 
