@@ -144,7 +144,19 @@ public final class AgentVoice {
                 // so a prior .record session (the mic) can never leave us muted.
                 // .duckOthers lowers the user's music for the reply rather than
                 // stopping it, which is right for a brief spoken line.
-                try av.setCategory(.playback, options: [.duckOthers])
+                //
+                // mode: .default is LOAD-BEARING (2026-08-30, "the replies after
+                // the first go quiet"). The hands-free check-in speaks, opens the
+                // mic, then speaks again. The mic runs in `.measurement` mode
+                // (VoiceCapture.startRecognition), which disables the system's
+                // output signal processing and drops the level — and the
+                // TWO-argument setCategory(_:options:) does NOT reset the mode, it
+                // carries the previous one over. So the first reply spoke in
+                // .default (full level), but every reply after a listen inherited
+                // .measurement and came out quiet. Naming .default here resets it
+                // on every utterance, so the second reply and on are as loud as
+                // the first.
+                try av.setCategory(.playback, mode: .default, options: [.duckOthers])
                 try av.setActive(true)
                 let player = try AVAudioPlayer(data: audio)
                 player.volume = 1.0
@@ -162,6 +174,7 @@ public final class AgentVoice {
                 // correct the code is; started=false means the player refused.
                 detailsLog("tts: play prepared=\(prepared) started=\(started) "
                     + "bytes=\(audio.count) cat=\(av.category.rawValue) "
+                    + "mode=\(av.mode.rawValue) "
                     + "outVol=\(String(format: "%.2f", av.outputVolume))")
                 guard started else {
                     // The player refused. Nobody will get a finish callback, so
