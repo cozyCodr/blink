@@ -11,6 +11,7 @@ when Gemini is unavailable. Voice comes from src/agent/voice.py.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Literal
 
 from pydantic import BaseModel, Field
@@ -18,6 +19,7 @@ from pydantic import BaseModel, Field
 from src.agent import llm, voice
 from src.agent.tools import get_capacity, list_open_questions
 from src.agent.workspace_registry import get_or_create_store, now_naive
+from src.core import localtime
 from src.sim.fake_store import CONVERSATION_MAX_ENTRIES
 from src.types.entities import Question
 
@@ -174,6 +176,36 @@ def ask_next_clarification(workspace_id: str) -> Optional[Dict[str, Any]]:
     return payload
 
 
+def _upcoming_calendar(store, now: datetime, days: int = 7, limit: int = 6) -> List[str]:
+    """The user's synced Google Calendar events in [now, now+days), each as a
+    short "Title (local day + time)" string.
+
+    Reads the `gcal_` constraints the calendar sync writes (their titles and
+    ISO times are real), localised to the user's own day so "10:00" means their
+    ten o'clock, not UTC's. Degrade-never-fabricate: an unsynced or
+    unconnected calendar simply yields an empty list, never a guessed event.
+    """
+    tz = localtime.resolve_zone(getattr(store.get_profile(), "timezone", None))
+    horizon = now + timedelta(days=max(1, days))
+    rows: List[tuple] = []
+    for cid, c in (getattr(store, "constraints", {}) or {}).items():
+        if not str(cid).startswith("gcal_"):
+            continue
+        try:
+            start = datetime.fromisoformat(c.starts_at)
+        except (ValueError, TypeError):
+            continue
+        if start < now or start >= horizon:
+            continue
+        rows.append((start, c.title))
+    rows.sort(key=lambda r: r[0])
+    out: List[str] = []
+    for start, title in rows[:limit]:
+        local = start.replace(tzinfo=timezone.utc).astimezone(tz)
+        out.append(f"{title} ({local:%a %d %b} {local.hour:02d}:{local.minute:02d})")
+    return out
+
+
 def _state_context(workspace_id: str, for_user: bool = False) -> str:
     """The grounded state summary.
 
@@ -197,6 +229,19 @@ def _state_context(workspace_id: str, for_user: bool = False) -> str:
         f"Planned blocks: {planned}. Open questions: {openq.get('open_count', 0)}.",
         f"Capacity next 7 days: {cap.get('total_available_hours', '?')}h available.",
     ]
+    # Upcoming Google Calendar events, BY NAME, so a reply can actually say
+    # what's coming rather than only "you're busy then". The scheduler already
+    # plans around these as busy time; this line only lets replies name them.
+    cal = _upcoming_calendar(store, now=now_naive(), days=7, limit=6)
+    if cal:
+        if for_user:
+            lines.append("On your calendar in the next week: " + "; ".join(cal) + ".")
+        else:
+            lines.append(
+                "Upcoming events on the user's connected Google Calendar, which "
+                "you MAY name when asked what's coming up (the schedule already "
+                "plans around them): " + "; ".join(cal) + "."
+            )
     # P14: the user's name, from the verified Google sign-in. Guidance keeps
     # it natural and sparing; no stored name means no line at all, so the
     # model can never invent one.

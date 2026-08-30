@@ -6,6 +6,7 @@ from src.agent import voice, conversation, llm
 from src.agent import workspace_registry as reg
 from src.agent.tools import (
     get_capacity, propose_schedule_for_workspace, validate_plan, list_open_questions,
+    list_calendar_events,
 )
 from src.types.entities import Commitment, Task, Constraint, Question, QuestionOption
 
@@ -56,6 +57,39 @@ class TestClarifyAndTools(unittest.TestCase):
         self.store.add_constraint(Constraint(id="k1", workspace_id=self.ws, title="Standup",
                                             kind="one_off",
                                             starts_at="2026-08-25T09:00:00", ends_at="2026-08-25T09:30:00"))
+
+    def test_list_calendar_events_reads_synced_events_and_windows(self):
+        # Only gcal_-prefixed constraints inside [now, now+days) are calendar
+        # events the agent may name; a past one and a non-calendar constraint
+        # must not leak in.
+        from datetime import timedelta
+        now = reg.now_naive()
+        soon = now + timedelta(hours=3)
+        past = now - timedelta(days=1)
+        far = now + timedelta(days=40)
+        self.store.add_constraint(Constraint(
+            id="gcal_0_a", workspace_id=self.ws, title="Dentist", kind="one_off",
+            starts_at=soon.isoformat(), ends_at=(soon + timedelta(hours=1)).isoformat()))
+        self.store.add_constraint(Constraint(
+            id="gcal_1_b", workspace_id=self.ws, title="Old thing", kind="one_off",
+            starts_at=past.isoformat(), ends_at=(past + timedelta(hours=1)).isoformat()))
+        self.store.add_constraint(Constraint(
+            id="gcal_2_c", workspace_id=self.ws, title="Far off", kind="one_off",
+            starts_at=far.isoformat(), ends_at=(far + timedelta(hours=1)).isoformat()))
+        self.store.add_constraint(Constraint(
+            id="manual_k", workspace_id=self.ws, title="Not from calendar", kind="one_off",
+            starts_at=soon.isoformat(), ends_at=(soon + timedelta(hours=1)).isoformat()))
+
+        out = list_calendar_events(self.ws, days=7)
+        self.assertEqual(out["status"], "success")
+        titles = [e["title"] for e in out["events"]]
+        self.assertEqual(titles, ["Dentist"])          # past, far, and manual all excluded
+        self.assertEqual(out["count"], 1)
+
+        # And the same event surfaces by NAME in the grounded model context, so
+        # a reply can say what's coming.
+        ctx = conversation._state_context(self.ws)
+        self.assertIn("Dentist", ctx)
 
     def test_tools_report_success(self):
         self._seed()

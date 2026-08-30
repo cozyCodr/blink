@@ -9,10 +9,12 @@ invent times. Import these both as ADK function tools and as orchestration helpe
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any
 
 from src.agent.workspace_registry import get_or_create_store, now_naive, ledger_for
 from src.agent import google_calendar as gcal
+from src.core import localtime
 from src.core.scheduler.scheduler import propose_schedule
 from src.core.validator.validator import validate_state
 from src.core.scoring.priority_score import calculate_priority_score
@@ -278,11 +280,55 @@ def list_open_questions(workspace_id: str) -> Dict[str, Any]:
         return {"status": "error", "error_message": str(e)}
 
 
+def list_calendar_events(workspace_id: str, days: int = 7) -> Dict[str, Any]:
+    """List the user's upcoming Google Calendar events (title, start, end) over the coming days.
+
+    These are the events synced from the user's connected Google Calendar. Use this to answer
+    "what's on my calendar", "what's coming up", or to check real commitments before scheduling
+    near them. Times are the user's LOCAL wall-clock. An empty list means nothing is synced for
+    that window; never invent an event.
+
+    Args:
+        workspace_id: The workspace whose synced calendar to read.
+        days: How many days forward to include (default 7, clamped 1-370).
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        now = now_naive()
+        days = max(1, min(370, days))
+        horizon = now + timedelta(days=days)
+        tz = localtime.resolve_zone(getattr(store.get_profile(), "timezone", None))
+        events = []
+        for cid, c in (getattr(store, "constraints", {}) or {}).items():
+            if not str(cid).startswith("gcal_"):
+                continue
+            try:
+                start = datetime.fromisoformat(c.starts_at)
+                end = datetime.fromisoformat(c.ends_at)
+            except (ValueError, TypeError):
+                continue
+            if start < now or start >= horizon:
+                continue
+            local_start = start.replace(tzinfo=timezone.utc).astimezone(tz)
+            local_end = end.replace(tzinfo=timezone.utc).astimezone(tz)
+            events.append({
+                "title": c.title,
+                "start_local": local_start.isoformat(),
+                "end_local": local_end.isoformat(),
+            })
+        events.sort(key=lambda e: e["start_local"])
+        return {"status": "success", "count": len(events), "events": events}
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "error_message": str(e)}
+
+
 # The tool set exposed to the agent. Keep small (ADK guidance: ~10-20 max).
 # Calendar writes are two-phase: the propose_* tools only ask; the *_confirmed
-# tools execute and must never be called before the user answers yes.
+# tools execute and must never be called before the user answers yes. The read
+# path (list_calendar_events) needs no confirm: reading is not acting.
 ALL_TOOLS = [
     get_capacity,
+    list_calendar_events,
     propose_schedule_for_workspace,
     validate_plan,
     list_open_questions,
