@@ -77,6 +77,17 @@ def _agent_path_available() -> bool:
     return _ADK and _credentials_present()
 
 
+def agent_available() -> bool:
+    """True when a turn can actually run through the ADK agent: a runner is
+    injected (tests inject a fake) OR the real ADK path is live.
+
+    Callers that must route DIFFERENTLY when the agent is down use this. The
+    general chat path always calls run_chat_turn (its internal fallback is
+    grounded chat), but the evening check-in must fall back to its STRUCTURED
+    flow instead of collapsing into generic chat, so it checks this first."""
+    return _runner is not None or _agent_path_available()
+
+
 class _RealRunner:
     """Wraps an ADK `Runner` + `InMemorySessionService` around `root_agent`.
 

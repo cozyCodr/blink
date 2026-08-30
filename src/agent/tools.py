@@ -450,6 +450,148 @@ def web_search(workspace_id: str, query: str, why: str = "") -> Dict[str, Any]:
     return run_web_search(workspace_id, query)
 
 
+# --- P18-04: the evening check-in, conducted as a conversation ---------------
+# Two read/report tools let the model run the check-in in prose instead of the
+# frontend walking buttons: it reads today's sessions, asks about the still-open
+# ones one at a time, and logs each self-reported outcome. Neither writes to
+# Google, so the confirm-gate leaves them alone. Truthfulness lives here: the
+# settled (timer-MEASURED) sessions are separated out so they are never re-asked
+# (P9-07), and a logged outcome can never overwrite measured minutes.
+
+_OUTCOME_STATUSES = ("done", "partial", "missed")
+
+
+def _session_title(store, block) -> str:
+    """The session's human title, resolved task -> commitment, 'Session' if
+    neither is present. Mirrors what the check-in payload already showed."""
+    task = store.tasks.get(block.task_id)
+    if task is None:
+        return "Session"
+    if task.title:
+        return task.title
+    comm = store.commitments.get(task.commitment_id)
+    return comm.title if comm and comm.title else "Session"
+
+
+def list_todays_sessions(workspace_id: str) -> Dict[str, Any]:
+    """List today's focus sessions for the evening check-in, split into the ones
+    to ASK about and the ones already SETTLED.
+
+    Call this first when running the check-in. Walk the UNRESOLVED sessions one
+    at a time: each is still on the plan with no outcome yet, and carries its id,
+    title, planned minutes and start time so you can ask about it in plain words
+    ("How did the linear algebra review go?"). Ask about these, and only these.
+
+    The SETTLED sessions are today's sessions the Now timer already MEASURED
+    (P9-07): their actual minutes are recorded fact. Never ask about a settled
+    session and never log an outcome for it, the clock already did. Use them only
+    to acknowledge what's already done.
+
+    "Today" is the user's LOCAL calendar day, not UTC. An empty unresolved list
+    means there is nothing to check off: say one plain line and stop.
+
+    Args:
+        workspace_id: The workspace whose sessions to read.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        now = now_naive()
+        tz = localtime.resolve_zone(getattr(store.get_profile(), "timezone", None))
+        # SAME "today, unresolved" / "today, timer-measured" definition the server
+        # uses (server._today_unresolved_blocks / _today_timer_measured_blocks);
+        # kept in lockstep so the check-in never asks about a settled session.
+        unresolved = sorted(
+            (b for b in store.blocks.values()
+             if b.status == "planned" and localtime.same_local_day(b.starts_at, now, tz)),
+            key=lambda b: b.starts_at,
+        )
+        settled = sorted(
+            (b for b in store.blocks.values()
+             if b.actual_source == "timer"
+             and b.status in ("done", "partial")
+             and localtime.same_local_day(b.starts_at, now, tz)),
+            key=lambda b: b.starts_at,
+        )
+        return {
+            "status": "success",
+            "unresolved": [
+                {
+                    "id": b.id,
+                    "title": _session_title(store, b),
+                    "planned_minutes": int((b.ends_at - b.starts_at).total_seconds() // 60),
+                    "start": b.starts_at.isoformat(),
+                }
+                for b in unresolved
+            ],
+            "settled": [
+                {
+                    "id": b.id,
+                    "title": _session_title(store, b),
+                    "status": b.status,
+                    "actual_minutes": b.actual_minutes,
+                }
+                for b in settled
+            ],
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "error_message": str(e)}
+
+
+def log_session_outcome(workspace_id: str, block_id: str, status: str, minutes: int = 0) -> Dict[str, Any]:
+    """Record a SELF-REPORTED outcome for one of today's sessions during the
+    check-in.
+
+    Call this once per session the user tells you about, with exactly what they
+    said: status is "done", "partial", or "missed", and minutes is how long they
+    say they spent (leave 0 if they don't give a number). This is stored as a
+    self-report (source "reported"), kept distinct from timer-measured time.
+
+    A session the timer already MEASURED is settled fact: its measured minutes
+    stand and are never overwritten here. So ask only about the unresolved
+    sessions from list_todays_sessions, and log only what the user actually
+    reports. Never invent an outcome the user did not give.
+
+    Returns an error dict (never raises) for an unknown session id or a status
+    that isn't done/partial/missed.
+
+    Args:
+        workspace_id: The workspace the session belongs to.
+        block_id: The session id, from list_todays_sessions.
+        status: The outcome the user reported: "done", "partial", or "missed".
+        minutes: Self-reported minutes spent (default 0).
+    """
+    try:
+        st = (status or "").strip().lower()
+        if st not in _OUTCOME_STATUSES:
+            return {
+                "status": "error",
+                "error_message": f"Unknown status {status!r}; use one of done, partial, missed.",
+            }
+        store = get_or_create_store(workspace_id)
+        if block_id not in store.blocks:
+            return {
+                "status": "error",
+                "error_message": f"No session with id {block_id!r} in this workspace.",
+            }
+        try:
+            mins = max(0, int(minutes))
+        except (TypeError, ValueError):
+            mins = 0
+        # store.log_outcome enforces "measured beats reported": a timer-sourced
+        # block keeps its measured minutes; only the status may change here.
+        store.log_outcome(block_id, st, actual_minutes=mins, source="reported")
+        b = store.blocks[block_id]
+        return {
+            "status": "success",
+            "block_id": block_id,
+            "recorded": st,
+            "actual_minutes": b.actual_minutes,
+            "source": b.actual_source,
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "error_message": str(e)}
+
+
 # The tool set exposed to the agent. Keep small (ADK guidance: ~10-20 max).
 # Calendar writes are two-phase: the propose_* tools only ask; the *_confirmed
 # tools execute and must never be called before the user answers yes. The read
@@ -470,4 +612,8 @@ ALL_TOOLS = [
     # callback (_block_unconfirmed_writes) leaves it alone; its own consent gate
     # is what makes the first use ask before it searches.
     web_search,
+    # P18-04: the evening check-in tools. Read today's sessions (split so the
+    # timer-measured ones are never re-asked) and log each self-reported outcome.
+    list_todays_sessions,
+    log_session_outcome,
 ]

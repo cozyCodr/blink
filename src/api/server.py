@@ -1401,71 +1401,20 @@ def _turn(workspace_id: str, payload: TurnRequest,
         trace["intent"] = intent.label  # P16-01: id-level only, never content
 
     if intent.label == "checkin":
-        # P9-03 evening check-in: hand back today's unresolved blocks so the
-        # frontend can walk them one at a time (done / partial / skipped).
-        # Honest zero-case first (silence rule): no plan today means one plain
-        # sentence and a full stop, never manufactured engagement.
-        # P9-07: timer-measured blocks are already resolved FACT — they ride
-        # along as confirmations, never as questions (no memory quiz about
-        # sessions the clock already recorded).
-        pending = _today_unresolved_blocks(store, now)
-        measured = _today_timer_measured_blocks(store, now)
-        measured_payload = [
-            {
-                "id": b.id,
-                "title": (store.tasks[b.task_id].title
-                          if b.task_id in store.tasks else "Session"),
-                "status": b.status,
-                "actual_minutes": b.actual_minutes,
-            }
-            for b in measured
-        ]
-        if not pending:
-            if measured:
-                mn = len(measured)
-                msess = "session" if mn == 1 else "sessions"
-                mtext = (f"The timer already recorded today's {mn} {msess}, "
-                         "so there's nothing to ask.")
-                mtext = conversation.naturalize_outcome(mtext, [str(mn)])
-                return {"type": "message", "text": mtext,
-                        "blocks": [], "measured": measured_payload}
-            return {
-                "type": "message",
-                "text": "Nothing was on the plan today, so there's nothing to check off.",
-                "blocks": [],
-                "measured": [],
-            }
-        n = len(pending)
-        sess = "session" if n == 1 else "sessions"
-        text = f"Let's close out today. {n} {sess} to look at."
-        if measured:
-            mn = len(measured)
-            text += (f" The timer already recorded {mn} "
-                     + ("session" if mn == 1 else "sessions") + ".")
-            text = conversation.naturalize_outcome(text, [str(n), str(mn)])
-        else:
-            text = conversation.naturalize_outcome(text, [str(n)])
-        checkin_cands = [make_candidate(n, "count")]
-        if measured:
-            checkin_cands.append(make_candidate(len(measured), "count"))
-        return {
-            "type": "checkin",
-            "text": text,
-            **decorate(text, checkin_cands),
-            "measured": measured_payload,
-            "blocks": [
-                {
-                    "id": b.id,
-                    "task_id": b.task_id,
-                    "title": (store.tasks[b.task_id].title
-                              if b.task_id in store.tasks else "Session"),
-                    "starts_at": b.starts_at.isoformat(),
-                    "ends_at": b.ends_at.isoformat(),
-                    "planned_minutes": int((b.ends_at - b.starts_at).total_seconds() // 60),
-                }
-                for b in pending
-            ],
-        }
+        # P18-04: the evening check-in is a CONVERSATION. When the real agent
+        # path is up, the model walks today's unresolved sessions in warm prose
+        # and logs each self-reported outcome with the check-in tools
+        # (list_todays_sessions / log_session_outcome), then offers to replan
+        # what slipped. When the agent is DOWN we must not collapse into generic
+        # chat: fall back to the existing STRUCTURED flow (buttons) so
+        # accountability still happens, and just as honestly.
+        if agent_runtime.agent_available():
+            reply = agent_runtime.run_chat_turn(
+                workspace_id, message, payload.history,
+                context_note=_CHECKIN_CONTEXT_NOTE)
+            reply.setdefault("type", "message")
+            return reply
+        return _checkin_structured_response(store, now)
 
     if intent.label == "focus":
         # P9-07 focus sessions: "start" means run the timer against what's
@@ -1692,6 +1641,99 @@ def _today_timer_measured_blocks(store, now: datetime) -> List[Block]:
          and same_local_day(b.starts_at, now, tz)),
         key=lambda b: b.starts_at,
     )
+
+
+# P18-04: what the model is told when the check-in runs through the real agent.
+# It walks today's unresolved sessions ONE at a time in prose and logs each
+# self-reported outcome with the check-in tools, then offers to replan what
+# slipped. The zero-case (silence rule) and the "never re-ask a measured
+# session" rule are stated here so they hold on the agent path exactly as the
+# structured fallback holds them in code.
+_CHECKIN_CONTEXT_NOTE = (
+    "This is the evening check-in. First call list_todays_sessions. Walk the "
+    "UNRESOLVED sessions one at a time, in warm plain language, one question per "
+    "turn (\"How did the linear algebra review go?\"). When the user tells you "
+    "how a session went, call log_session_outcome with what they actually said: "
+    "done, partial, or missed, plus the minutes only if they gave a number. Log "
+    "only what they report; never guess an outcome. The SETTLED sessions are "
+    "already measured by the timer, so they are fact: don't ask about them, just "
+    "acknowledge them if it's natural. Once the unresolved sessions are handled, "
+    "if something slipped, offer to replan it and call "
+    "propose_schedule_for_workspace to PROPOSE a new plan; never claim you "
+    "changed anything. If there are no unresolved sessions today, say one plain "
+    "line that there's nothing to check off and stop, with no filler."
+)
+
+
+def _checkin_structured_response(store, now: datetime):
+    """The pre-P18-04 structured check-in: hand back today's unresolved blocks so
+    the frontend walks them one at a time (done / partial / skipped). This is the
+    OFFLINE fallback used only when the real agent path is unavailable, so a
+    down-agent check-in still runs the accountability flow instead of collapsing
+    into generic chat.
+
+    Honest zero-case first (silence rule): no plan today means one plain sentence
+    and a full stop, never manufactured engagement. P9-07: timer-measured blocks
+    are already resolved FACT, so they ride along as confirmations, never as
+    questions (no memory quiz about sessions the clock already recorded)."""
+    pending = _today_unresolved_blocks(store, now)
+    measured = _today_timer_measured_blocks(store, now)
+    measured_payload = [
+        {
+            "id": b.id,
+            "title": (store.tasks[b.task_id].title
+                      if b.task_id in store.tasks else "Session"),
+            "status": b.status,
+            "actual_minutes": b.actual_minutes,
+        }
+        for b in measured
+    ]
+    if not pending:
+        if measured:
+            mn = len(measured)
+            msess = "session" if mn == 1 else "sessions"
+            mtext = (f"The timer already recorded today's {mn} {msess}, "
+                     "so there's nothing to ask.")
+            mtext = conversation.naturalize_outcome(mtext, [str(mn)])
+            return {"type": "message", "text": mtext,
+                    "blocks": [], "measured": measured_payload}
+        return {
+            "type": "message",
+            "text": "Nothing was on the plan today, so there's nothing to check off.",
+            "blocks": [],
+            "measured": [],
+        }
+    n = len(pending)
+    sess = "session" if n == 1 else "sessions"
+    text = f"Let's close out today. {n} {sess} to look at."
+    if measured:
+        mn = len(measured)
+        text += (f" The timer already recorded {mn} "
+                 + ("session" if mn == 1 else "sessions") + ".")
+        text = conversation.naturalize_outcome(text, [str(n), str(mn)])
+    else:
+        text = conversation.naturalize_outcome(text, [str(n)])
+    checkin_cands = [make_candidate(n, "count")]
+    if measured:
+        checkin_cands.append(make_candidate(len(measured), "count"))
+    return {
+        "type": "checkin",
+        "text": text,
+        **decorate(text, checkin_cands),
+        "measured": measured_payload,
+        "blocks": [
+            {
+                "id": b.id,
+                "task_id": b.task_id,
+                "title": (store.tasks[b.task_id].title
+                          if b.task_id in store.tasks else "Session"),
+                "starts_at": b.starts_at.isoformat(),
+                "ends_at": b.ends_at.isoformat(),
+                "planned_minutes": int((b.ends_at - b.starts_at).total_seconds() // 60),
+            }
+            for b in pending
+        ],
+    }
 
 
 _CHECKIN_OUTCOME_TO_STATUS = {"done": "done", "partial": "partial", "skipped": "missed"}
