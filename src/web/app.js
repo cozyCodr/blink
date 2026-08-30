@@ -6319,6 +6319,33 @@
           });
           return;
         }
+        // P17-03: a web-search confirm the agent surfaced through /turn commits
+        // its YES against the /web-search endpoint, which remembers consent and
+        // runs Gemini's own Google Search grounding (never a third-party API).
+        // The pending query rides in question.config.query. "Not now" (false)
+        // searches nothing and plans with what's known; consent stays unset so a
+        // later explicit ask may re-offer. Mirrors the calendar confirm above.
+        if (question.input_type === "confirm" &&
+            question.field === "web_search") {
+          if (value !== true) {                    // Not now
+            showEcho("Not now");
+            var noSearch = "Okay, I'll plan with what I already know.";
+            history.push({ role: "assistant", content: noSearch });
+            deliverReply(noSearch, onSpoken);
+            return;
+          }
+          showEcho("Yes");
+          agent.set("thinking");
+          surface.pending(startTurn());
+          beginRequest();
+          var wsCfg = question.config || {};
+          api("/web-search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query: wsCfg.query, mode: thinkingMode() }),
+          }).then(heldDispatch).catch(fail);
+          return;
+        }
         // P17-02: the personal-why beat is skippable, emitting the {__skip:true}
         // sentinel. A skip posts a null value, which the server treats as a
         // first-class skip (no why stored, reminders keep the plain line).

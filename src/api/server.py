@@ -53,6 +53,7 @@ from src.agent.triggers import (
 )
 from src.agent.reconcile import execute_evening_reconcile
 from src.agent import conversation
+from src.agent import voice
 from src.agent import agent_runtime
 from src.agent import decision_log
 from src.agent import push
@@ -2696,6 +2697,61 @@ def calendar_write_event(workspace_id: str, payload: CalendarEventRequest):
     if result.get("status") != "success":
         raise HTTPException(status_code=502, detail=result.get("error_message", "Calendar write failed."))
     return result
+
+class WebSearchRequest(BaseModel):
+    """P17-03: the browser's YES to the agent's web_search proposal. Carries the
+    `query` from question.config; `mode` rides the thinking profile like every
+    other turn."""
+    query: str
+    mode: Optional[str] = None
+
+
+def _compose_web_search_reply(summary: str, sources: list) -> str:
+    """The grounded summary, scrubbed of AI tells, with a short cited-sources
+    footer. The summary is web-derived DATA rendered as the answer; it is never
+    fed back as an instruction. Sources are appended so the reply cites where the
+    facts came from (governance: grounded answers carry their sources)."""
+    text = voice.scrub(summary or "")
+    cited = [s for s in (sources or []) if isinstance(s, dict) and s.get("url")][:3]
+    if cited:
+        lines = "\n".join(f"- {s.get('title') or s['url']}: {s['url']}" for s in cited)
+        text = f"{text}\n\nSources:\n{lines}"
+    return text
+
+
+@app.post("/v1/workspaces/{workspace_id}/web-search")
+def web_search_execute(workspace_id: str, payload: WebSearchRequest):
+    """P17-03 confirm YES: remember consent, run the grounded search, answer with
+    sources. This is the API-boundary twin of the agent's web_search tool — the
+    place where a 'yes' to a search proposal actually searches, exactly as
+    /calendar/events is where a 'yes' to a calendar proposal actually writes.
+
+    Consent is granted BEFORE the search and stored on the profile, so the tool
+    never asks again. Any grounded-call failure degrades to an honest line (the
+    plan proceeds), never a fabricated answer."""
+    store = get_or_create_store(workspace_id)
+    query = (payload.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="A search query is required.")
+    # Remember the yes first: the answer is now permitted, and future turns skip
+    # the ask whether or not this particular search lands.
+    store.set_web_search_consent("granted")
+    with llm.mode_scope(payload.mode):
+        result = tools.run_web_search(workspace_id, query)
+    if result.get("status") != "success":
+        return {
+            "type": "message",
+            "text": voice.scrub(
+                "I couldn't reach a live search just now, so I'll plan with "
+                "what I already know."
+            ),
+        }
+    return {
+        "type": "message",
+        "text": _compose_web_search_reply(result["summary"], result.get("sources", [])),
+        "sources": result.get("sources", []),
+    }
+
 
 @app.get("/v1/workspaces/{workspace_id}/profile")
 def get_profile(workspace_id: str):

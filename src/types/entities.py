@@ -164,6 +164,16 @@ class UserProfile(BaseModel):
     # user has never picked one on any device, and every client falls back to
     # its own local default (capsule, per planner P10-00).
     face: Optional[str] = None
+    # P17-03: whether the user has let Blink look things up online (Gemini's
+    # Google Search grounding, never a third-party API). Same discipline as
+    # `timezone`/`face` above: Optional, validated at the endpoint (never stored
+    # raw), and it rides the Firestore profile snapshot automatically via the
+    # same model_dump/model_validate path. Three states:
+    #   None      — never asked; the web_search tool asks first (confirm gate)
+    #   "granted" — remembered yes; the tool searches without asking again
+    #   "declined"— a "not now"; a later explicit ask may re-offer
+    # The gate is fail-closed: anything other than exactly "granted" means ask.
+    web_search_consent: Optional[str] = None
     platforms: List[str] = Field(default_factory=list)   # e.g. ["Coursera", "DataCamp"]
     current_level: Optional[str] = None                  # e.g. "beginner", "some Python"
     hours_per_week: Optional[int] = None

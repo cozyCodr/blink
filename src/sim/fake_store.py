@@ -113,6 +113,19 @@ class FakeStore:
         self._publish_event("commitment_updated", {"commitment_id": c.id})
         return c
 
+    def set_web_search_consent(self, value: Optional[str]) -> UserProfile:
+        """P17-03: remember whether the user lets Blink search the web.
+
+        Mirrors set_commitment_why / update_profile: writes an
+        already-validated value (`"granted"` / `"declined"` / None) onto the one
+        per-workspace profile and publishes a profile_updated event, so it rides
+        the Firestore snapshot exactly like `face` and `timezone`. The caller
+        owns validation; this only stores the fact."""
+        self.profile.web_search_consent = value
+        self.profile.updated_at = datetime.now(timezone.utc)
+        self._publish_event("profile_updated", self.profile.model_dump(mode="json"))
+        return self.profile
+
     def add_task(self, t: Task):
         self.tasks[t.id] = t
         self._publish_event("task_added", {"task_id": t.id, "title": t.title})
