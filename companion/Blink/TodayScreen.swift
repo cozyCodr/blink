@@ -502,11 +502,58 @@ struct TodayScreen: View {
                 // at the bottom of the screen (`composeBar`). What stays in
                 // the scroll is the SAID part of the conversation, centered
                 // and borderless on the paper, exactly as P15-11 left it.
-                PlanReplySurface(composer: composer)
-                    .transition(swapTransition)
+                VStack(spacing: face.layout.rowGap) {
+                    PlanReplySurface(composer: composer)
+                    // P20-03: the reply's session/move cards, stacked under the
+                    // sentence they ground. Rendered ONLY when the server sent
+                    // the payload; a reply without artifacts renders exactly
+                    // what it always did.
+                    artifactCards
+                }
+                .transition(swapTransition)
             }
         }
         .animation(reduceMotion ? nil : face.motion.swapAnimation, value: conversationPhase)
+    }
+
+    /// P20-03 — the placed-session and move cards the latest reply carried,
+    /// dealt in staggered. Tapping any card raises the plan surface (P18-01):
+    /// the card is the summary, the plan is the place. Times read through the
+    /// server clock (the user's stored zone); when no details payload has
+    /// landed yet the fallback is the server's own UTC convention
+    /// (resolve_zone, src/core/localtime.py), never the device zone.
+    @ViewBuilder
+    private var artifactCards: some View {
+        let clock = store.state?.clock
+            ?? ServerClock(now: Date(), today: "", timezoneIdentifier: nil)
+        if !composer.sessionCards.isEmpty || !composer.moveCards.isEmpty {
+            VStack(spacing: face.layout.rowGap) {
+                ForEach(Array(composer.sessionCards.enumerated()), id: \.element.id) { index, session in
+                    Button {
+                        showingPlan = true
+                    } label: {
+                        SessionCardView(session: session, clock: clock, index: index)
+                    }
+                    .buttonStyle(.plain)
+                }
+                ForEach(Array(composer.moveCards.enumerated()), id: \.element.id) { index, move in
+                    Button {
+                        showingPlan = true
+                    } label: {
+                        MoveCardView(move: move, clock: clock,
+                                     index: composer.sessionCards.count + index)
+                    }
+                    .buttonStyle(.plain)
+                }
+                if let note = composer.calendarNote, !note.isEmpty {
+                    // The server's own line about the calendar sync, verbatim.
+                    Text(note)
+                        .font(face.metaFont)
+                        .foregroundStyle(face.warm)
+                        .multilineTextAlignment(.center)
+                }
+            }
+        }
     }
 
     // MARK: The compose bar, pinned to the bottom

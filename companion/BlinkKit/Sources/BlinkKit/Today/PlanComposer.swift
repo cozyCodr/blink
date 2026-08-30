@@ -47,6 +47,15 @@ public final class PlanComposer {
     /// native plan surface on it (P18-01). A counter, not a flag: two plans in
     /// a row are two openings, and a plain re-read never moves it.
     public private(set) var planLandings = 0
+    /// P20-03: the placed sessions the LATEST reply carried, when it carried
+    /// any. Same lifecycle as `reply`: cleared the moment a new turn starts,
+    /// so a card never outlives the sentence it grounds.
+    public private(set) var sessionCards: [TurnSessionArtifact] = []
+    /// P20-03: the moves the latest reschedule reply carried, when it carried
+    /// any. Same lifecycle as `sessionCards`.
+    public private(set) var moveCards: [TurnMoveArtifact] = []
+    /// P20-03: the server's own line about a partial calendar sync, verbatim.
+    public private(set) var calendarNote: String?
 
     // MARK: Configuration
 
@@ -147,6 +156,7 @@ public final class PlanComposer {
         guard let session, question.field.hasPrefix("calendar_") else { return }
         let config = question.config
         self.question = nil
+        clearArtifacts()
 
         guard yes else {
             // Not now: write nothing, and say so without apologising.
@@ -206,6 +216,7 @@ public final class PlanComposer {
               question.field == "reschedule" else { return }
         let token = question.config?.token
         self.question = nil
+        clearArtifacts()
 
         guard yes else {
             // Not now: write nothing, and say so without apologising.
@@ -270,10 +281,20 @@ public final class PlanComposer {
 
     // MARK: The one request path
 
+    /// P20-03: a new turn starting means the old reply's cards are stale.
+    /// Cleared BEFORE the request leaves, exactly when `reply` stops being
+    /// the current truth.
+    private func clearArtifacts() {
+        sessionCards = []
+        moveCards = []
+        calendarNote = nil
+    }
+
     private func run(_ request: @escaping () async throws -> TurnResponse) async {
         isSending = true
         didRefuse = false
         wasUnreachable = false
+        clearArtifacts()
         defer { isSending = false }
         do {
             let res = try await request()
@@ -308,6 +329,12 @@ public final class PlanComposer {
             question = nil
             courseOfferUp = false
             elicit = nil
+            // P20-03: the reply's additive artifacts, held exactly as long as
+            // the reply itself. Present only when the server sent them; the
+            // cards render nothing otherwise.
+            sessionCards = res.sessionArtifacts
+            moveCards = res.moveArtifacts
+            calendarNote = res.calendarNote
             // Grounded: the server's own count of placed blocks, first time
             // this session. Never recomputed here.
             if (res.blocksScheduled ?? 0) > 0 {

@@ -124,6 +124,88 @@ public struct ElicitSession: Decodable, Sendable, Equatable {
     }
 }
 
+/// P20-03 — one placed session, as the server describes it on a planned
+/// reply's `artifacts.sessions`. ADDITIVE payload: the backend is growing it
+/// in parallel, so everything here is decode-only and the card renders only
+/// when the server actually sent it. Times are the API's naive-UTC ISO
+/// strings, read through the one parser (`ServerClock.date`), the same way
+/// WorkspaceDetails reads `starts_at`.
+public struct TurnSessionArtifact: Decodable, Sendable, Equatable, Identifiable {
+    public let title: String
+    public let startsAt: Date
+    public let endsAt: Date
+    /// The server's own reason this session exists, verbatim, when it sent one.
+    public let why: String?
+    /// TRUE only when the server says the session landed on the calendar.
+    /// Absent reads as false: no chip without the grounded fact behind it.
+    public let calendar: Bool
+
+    public var id: String { "\(title)|\(startsAt.timeIntervalSinceReferenceDate)" }
+
+    enum CodingKeys: String, CodingKey {
+        case title, why, calendar
+        case startsAt = "starts_at"
+        case endsAt = "ends_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = try c.decode(String.self, forKey: .title)
+        startsAt = try ServerClock.date(from: c.decode(String.self, forKey: .startsAt))
+        endsAt = try ServerClock.date(from: c.decode(String.self, forKey: .endsAt))
+        why = try c.decodeIfPresent(String.self, forKey: .why)
+        calendar = try c.decodeIfPresent(Bool.self, forKey: .calendar) ?? false
+    }
+
+    public init(title: String, startsAt: Date, endsAt: Date, why: String?, calendar: Bool) {
+        self.title = title
+        self.startsAt = startsAt
+        self.endsAt = endsAt
+        self.why = why
+        self.calendar = calendar
+    }
+}
+
+/// P20-03 — one moved session on a reschedule phase-2 reply's `moves`.
+/// `calendar` is the server's word on what happened to the calendar copy:
+/// "moved" | "none" | "partial" | "failed". Kept raw so a future value
+/// degrades to the quiet default (no chip, no note) instead of a decode
+/// failure.
+public struct TurnMoveArtifact: Decodable, Sendable, Equatable, Identifiable {
+    public let title: String
+    public let oldStart: Date
+    public let newStart: Date
+    public let calendar: String
+
+    public var id: String { "\(title)|\(newStart.timeIntervalSinceReferenceDate)" }
+
+    enum CodingKeys: String, CodingKey {
+        case title, calendar
+        case oldStart = "old_start"
+        case newStart = "new_start"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = try c.decode(String.self, forKey: .title)
+        oldStart = try ServerClock.date(from: c.decode(String.self, forKey: .oldStart))
+        newStart = try ServerClock.date(from: c.decode(String.self, forKey: .newStart))
+        calendar = try c.decodeIfPresent(String.self, forKey: .calendar) ?? "none"
+    }
+
+    public init(title: String, oldStart: Date, newStart: Date, calendar: String) {
+        self.title = title
+        self.oldStart = oldStart
+        self.newStart = newStart
+        self.calendar = calendar
+    }
+}
+
+/// The `artifacts` bag on a planned reply. Only `sessions` is read today.
+public struct TurnArtifacts: Decodable, Sendable, Equatable {
+    public let sessions: [TurnSessionArtifact]?
+}
+
 /// One typed reply off `POST /turn`, `/elicit/answer` or `/elicit/courses`.
 /// Decode-only: only fields this app renders are read, and the reply text is
 /// the server's sentence, verbatim.
@@ -139,10 +221,38 @@ public struct TurnResponse: Decodable, Sendable, Equatable {
     public let blocksScheduled: Int?
     public let question: TurnQuestion?
     public let session: ElicitSession?
+    /// P20-03, additive: the placed sessions on a planned reply, when the
+    /// server sent them. nil on every reply that carries none.
+    public let artifacts: TurnArtifacts?
+    /// P20-03, additive: the moves on a reschedule phase-2 reply.
+    public let moves: [TurnMoveArtifact]?
+    /// P20-03, additive: the server's own line about a partial calendar sync.
+    public let calendarNote: String?
+
+    /// The placed sessions, flattened; empty when the reply carried none.
+    public var sessionArtifacts: [TurnSessionArtifact] { artifacts?.sessions ?? [] }
+    /// The moves, flattened; empty when the reply carried none.
+    public var moveArtifacts: [TurnMoveArtifact] { moves ?? [] }
 
     enum CodingKeys: String, CodingKey {
-        case type, text, question, session
+        case type, text, question, session, artifacts, moves
         case blocksScheduled = "blocks_scheduled"
+        case calendarNote = "calendar_note"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        type = try c.decode(String.self, forKey: .type)
+        text = try c.decodeIfPresent(String.self, forKey: .text)
+        blocksScheduled = try c.decodeIfPresent(Int.self, forKey: .blocksScheduled)
+        question = try c.decodeIfPresent(TurnQuestion.self, forKey: .question)
+        session = try c.decodeIfPresent(ElicitSession.self, forKey: .session)
+        // The additive payloads decode DEFENSIVELY: a malformed artifact from
+        // the worker still being built must degrade to "no cards", never take
+        // the whole reply (and its text) down with it.
+        artifacts = (try? c.decodeIfPresent(TurnArtifacts.self, forKey: .artifacts)) ?? nil
+        moves = (try? c.decodeIfPresent([TurnMoveArtifact].self, forKey: .moves)) ?? nil
+        calendarNote = try c.decodeIfPresent(String.self, forKey: .calendarNote)
     }
 }
 
