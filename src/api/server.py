@@ -510,6 +510,10 @@ def _schedule_current(store, workspace_id: str, now: datetime) -> int:
             for u in sched.unplaced
         ],
         "blocks_scheduled": len(new_blocks),
+        # P20-01: the ids of THIS pass's committed blocks, recorded AFTER the
+        # mirror ran, so _planned_outcome_response can read each block back from
+        # the store (gcal_event_id included) and attach truthful render data.
+        "block_ids": [b.id for b in new_blocks],
     }
     return len(new_blocks)
 
@@ -1096,6 +1100,41 @@ def _prominent_action(store, now: Optional[datetime]) -> List[Dict[str, Any]]:
     }]
 
 
+def _session_artifacts(store, blocks: int) -> Optional[List[Dict[str, Any]]]:
+    """P20-01: render data for the blocks the scheduling pass JUST placed, or
+    None when this composition site can't truthfully know them.
+
+    Reads the block ids `_schedule_current` recorded for this pass and looks
+    each block back up in the store — AFTER the calendar mirror ran — so:
+    - `calendar` is True ONLY if the mirror actually stored a `gcal_event_id`;
+    - `why` is the commitment's stored personal why (user's own words) or null,
+      never invented;
+    - a stale/missing report (block count mismatch) attaches nothing.
+    """
+    if blocks <= 0:
+        return None
+    report = store.last_schedule_report or {}
+    block_ids = report.get("block_ids")
+    if not isinstance(block_ids, list) or report.get("blocks_scheduled") != blocks:
+        return None
+    placed = [store.blocks.get(bid) for bid in block_ids]
+    placed = [b for b in placed if b is not None]
+    if len(placed) != blocks:
+        return None
+    sessions: List[Dict[str, Any]] = []
+    for b in placed:
+        task = store.tasks.get(b.task_id)
+        comm = store.commitments.get(task.commitment_id) if task else None
+        sessions.append({
+            "title": tools._session_title(store, b),
+            "starts_at": b.starts_at.isoformat(),
+            "ends_at": b.ends_at.isoformat(),
+            "why": (comm.why if comm else None) or None,
+            "calendar": bool(b.gcal_event_id),
+        })
+    return sessions
+
+
 def _planned_outcome_response(
     store, task_count: int, blocks: int, now: Optional[datetime] = None
 ) -> Dict[str, Any]:
@@ -1150,6 +1189,14 @@ def _planned_outcome_response(
         "blocks_scheduled": blocks,
         "schedule": store.last_schedule_report,
     }
+    # P20-01: the planned reply carries its render data — one entry per block
+    # just placed, read back from the store AFTER the calendar mirror ran, so
+    # `calendar` is true ONLY when the mirror really stored a gcal_event_id.
+    # If this composition site doesn't have this pass's blocks (no block_ids,
+    # or a stale report), it attaches nothing rather than fabricate.
+    sessions = _session_artifacts(store, blocks)
+    if sessions is not None:
+        out["artifacts"] = {"sessions": sessions}
     # P11-08: the counts and zone labels above are the load-bearing facts, and
     # naturalize_outcome already guaranteed they survived verbatim, so they are
     # exactly the substrings that may be decorated. `text` is untouched.
@@ -2853,7 +2900,7 @@ def reschedule_endpoint(workspace_id: str, payload: RescheduleRequest):
         text = (f"Moved {moved} {sess} in your plan. I couldn't update your "
                 f"calendar; I'll retry.")
         text = conversation.naturalize_outcome(text, [str(moved)])
-    return {
+    out: Dict[str, Any] = {
         "type": "replanned",
         "text": text,
         "moved": moved,
@@ -2862,6 +2909,34 @@ def reschedule_endpoint(workspace_id: str, payload: RescheduleRequest):
         "calendar_deleted": deleted,
         "calendar_failures": failed,
     }
+    # P20-01: per-move render detail. Titles and times come from the stashed
+    # batch (captured at propose time from the real blocks/placements). The
+    # `calendar` value is attributed HONESTLY at batch level from the real
+    # mirror counts — per-move attribution is not available from the aggregate,
+    # so a partial batch marks EVERY move "partial" (with a retry note) rather
+    # than fabricating which specific moves landed.
+    stashed_moves = result.get("moves") or []
+    if stashed_moves:
+        if not attempted:
+            per_move_cal = "none"
+        elif failed == 0:
+            per_move_cal = "moved"
+        elif landed > 0 or deleted > 0:
+            per_move_cal = "partial"
+        else:
+            per_move_cal = "failed"
+        out["moves"] = [
+            {
+                "title": m.get("title"),
+                "old_start": m.get("old_start"),
+                "new_start": m.get("new_start"),
+                "calendar": per_move_cal,
+            }
+            for m in stashed_moves
+        ]
+        if per_move_cal == "partial":
+            out["calendar_note"] = "some calendar updates are retrying"
+    return out
 
 
 class WebSearchRequest(BaseModel):

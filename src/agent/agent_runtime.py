@@ -195,13 +195,66 @@ def _text_of_event(event: Any) -> str:
     return "\n".join(out)
 
 
-def _extract_from_events(events: List[Any]) -> Tuple[Optional[Dict[str, Any]], List[str], str]:
+def _summarize_tool_response(name: str, resp: Any) -> str:
+    """A short, DETERMINISTIC summary line for one tool response (P20-01).
+
+    Every number is parsed straight out of the tool's actual response dict —
+    never invented. Anything unrecognized (or an errored/malformed response)
+    summarizes as "" and the tool name alone carries the evidence.
+    """
+    if not isinstance(resp, dict) or resp.get("status") == "error":
+        return ""
+    try:
+        if name == "list_calendar_events":
+            n = resp.get("count")
+            if isinstance(n, int):
+                return f"{n} event" + ("" if n == 1 else "s")
+        elif name == "get_capacity":
+            h = resp.get("total_available_hours")
+            if isinstance(h, (int, float)):
+                return f"{h:g}h open"
+        elif name == "list_todays_sessions":
+            unresolved = resp.get("unresolved")
+            settled = resp.get("settled")
+            if isinstance(unresolved, list) and isinstance(settled, list):
+                n = len(unresolved) + len(settled)
+                return f"{n} session" + ("" if n == 1 else "s")
+        elif name.startswith("propose_"):
+            return "proposed"
+    except Exception:  # pragma: no cover - defensive: a summary is never worth a crash
+        return ""
+    return ""
+
+
+def _is_blocked_attempt(name: str, resp: Any) -> bool:
+    """True for a tool attempt the confirm-gate short-circuited (see
+    agent._block_unconfirmed_writes): it never actually ran, so it must never
+    appear in the trace as evidence. A `*_confirmed` name can only reach an
+    agent turn through that block, and the block's own error shape is matched
+    too, belt-and-suspenders."""
+    if name.endswith("_confirmed"):
+        return True
+    return (
+        isinstance(resp, dict)
+        and resp.get("status") == "error"
+        and str(resp.get("error_message", "")).startswith("Blocked:")
+    )
+
+
+def _extract_from_events(
+    events: List[Any],
+) -> Tuple[Optional[Dict[str, Any]], List[str], str, List[Dict[str, str]]]:
     """Walk the ADK event stream once and pull out:
 
     - the first `propose_*` confirm result (a dict with input_type == "confirm"),
       if any — the confirm-gate surfaces this and stops;
     - a legible tool log (`name#id`, names and ids ONLY, never args/content);
-    - the final assistant text.
+    - the final assistant text;
+    - the trace (P20-01): one {"tool", "summary"} entry per tool call that
+      GENUINELY ran, evidenced by its function_response. Blocked/unconfirmed
+      attempts (the before_tool_callback short-circuit) are excluded — those
+      did not run. Summaries are derived deterministically from the real
+      response ("" when unrecognized), never invented.
 
     The event protocol used (satisfied by real ADK Events and by test fakes):
     `get_function_calls()`, `get_function_responses()`, `is_final_response()`,
@@ -210,6 +263,7 @@ def _extract_from_events(events: List[Any]) -> Tuple[Optional[Dict[str, Any]], L
     confirm: Optional[Dict[str, Any]] = None
     tool_log: List[str] = []
     final_parts: List[str] = []
+    trace: List[Dict[str, str]] = []
 
     for event in events:
         for fc in (event.get_function_calls() or []):
@@ -219,6 +273,8 @@ def _extract_from_events(events: List[Any]) -> Tuple[Optional[Dict[str, Any]], L
         for fr in (event.get_function_responses() or []):
             name = getattr(fr, "name", "") or ""
             resp = _unwrap_response(getattr(fr, "response", None))
+            if name and not _is_blocked_attempt(name, resp):
+                trace.append({"tool": name, "summary": _summarize_tool_response(name, resp)})
             if (
                 confirm is None
                 and name in _PROPOSE_TOOLS
@@ -231,7 +287,7 @@ def _extract_from_events(events: List[Any]) -> Tuple[Optional[Dict[str, Any]], L
             if t:
                 final_parts.append(t)
 
-    return confirm, tool_log, "\n".join(final_parts).strip()
+    return confirm, tool_log, "\n".join(final_parts).strip(), trace
 
 
 def _confirm_to_contract(confirm: Dict[str, Any]) -> Dict[str, Any]:
@@ -279,14 +335,17 @@ def run_chat_turn(
         decision_log.decision("agent", workspace_id, f"degraded: {type(e).__name__}")
         return conversation.respond(workspace_id, message, history, context_note=context_note)
 
-    confirm, tool_log, final_text = _extract_from_events(events)
+    confirm, tool_log, final_text, trace = _extract_from_events(events)
 
     if confirm is not None:
         decision_log.decision(
             "agent", workspace_id,
             f"tools=[{', '.join(tool_log)}] -> confirm ({confirm.get('field', '')})",
         )
-        return _confirm_to_contract(confirm)
+        out = _confirm_to_contract(confirm)
+        if trace:
+            out["trace"] = trace
+        return out
 
     if not final_text:
         # The agent produced no visible answer (e.g. only read tools ran, or the
@@ -298,4 +357,10 @@ def run_chat_turn(
         decision_log.decision(
             "agent", workspace_id, f"tools=[{', '.join(tool_log)}] -> reply",
         )
-    return {"type": "message", "text": voice.scrub(final_text)}
+    out: Dict[str, Any] = {"type": "message", "text": voice.scrub(final_text)}
+    # P20-01: the reply carries its evidence — the tool calls this turn GENUINELY
+    # made, each with a summary parsed from its real response. A turn with no
+    # tool calls carries no `trace` key at all.
+    if trace:
+        out["trace"] = trace
+    return out

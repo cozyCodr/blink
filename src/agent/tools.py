@@ -745,6 +745,20 @@ def propose_reschedule(workspace_id: str) -> Dict[str, Any]:
         batch = {
             "created_at": now.isoformat(),
             "old_block_ids": [m["old_block_id"] for m in moves if m["old_block_id"]],
+            # P20-01: per-move render detail, captured at propose time from the
+            # REAL old blocks and placements, so the phase-2 reply can show each
+            # move (title, old start, new start) without re-deriving anything.
+            "moves": [
+                {
+                    "title": m["task"],
+                    "old_start": (
+                        store.blocks[m["old_block_id"]].starts_at.isoformat()
+                        if m["old_block_id"] in store.blocks else None
+                    ) if m["old_block_id"] else None,
+                    "new_start": m["start"],
+                }
+                for m in moves
+            ],
             "new_blocks": [
                 {
                     "id": pb.id,
@@ -853,6 +867,10 @@ def reschedule_confirmed(workspace_id: str, token: str) -> Dict[str, Any]:
             "calendar_created": cancel_mirror.created + commit_mirror.created,
             "calendar_deleted": cancel_mirror.deleted + commit_mirror.deleted,
             "calendar_failures": len(cancel_mirror.failures) + len(commit_mirror.failures),
+            # P20-01: the per-move detail the propose step stashed from the real
+            # old blocks and placements ([] for a batch stashed before this key
+            # existed — the caller then attaches nothing rather than fabricate).
+            "moves": batch.get("moves") or [],
         }
     except Exception as e:  # pragma: no cover - defensive
         return {"status": "error", "error_message": str(e)}
