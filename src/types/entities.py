@@ -103,6 +103,11 @@ class Block(BaseModel):
     actual_minutes: Optional[int] = None
     actual_source: Optional[ActualSource] = None
     plan_version: int = 1
+    # P19-01: the Google Calendar event id WE created for THIS block. A block
+    # maps to exactly one event we own. None means the block was never mirrored
+    # to Google Calendar, so it must never be deleted/patched there (mirrors how
+    # Constraint.source_ref carries the real Google id for an inbound event).
+    gcal_event_id: Optional[str] = None
     created_at: datetime = Field(default_factory=now_utc)
 
 QuestionType = Literal[
