@@ -2371,7 +2371,12 @@ def session_info(request: Request):
     """
     workspace_id = _bound_workspace(request)
     if not workspace_id:
-        return {"signed_in": False}
+        # `signin_enabled` lets a client decide whether to REQUIRE sign-in. The
+        # web app walls its surface behind Google sign-in, but only when a
+        # sign-in is actually possible: on a server with no session secret this
+        # is False, and the client must fall back to guest access rather than
+        # showing a wall nobody can pass (which would brick the whole app).
+        return {"signed_in": False, "signin_enabled": blink_auth.session_enabled()}
     store = get_or_create_store(workspace_id)
     name = store.get_profile().name
     tokens = store.get_google_tokens() or {}

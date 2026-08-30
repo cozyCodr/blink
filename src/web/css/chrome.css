@@ -156,3 +156,74 @@
   .modal-overlay, .modal, .switch .switch-knob { transition: none !important; }
 }
 
+/* ============ Auth gate: the sign-in wall ============
+   The whole interactive surface sits behind Google sign-in. `data-auth` on
+   #app drives it (set in app.js authGate):
+     pending — /v1/session hasn't answered yet. Show only the eyes; hide the
+               dock, the peek handle, the conversation surface AND the wall,
+               so nothing flashes the wrong state for signed-in users.
+     out     — not signed in. Hide the input; show the wall.
+     in      — full app (or guest access when sign-in is disabled server-side).
+   The eyes (.face-rig) are never gated: the presence stays alive behind the
+   wall. */
+#app[data-auth="pending"] #dock,
+#app[data-auth="pending"] #peek-handle,
+#app[data-auth="pending"] .surface,
+#app[data-auth="out"] #dock,
+#app[data-auth="out"] #peek-handle,
+#app[data-auth="out"] #horizon,
+#app[data-auth="out"] .surface {
+  display: none !important;
+}
+/* The wall shows only when the gate has decided we are signed out. */
+#auth-wall { display: none; }
+#app[data-auth="out"] #auth-wall { display: block; }
+
+#auth-wall {
+  position: absolute; left: 50%; bottom: clamp(40px, 12vh, 120px);
+  transform: translateX(-50%);
+  width: min(560px, 90vw);
+  text-align: center;
+  z-index: 45;
+  animation: aw-rise 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@keyframes aw-rise {
+  from { opacity: 0; transform: translate(-50%, 14px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+.aw-title {
+  font: 500 clamp(26px, 4vw, 38px)/1.05 var(--serif);
+  letter-spacing: -0.01em; color: var(--text); margin: 0 0 14px;
+  text-wrap: balance;
+}
+.aw-sub {
+  font: 400 15px/1.55 var(--sans); color: var(--muted);
+  margin: 0 auto 26px; max-width: 46ch;
+}
+.aw-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 11px;
+  font: 600 15px/1 var(--sans); letter-spacing: 0.01em;
+  color: var(--text); background: var(--panel-bg);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 13px 26px; cursor: pointer;
+  transition: border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+}
+.aw-btn:hover { border-color: var(--accent); transform: translateY(-1px); }
+.aw-btn:focus-visible {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--glow-rgb), 0.22);
+}
+.aw-btn:active { transform: translateY(0) scale(0.98); }
+.aw-g { flex: 0 0 auto; }
+.aw-note {
+  font: 500 13px/1.4 var(--sans); color: var(--faint);
+  margin: 16px 0 0; min-height: 16px;
+  opacity: 0; transition: opacity 0.2s ease;
+}
+.aw-note.show { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  #auth-wall { animation: none; }
+}
+

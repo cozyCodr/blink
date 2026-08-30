@@ -1098,7 +1098,7 @@
   // onBegin: the controller's startTurn. Reaching for the mic or the keyboard
   // starts a turn, so it cuts the previous reply and RETURNS that turn's
   // surface claim, which every paint below carries.
-  function createVoiceInput(agent, surface, onCommit, setHint, onBegin) {
+  function createVoiceInput(agent, surface, onCommit, setHint, onBegin, isLocked) {
     var mic = document.getElementById("mic");
     var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     var supported = !!SR;
@@ -1106,6 +1106,27 @@
     var recording = false;
     var finalText = "";     // accumulated final results
     var liveText = "";      // final + current interim, trimmed
+    // A hold is physically down. Tracked because permission is now checked
+    // ASYNC on first use (see ensureMic), so a release can land BEFORE we ever
+    // start listening — the difference between "held to talk" and "tapped".
+    var holdActive = false;
+    // Mic permission, remembered once granted. Gating recognition behind an
+    // explicit getUserMedia makes Chrome's prompt appear reliably and turns a
+    // denial into a CLEAR message; SpeechRecognition alone fails into onerror,
+    // which this code used to swallow — the "I click the mic and nothing
+    // happens" report (2026-08-30).
+    var micGranted = false;
+    function ensureMic() {
+      if (micGranted) return Promise.resolve(true);
+      var md = navigator.mediaDevices;
+      if (!md || !md.getUserMedia) return Promise.resolve(true); // let SR try; its onerror speaks
+      return md.getUserMedia({ audio: true }).then(function (stream) {
+        stream.getTracks().forEach(function (t) { try { t.stop(); } catch (_) {} });
+        micGranted = true;
+        return true;
+      }).catch(function () { return false; });
+    }
+    var MIC_BLOCKED = "Microphone is blocked. Allow it from your browser’s address bar, then hold the mic again.";
 
     // Don't start mid-request or mid-question — those own the surface.
     function canStart() {
@@ -1128,12 +1149,21 @@
       try { claim = onBegin(); } catch (_) { claim = null; }
     }
 
+    // A one-shot hint that survives the next toEditable. A mic error opens the
+    // compose field to fall back to typing, and toEditable would otherwise
+    // overwrite the "why" with its generic "Review, then Send" — so the error
+    // reason is stashed here and consumed once, keeping the field-open AND the
+    // explanation (2026-08-30).
+    var stickyHint = null;
+
     // Released -> editable/reviewable state (prefilled, focused, NOT sent).
     // Also the whole job of the dock's keyboard button (P11-02a): open the
     // field, empty, focused, with the hint naming what Enter will do.
     function toEditable(text) {
-      setHint(supported ? "Review, then Send · Enter to send"
-                        : "Type your message · Enter to send");
+      var h = stickyHint || (supported ? "Review, then Send · Enter to send"
+                                       : "Type your message · Enter to send");
+      stickyHint = null;
+      setHint(h);
       surface.compose(onCommit, text || "", claim);
     }
 
@@ -1147,17 +1177,44 @@
     }
 
     function begin() {
-      if (recording || !canStart()) return;
+      if (recording || !canStart() || (isLocked && isLocked())) return;
       beginTurn();
 
       if (!supported) {
         // Fallback: no live transcription — just open the field to type.
         agent.set("listening");
-        setHint("Speech input isn’t available here, so type instead");
+        setHint("Speech input isn’t available in this browser, so type instead.");
         surface.compose(onCommit, "", claim);
         return;
       }
 
+      holdActive = true;
+      // Show the listening posture straight away so the hold feels responsive,
+      // even while a first-time permission prompt is up.
+      agent.set("listening");
+      setHint(autoSendOn() ? "Listening… release to send" : "Listening… release to edit");
+      surface.live(claim);
+
+      ensureMic().then(function (ok) {
+        if (!holdActive) {
+          // Released before we could start — a TAP, not a hold. Open the field
+          // to type, which is what a tap on the mic has always done.
+          toEditable("");
+          return;
+        }
+        if (!ok) {
+          // Blocked or dismissed. Say why, in words, and fall back to typing
+          // so the turn is never a silent dead end. The reason rides the
+          // sticky hint so opening the field doesn't erase it.
+          stickyHint = MIC_BLOCKED;
+          toEditable("");
+          return;
+        }
+        startRecognition();
+      });
+    }
+
+    function startRecognition() {
       finalText = ""; liveText = "";
       rec = new SR();
       rec.continuous = true;
@@ -1173,21 +1230,36 @@
         liveText = (finalText + interim).replace(/\s+/g, " ").trim();
         surface.setLiveText(liveText || "…", claim);
       };
-      rec.onerror = function () { /* swallow — onend recovers gracefully */ };
+      rec.onerror = function (e) {
+        // No longer swallowed: a denied or broken mic must SAY so, or it reads
+        // as "the button does nothing" (2026-08-30). onend still follows and
+        // settles the surface to an editable field, so typing always works.
+        var err = (e && e.error) || "";
+        // Stash the reason on the sticky hint; onend follows immediately and
+        // its toEditable() surfaces it while opening the field to type.
+        if (err === "not-allowed" || err === "service-not-allowed") {
+          micGranted = false;
+          stickyHint = MIC_BLOCKED;
+        } else if (err === "audio-capture") {
+          stickyHint = "I can’t find a microphone on this device. You can type instead.";
+        } else if (err === "network") {
+          stickyHint = "Speech recognition needs a connection just now. You can type instead.";
+        }
+        /* no-speech / aborted: quiet — onend settles to edit */
+      };
       rec.onend = function () {
         // Ended on its own while still held (timeout/network): settle to edit.
         if (recording) { recording = false; toEditable(liveText); }
       };
 
       recording = true;
-      agent.set("listening");
-      // The hint names what release will DO in the current mode (P8-01c).
-      setHint(autoSendOn() ? "Listening… release to send" : "Listening… release to edit");
-      surface.live(claim);
       try { rec.start(); } catch (_) { /* already started — ignore */ }
     }
 
     function end() {
+      holdActive = false;
+      // recording is false on a tap or while permission is still pending; the
+      // begin() promise settles those paths, so there is nothing to stop here.
       if (!recording) return;
       recording = false;
       // No transient hint flash here: commitOrEdit() (via toEditable or the
@@ -1207,7 +1279,7 @@
     // dock's keyboard button (P11-02a) — the same one path, so the two
     // affordances can never drift apart.
     function openCompose() {
-      if (recording || !canStart()) return;
+      if (recording || !canStart() || (isLocked && isLocked())) return;
       beginTurn();
       toEditable("");
       return true;
@@ -4019,7 +4091,9 @@
   function createSettingsStore() {
     var KEY = "focus.settings";
     var defaults = {
-      voiceEnabled: false,
+      voiceEnabled: true,   // Blink speaks its replies by default (user, 2026-08-30);
+                            // the Settings toggle still turns it off, and that
+                            // saved choice is honoured over this default on load.
       autoSend: true,   // P8-01c: release the mic -> the transcript sends itself
       remindersEnabled: false,   // P9-03d: local block reminders, opt-in only
       // P12-02: deeper reasoning on the steps that DECIDE (goal classification,
@@ -5521,6 +5595,13 @@
     var hintEl = document.getElementById("hint");
     var history = [];   // [{role, content}] passed to POST /turn (message/planned turns)
     var session = null; // {commitment_id, goal} carried through an elicitation
+    // Auth gate (2026-08-30): the interactive surface is walled behind Google
+    // sign-in. Locked until authGate() below resolves /v1/session — held true
+    // through the "pending" beat so a stray keypress can't open the compose
+    // field before we know who this is. Every input entry point (mic hold,
+    // spacebar, keyboard button, first-keystroke) consults this via isLocked.
+    var interactionLocked = true;
+    function isInteractionLocked() { return interactionLocked; }
 
     var sleepCtl = null;
     // Hint line is debounced + cross-faded (P7-02) so rapid state churn
@@ -6372,7 +6453,7 @@
     // looking, not talking, and the reply keeps both its voice and its words
     // while the panel is open. Starting a hold (mic or Spacebar) or opening
     // the compose field IS a new turn, and startTurn rides in as onBegin.
-    var voiceInput = createVoiceInput(agent, surface, sendMessage, setHint, startTurn);
+    var voiceInput = createVoiceInput(agent, surface, sendMessage, setHint, startTurn, isInteractionLocked);
 
     /* --- Photo-to-plan (P9-02): drop / paste / compose "+" all land in
        sendImage, which validates, shows the reading chip, squints the eyes,
@@ -6499,55 +6580,11 @@
       try { nowCtl.armOffers(); } catch (_) {}
     };
 
-    /* --- Signed-in session boot + the greeting (P14). --------------------
-       One fetch of /v1/session settles three things:
-         - a stale signed-in binding (cookie gone) falls back to a fresh
-           guest workspace instead of 403ing forever;
-         - a signed-in cookie with a guest binding (storage was cleared)
-           re-adopts the account's workspace;
-         - the greeting: one warm line with the user's REAL stored name, on
-           the sign-in return and at most once a day on a later visit. The
-           server sends `greeting` only when a name is actually stored, so
-           nothing here can invent one. A ?ws= demo override skips all of it. */
-    (function sessionBoot() {
-      if (WS_FROM_QUERY) return;
-      var cameBack = window.__focusSigninFlash === "connected";
-      window.__focusSigninFlash = null;
-      fetch("/v1/session").then(function (r) { return r.json(); }).then(function (s) {
-        var signedIn = !!(s && s.signed_in);
-        if (!signedIn) {
-          if (WS.indexOf("u_") === 0) {
-            // The session behind this workspace is gone; start a fresh guest.
-            try { localStorage.removeItem("focus.workspace"); } catch (_) {}
-            window.location.reload();
-          }
-          return;
-        }
-        if (s.workspace_id && s.workspace_id !== WS) {
-          // The cookie knows this browser's account; adopt its workspace.
-          try { localStorage.setItem("focus.workspace", s.workspace_id); } catch (_) {}
-          window.location.reload();
-          return;
-        }
-        if (!s.greeting) return;
-        var GREET_KEY = "focus.greetedOn";
-        var greetedToday = false;
-        try { greetedToday = localStorage.getItem(GREET_KEY) === localTodayKey(); } catch (_) {}
-        if (!cameBack && greetedToday) return;
-        try { localStorage.setItem(GREET_KEY, localTodayKey()); } catch (_) {}
-        setTimeout(function () {
-          if (busy || agent.get() !== "idle") return;   // never talk over the user
-          startTurn();
-          history.push({ role: "assistant", content: s.greeting });
-          deliverReply(s.greeting, onSpoken);
-        }, cameBack ? 700 : 900);
-      }).catch(function () { /* quiet — guest mode needs nothing from this */ });
-    })();
-
     /* --- Spoken morning brief (P9-03c): app open before 10am, once a day.
        Real counts from the EXISTING morning-brief trigger; zero sessions
-       means zero words (silence is a first-class output). --- */
-    (function morningBrief() {
+       means zero words (silence is a first-class output). Runs only for a
+       signed-in (or guest-fallback) session — openApp() calls it. --- */
+    function scheduleMorningBrief() {
       var KEY = "focus.morningBrief";
       if (new Date().getHours() >= 10) return;
       try { if (localStorage.getItem(KEY) === localTodayKey()) return; } catch (_) {}
@@ -6575,13 +6612,13 @@
           });
         }).catch(function () { /* quiet — the brief is a nicety */ });
       }, 1400);
-    })();
+    }
 
     /* --- Evening check-in affordance (P9-03a): after 5pm, once a day, a
        quiet hint — only when today actually has ended, unresolved blocks.
        Never a nag: no popups, no repeats, silence when there is nothing
        to reconcile. --- */
-    (function eveningNudge() {
+    function scheduleEveningNudge() {
       var KEY = "focus.checkinHint";
       if (new Date().getHours() < 17) return;
       try { if (localStorage.getItem(KEY) === localTodayKey()) return; } catch (_) {}
@@ -6602,7 +6639,103 @@
           }
         }).catch(function () { /* quiet */ });
       }, 2200);
-    })();
+    }
+
+    /* --- The auth gate (2026-08-30). ------------------------------------
+       The whole interactive surface waits behind Google sign-in. `openApp`
+       unlocks it (a real session, a ?ws= demo override, or a server with
+       sign-in disabled, where guest access is the only sane fallback);
+       `showWall` reveals the sign-in wall and keeps the input locked. The
+       eyes are alive in every state. `authGate` reads /v1/session ONCE and
+       decides, folding in the old sessionBoot corrections (a dead binding
+       resets to guest; a signed-in cookie adopts its own workspace) and the
+       greeting. */
+    function openApp(s, cameBack) {
+      interactionLocked = false;
+      appEl.setAttribute("data-auth", "in");
+      // The greeting: one warm line built server-side from the STORED name,
+      // on the sign-in return and at most once a day otherwise. Never invented.
+      if (s && s.greeting) {
+        var GREET_KEY = "focus.greetedOn";
+        var greetedToday = false;
+        try { greetedToday = localStorage.getItem(GREET_KEY) === localTodayKey(); } catch (_) {}
+        if (cameBack || !greetedToday) {
+          try { localStorage.setItem(GREET_KEY, localTodayKey()); } catch (_) {}
+          setTimeout(function () {
+            if (busy || agent.get() !== "idle") return;   // never talk over the user
+            startTurn();
+            history.push({ role: "assistant", content: s.greeting });
+            deliverReply(s.greeting, onSpoken);
+          }, cameBack ? 700 : 900);
+        }
+      }
+      scheduleMorningBrief();
+      scheduleEveningNudge();
+      // First-run gate (P9-08): a beat after load, a brand-new workspace gets
+      // the interview instead of the idle eyes.
+      setTimeout(runOnboarding, 1200);
+    }
+
+    function showWall() {
+      interactionLocked = true;
+      appEl.setAttribute("data-auth", "out");
+      var btn = document.getElementById("aw-signin");
+      var note = document.getElementById("aw-note");
+      if (!btn) return;
+      var going = false;
+      btn.addEventListener("click", function () {
+        if (going) return;
+        going = true;
+        if (note) { note.textContent = ""; note.classList.remove("show"); }
+        api("/auth/signin").then(function (r) {
+          if (r && r.auth_url) { window.location.href = r.auth_url; return; }
+          throw new Error("no auth url");
+        }).catch(function () {
+          going = false;
+          if (note) {
+            note.textContent = "Sign-in isn’t available right now. Try again in a moment.";
+            note.classList.add("show");
+          }
+        });
+      });
+    }
+
+    function authGate() {
+      // A ?ws= demo override is a look at a specific workspace, not a home —
+      // it bypasses the wall so tests and demo links keep working.
+      if (WS_FROM_QUERY) { openApp(null, false); return; }
+      var cameBack = window.__focusSigninFlash === "connected";
+      window.__focusSigninFlash = null;
+      fetch("/v1/session").then(function (r) { return r.json(); }).then(function (s) {
+        var signedIn = !!(s && s.signed_in);
+        if (signedIn) {
+          if (s.workspace_id && s.workspace_id !== WS) {
+            // The cookie knows this browser's account; adopt its workspace.
+            try { localStorage.setItem("focus.workspace", s.workspace_id); } catch (_) {}
+            window.location.reload();
+            return;
+          }
+          openApp(s, cameBack);
+          return;
+        }
+        // Not signed in. A stale signed-in binding (u_ workspace, cookie gone)
+        // resets to a fresh guest first, then that guest meets the wall.
+        if (WS.indexOf("u_") === 0) {
+          try { localStorage.removeItem("focus.workspace"); } catch (_) {}
+          window.location.reload();
+          return;
+        }
+        // Wall the surface — UNLESS the server has sign-in disabled, where a
+        // wall would be a door nobody can open. There, guest access stands.
+        if (s && s.signin_enabled === false) { openApp(null, false); return; }
+        showWall();
+      }).catch(function () {
+        // The session couldn't be read. Don't brick the app on a blip: fall
+        // back to guest access, which is exactly what the app did before the
+        // gate existed.
+        openApp(null, false);
+      });
+    }
 
     // Demo-rehearsal hook (P7-03, deliberate): trigger any emotion from the
     // console — window.__emote("happy" | "wide" | "sorry" | "curious" |
@@ -6626,9 +6759,10 @@
 
     agent.set("idle");
 
-    // First-run gate (P9-08): a beat after load, a brand-new workspace gets
-    // the interview instead of the idle eyes.
-    setTimeout(runOnboarding, 1200);
+    // The auth gate decides everything interactive: it either unlocks the app
+    // (openApp — greeting, brief, onboarding) or raises the sign-in wall. Runs
+    // last so every component above already exists for openApp to drive.
+    authGate();
   }
 
   if (document.readyState === "loading") {

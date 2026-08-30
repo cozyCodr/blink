@@ -318,7 +318,11 @@ class TestBearerGate(unittest.TestCase):
     def test_session_route_answers_a_bearer(self):
         token = self._bearer()
         stranger = TestClient(server.app)
-        self.assertEqual(stranger.get("/v1/session").json(), {"signed_in": False})
+        guest = stranger.get("/v1/session").json()
+        self.assertIs(guest["signed_in"], False)
+        # The guest answer also tells a client whether signing in is even
+        # possible, so the web wall can fall back to guest access when it isn't.
+        self.assertIn("signin_enabled", guest)
         body = stranger.get("/v1/session",
                             headers={"Authorization": f"Bearer {token}"}).json()
         self.assertTrue(body["signed_in"])

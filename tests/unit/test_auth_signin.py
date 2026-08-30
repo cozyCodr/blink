@@ -338,7 +338,11 @@ class TestSessionAndGate(unittest.TestCase):
         client = TestClient(server.app)
         r = client.get("/v1/session")
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json(), {"signed_in": False})
+        body = r.json()
+        self.assertIs(body["signed_in"], False)
+        # signin_enabled rides along so a client can decide whether to REQUIRE
+        # sign-in (the web wall) or fall back to guest access when it can't.
+        self.assertIn("signin_enabled", body)
 
     def test_session_reports_name_email_and_greeting(self):
         client = TestClient(server.app)
@@ -382,7 +386,7 @@ class TestSessionAndGate(unittest.TestCase):
         self.assertEqual(client.get(f"/v1/workspaces/{USER_WS}/state").status_code, 200)
         r = client.post("/v1/session/signout")
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(client.get("/v1/session").json(), {"signed_in": False})
+        self.assertIs(client.get("/v1/session").json()["signed_in"], False)
         self.assertEqual(client.get(f"/v1/workspaces/{USER_WS}/state").status_code, 403)
 
 
