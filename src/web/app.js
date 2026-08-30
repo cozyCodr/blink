@@ -6346,6 +6346,38 @@
           }).then(heldDispatch).catch(fail);
           return;
         }
+        // P19-06: a reschedule confirm the agent surfaced through /turn commits
+        // its YES against the /reschedule endpoint, which replays the single-use
+        // batch server-side — cancel the old placements, commit the new ones —
+        // and answers with the REAL moved count. The token rides in
+        // question.config.token. "Not now" (false) writes nothing; the plan
+        // stays as it is. The reply shown is always the server's own sentence,
+        // via the shared dispatch — never a fabricated "moved N". Mirrors the
+        // calendar and web_search confirms above.
+        if (question.input_type === "confirm" &&
+            question.field === "reschedule") {
+          if (value !== true) {                    // Not now
+            showEcho("Not now");
+            var keepLine = "Okay, I'll leave your plan as it is.";
+            history.push({ role: "assistant", content: keepLine });
+            deliverReply(keepLine, onSpoken);
+            return;
+          }
+          showEcho("Yes");
+          agent.set("thinking");
+          surface.pending(startTurn());
+          beginRequest();
+          var rsCfg = question.config || {};
+          api("/reschedule", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ confirm: true, token: rsCfg.token }),
+          }).then(function (r) {
+            if (window.FocusRefresh) window.FocusRefresh();   // plan changed
+            heldDispatch(r);
+          }).catch(fail);
+          return;
+        }
         // P17-02: the personal-why beat is skippable, emitting the {__skip:true}
         // sentinel. A skip posts a null value, which the server treats as a
         // first-class skip (no why stored, reminders keep the plain line).

@@ -135,8 +135,16 @@ public final class PlanComposer {
     /// off on purpose: the sorry beat and the "say it again to retry" line both
     /// belong to a turn you can re-send, and this confirm is gone once answered.
     public func confirmCalendar(_ yes: Bool) async {
-        guard let session, let question, !isSending,
-              question.field.hasPrefix("calendar_") else { return }
+        guard let question, !isSending else { return }
+        // The confirm control has one entry point — Today dispatches every
+        // confirm's YES/Not-now here — so branch on the field: a reschedule
+        // confirm the agent surfaced takes the /reschedule path, not the
+        // calendar write. Everything else keeps the calendar behaviour below.
+        if question.field == "reschedule" {
+            await confirmReschedule(yes)
+            return
+        }
+        guard let session, question.field.hasPrefix("calendar_") else { return }
         let config = question.config
         self.question = nil
 
@@ -177,6 +185,64 @@ public final class PlanComposer {
             // either way, honestly, the calendar did not change.
             answerEcho = nil
             reply = "I couldn't reach your calendar, so nothing changed."
+        }
+    }
+
+    /// Answer a reschedule confirm the AGENT surfaced through `/turn`. Like the
+    /// calendar confirm this has NO ElicitSession, so it never goes through
+    /// `answer(...)`. The YES posts the single-use `token` (from
+    /// `question.config.token`) to `/reschedule`, which replays the batch —
+    /// cancel the old placements, commit the new ones — and returns a normal
+    /// typed reply carrying the REAL moved count; "Not now" writes nothing.
+    /// Mirrors the web's reschedule branch (app.js) and `confirmCalendar` above.
+    ///
+    /// TRUTHFULNESS: unlike the calendar write, the reply here is the SERVER'S
+    /// own sentence, rendered verbatim through the shared `dispatch` (which also
+    /// re-reads the plan on a `replanned`) — never a fabricated "moved N". A
+    /// refused or unreachable write yields the honest "nothing changed" line and
+    /// no plan re-read, because nothing landed.
+    private func confirmReschedule(_ yes: Bool) async {
+        guard let session, let question, !isSending,
+              question.field == "reschedule" else { return }
+        let token = question.config?.token
+        self.question = nil
+
+        guard yes else {
+            // Not now: write nothing, and say so without apologising.
+            answerEcho = "Not now"
+            reply = "Okay, I'll leave your plan as it is."
+            return
+        }
+        guard let token, !token.isEmpty else {
+            // A reschedule confirm with no token to replay is not something this
+            // app can honestly commit. Say nothing changed rather than claim it.
+            reply = "I couldn't make that change, so nothing changed."
+            return
+        }
+
+        answerEcho = "Yes"
+        isSending = true
+        didRefuse = false
+        wasUnreachable = false
+        defer { isSending = false }
+        do {
+            let res = try await client.reschedule(token: token, for: session)
+            // The server composed and grounded the reply; render it verbatim
+            // through the same dispatch every turn uses. A `replanned` re-reads
+            // the plan there; a stale-token `message` changes nothing and does
+            // not. No count is ever re-derived here.
+            answerEcho = nil
+            elicit = nil
+            await dispatch(res)
+        } catch DetailsError.notSignedIn {
+            needsSignIn = true
+        } catch DetailsError.cancelled {
+            // Nobody answered; nothing was learned and nothing changed.
+            return
+        } catch {
+            // Refused or unreachable: honestly, the plan did not change.
+            answerEcho = nil
+            reply = "I couldn't reschedule those sessions, so nothing changed."
         }
     }
 

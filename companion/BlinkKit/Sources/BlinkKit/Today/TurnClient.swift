@@ -39,7 +39,10 @@ public struct TurnQuestionOption: Decodable, Sendable, Equatable, Identifiable {
 ///   • the number input carries `{min, max, step, unit}`;
 ///   • a calendar confirm the AGENT surfaces carries the pending write —
 ///     `{action, event_id, summary, start, end}` — which the YES posts back
-///     verbatim to `/calendar/events` (the web reads the same bag, app.js:6303).
+///     verbatim to `/calendar/events` (the web reads the same bag, app.js:6303);
+///   • a reschedule confirm the AGENT surfaces carries `{action:"reschedule",
+///     token, summary, moves}` (tools.py:764) — the YES posts that single-use
+///     `token` to `/reschedule` (the web reads the same bag, app.js).
 /// Every field is optional and decode-only: a config with neither set decodes
 /// fine, and an input reads only the keys its own type uses.
 public struct TurnQuestionConfig: Decodable, Sendable, Equatable {
@@ -54,9 +57,11 @@ public struct TurnQuestionConfig: Decodable, Sendable, Equatable {
     public let summary: String?
     public let start: String?
     public let end: String?
+    // reschedule confirm: the single-use token the YES replays
+    public let token: String?
 
     enum CodingKeys: String, CodingKey {
-        case min, max, step, unit, action, summary, start, end
+        case min, max, step, unit, action, summary, start, end, token
         case eventID = "event_id"
     }
 
@@ -71,6 +76,7 @@ public struct TurnQuestionConfig: Decodable, Sendable, Equatable {
         summary = try c.decodeIfPresent(String.self, forKey: .summary)
         start = try c.decodeIfPresent(String.self, forKey: .start)
         end = try c.decodeIfPresent(String.self, forKey: .end)
+        token = try c.decodeIfPresent(String.self, forKey: .token)
     }
 }
 
@@ -260,6 +266,29 @@ extension BlinkDetailsClient {
         // Success is the 200 itself; the result body is not read. `send` maps
         // every non-200 to the shared error vocabulary the caller branches on.
         _ = try await send(request, label: "calendar/events")
+    }
+
+    /// The YES to a reschedule confirm the agent surfaced through `/turn`:
+    /// `POST /v1/workspaces/{ws}/reschedule {confirm:true, token}`, the
+    /// confirm-gated, single-use replay the web commits to (app.js,
+    /// server.py:2794). The `token` rides in `question.config.token`.
+    ///
+    /// Unlike the calendar write this RETURNS the server's typed reply — a
+    /// `replanned` with the real moved count on success, or an honest `message`
+    /// when the token was stale/used — so the phone renders the server's own
+    /// sentence verbatim and never re-derives the count. This is phase-2 only;
+    /// the agent asks for phase-1 (the confirm). It reuses `post`, so it speaks
+    /// the same four-way error vocabulary as every other turn.
+    public func reschedule(
+        token: String,
+        for session: BlinkSession
+    ) async throws -> TurnResponse {
+        try await post(
+            path: "reschedule",
+            body: ["confirm": true, "token": token],
+            label: "reschedule",
+            session: session
+        )
     }
 
     private func post(
