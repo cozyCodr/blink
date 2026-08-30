@@ -27,6 +27,14 @@ from typing import Iterator
 # Callers may override.
 DEFAULT_VOICE = "en-US-Chirp3-HD-Charon"
 
+# Loudness boost over Cloud TTS's native level, in dB. The phone speaker played
+# the 0 dB default too quietly (user, 2026-08-30), and a client player cannot
+# exceed the system volume, so the lift belongs at the source. +6 dB is roughly
+# a doubling of perceived loudness; Google cautions against exceeding +10 dB
+# (distortion), so this stays well inside the safe range. Applies to the MP3
+# path both surfaces fetch; the streaming AudioConfig has no gain field.
+VOLUME_GAIN_DB = 6.0
+
 #: Streaming synthesis returns headerless LINEAR16 (signed 16-bit little-endian)
 #: at this rate. The client needs both numbers to turn the byte stream into
 #: playable audio and to know how many seconds it is holding.
@@ -98,6 +106,7 @@ def synthesize(text: str, voice_name: str = DEFAULT_VOICE) -> bytes:
         )
         audio_config = texttospeech.AudioConfig(
             audio_encoding=texttospeech.AudioEncoding.MP3,
+            volume_gain_db=VOLUME_GAIN_DB,
         )
         resp = client.synthesize_speech(
             input=synthesis_input, voice=voice, audio_config=audio_config

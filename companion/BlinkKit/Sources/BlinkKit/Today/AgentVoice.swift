@@ -105,13 +105,28 @@ public final class AgentVoice {
             }
             guard !Task.isCancelled, self.enabled else { return }
             do {
-                try AVAudioSession.sharedInstance().setCategory(.playback, options: [.duckOthers])
-                try AVAudioSession.sharedInstance().setActive(true)
+                let av = AVAudioSession.sharedInstance()
+                // .playback plays THROUGH the ring/silent switch (that is the
+                // whole point of the category). Set + activate every utterance
+                // so a prior .record session (the mic) can never leave us muted.
+                // .duckOthers lowers the user's music for the reply rather than
+                // stopping it, which is right for a brief spoken line.
+                try av.setCategory(.playback, options: [.duckOthers])
+                try av.setActive(true)
                 let player = try AVAudioPlayer(data: audio)
+                player.volume = 1.0
                 self.player = player
-                player.play()
+                let prepared = player.prepareToPlay()
+                let started = player.play()
+                // The device-vs-simulator diagnostic (2026-08-30): outputVolume
+                // is the system MEDIA volume for the current route. If it reads
+                // 0 the phone's media volume is down and nothing plays, however
+                // correct the code is; started=false means the player refused.
+                detailsLog("tts: play prepared=\(prepared) started=\(started) "
+                    + "bytes=\(audio.count) cat=\(av.category.rawValue) "
+                    + "outVol=\(String(format: "%.2f", av.outputVolume))")
             } catch {
-                detailsLog("tts: audio would not play, reply stays text-only")
+                detailsLog("tts: audio would not play — \(error.localizedDescription)")
             }
         }
     }
