@@ -223,6 +223,11 @@ struct QuestionSurface: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let question: TurnQuestion
     var onSubmit: (ElicitAnswerValue) -> Void
+    /// A `confirm` question routes here instead of `onSubmit`: its yes/no is a
+    /// boolean, not an `ElicitAnswerValue`, and a calendar confirm commits to a
+    /// different endpoint than `/elicit/answer` (P18-02). The default is a
+    /// no-op so the non-confirm call sites need not pass it.
+    var onConfirm: (Bool) -> Void = { _ in }
 
     @State private var chosen: Set<String> = []      // multi_select, by label
     @State private var freeText = ""                 // "Other…" / free text
@@ -264,11 +269,48 @@ struct QuestionSurface: View {
     @ViewBuilder
     private var control: some View {
         switch question.inputType {
+        case "confirm": confirmControl
         case "multi_select": multiSelect
         case "single_select": singleSelect
         case "number": numberInput
         default: freeTextInput
         }
+    }
+
+    // confirm -> two decisive buttons, the same yes/not-now the web renders
+    // (components.js:556-570). Tapping either IS the commit, so there is no
+    // separate Send; the labels come from the server's options when it sends
+    // them and fall back to Yes / Not now, as the web's do. The yes / no goes
+    // to `onConfirm`, not `onSubmit`: a calendar confirm's YES commits to
+    // `/calendar/events`, never `/elicit/answer` (P18-02).
+    private var confirmControl: some View {
+        let yesLabel = question.options.first?.label ?? "Yes"
+        let noLabel = question.options.dropFirst().first?.label ?? "Not now"
+        return HStack(spacing: face.layout.tightGap) {
+            confirmButton(yesLabel, decisive: true) { onConfirm(true) }
+            confirmButton(noLabel, decisive: false) { onConfirm(false) }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// One confirm button, dealt in with the same rise as the chips. The YES is
+    /// the decisive fill (accent on ground, the web's `.btn.go`); the "Not now"
+    /// is the quiet control (the web's `.btn.ghost`).
+    private func confirmButton(_ label: String, decisive: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(face.bodyFont)
+                .foregroundStyle(decisive ? face.ground : face.ink)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, minHeight: face.layout.minTapTarget)
+                .padding(.horizontal, face.layout.pillPaddingH)
+                .background(Capsule().fill(decisive ? face.accent : face.control))
+        }
+        .buttonStyle(.plain)
+        .opacity(dealt ? 1 : 0)
+        .offset(y: dealt ? 0 : face.motion.revealRise)
+        .animation(reduceMotion ? nil : face.motion.dealAnimation(index: decisive ? 0 : 1), value: dealt)
+        .accessibilityLabel(label)
     }
 
     // multi_select -> toggle chips + Send. The value is the chosen LABELS

@@ -109,6 +109,74 @@ public final class PlanComposer {
         }
     }
 
+    /// Answer a calendar confirm the AGENT surfaced through `/turn`. This does
+    /// NOT go through `answer(...)`: an agent-surfaced confirm has NO
+    /// ElicitSession, so that path's `guard let elicit` would drop it. The YES
+    /// commits the pending write to `/calendar/events`; "Not now" writes
+    /// nothing. Mirrors the web's calendar branch (app.js:6288-6321).
+    ///
+    /// TRUTHFULNESS: the reply says "Done" ONLY after the write returns 200.
+    /// A refused or unreachable write yields the honest "nothing changed" line
+    /// and no plan surface is raised, because nothing landed. `didRefuse` stays
+    /// off on purpose: the sorry beat and the "say it again to retry" line both
+    /// belong to a turn you can re-send, and this confirm is gone once answered.
+    public func confirmCalendar(_ yes: Bool) async {
+        guard let session, let question, !isSending,
+              question.field.hasPrefix("calendar_") else { return }
+        let config = question.config
+        self.question = nil
+
+        guard yes else {
+            // Not now: write nothing, and say so without apologising.
+            answerEcho = "Not now"
+            reply = "Okay, I'll leave your calendar as it is."
+            return
+        }
+        guard let config else {
+            // A calendar confirm with no config to write is not something this
+            // app can honestly commit. Say nothing landed rather than claim it.
+            reply = "I couldn't make that change, so nothing changed."
+            return
+        }
+
+        answerEcho = "Yes"
+        isSending = true
+        didRefuse = false
+        wasUnreachable = false
+        defer { isSending = false }
+        do {
+            try await client.writeCalendarEvent(config, for: session)
+            // Success is the only path that speaks "Done".
+            answerEcho = nil
+            reply = doneLine(for: config.action)
+            elicit = nil
+            // Capacity changed, so Today re-reads and its numbers stay the
+            // server's numbers. No heart: this placed no measured block.
+            await onPlanChanged?()
+        } catch DetailsError.notSignedIn {
+            needsSignIn = true
+        } catch DetailsError.cancelled {
+            // Nobody answered; nothing was learned and nothing changed.
+            return
+        } catch {
+            // Refused (the 502 a failed Google write becomes) or unreachable:
+            // either way, honestly, the calendar did not change.
+            answerEcho = nil
+            reply = "I couldn't reach your calendar, so nothing changed."
+        }
+    }
+
+    /// The honest "Done" line, chosen by the action the server just performed.
+    /// Composed here only because the write endpoint returns a result, not a
+    /// sentence; the web composes the same three lines (app.js:6311-6313).
+    private func doneLine(for action: String?) -> String {
+        switch action {
+        case "delete": return "Done, that's off your calendar now."
+        case "edit": return "Done, I've updated that event."
+        default: return "Done, it's on your calendar now."
+        }
+    }
+
     /// Decline the course offer: an empty pick, straight through to the plan.
     public func skipCourses() async {
         guard let session, let elicit, courseOfferUp, !isSending else { return }
@@ -199,4 +267,28 @@ public final class PlanComposer {
             }
         }
     }
+
+    #if DEBUG
+    /// Seed the confirm exactly as the AGENT surfaces one through `/turn`, so
+    /// the confirm control, its YES → `/calendar/events` write and its "Not
+    /// now" can be exercised without a live agent turn. It decodes real wire
+    /// JSON, so it also proves `TurnQuestionConfig` decodes the calendar fields.
+    /// DEBUG only; nothing in the shipping path calls it.
+    public func debugSeedCalendarConfirm(action: String = "create") {
+        let json = """
+        {"question":"Add 'Deep work' to your calendar, 2pm to 3:30pm today?",
+         "field":"calendar_\(action)","input_type":"confirm",
+         "options":[{"label":"Yes"},{"label":"Not now"}],
+         "allow_free_text":false,
+         "config":{"action":"\(action)","event_id":"evt_debug",
+                   "summary":"Deep work","start":"2026-08-30T14:00:00",
+                   "end":"2026-08-30T15:30:00"}}
+        """
+        guard let q = try? JSONDecoder().decode(TurnQuestion.self, from: Data(json.utf8))
+        else { return }
+        reply = nil
+        answerEcho = nil
+        question = q
+    }
+    #endif
 }

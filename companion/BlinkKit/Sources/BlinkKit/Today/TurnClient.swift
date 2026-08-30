@@ -33,13 +33,45 @@ public struct TurnQuestionOption: Decodable, Sendable, Equatable, Identifiable {
     }
 }
 
-/// `{min, max, step, unit}` for the number input
-/// (`ClarifyQuestion.config`, src/agent/conversation.py:54).
+/// The question's `config` bag (`ClarifyQuestion.config`,
+/// src/agent/conversation.py:54). Two disjoint uses share the one struct,
+/// exactly as they share `question.config` on the wire:
+///   • the number input carries `{min, max, step, unit}`;
+///   • a calendar confirm the AGENT surfaces carries the pending write —
+///     `{action, event_id, summary, start, end}` — which the YES posts back
+///     verbatim to `/calendar/events` (the web reads the same bag, app.js:6303).
+/// Every field is optional and decode-only: a config with neither set decodes
+/// fine, and an input reads only the keys its own type uses.
 public struct TurnQuestionConfig: Decodable, Sendable, Equatable {
+    // number input
     public let min: Int?
     public let max: Int?
     public let step: Int?
     public let unit: String?
+    // calendar confirm (create / edit / delete)
+    public let action: String?
+    public let eventID: String?
+    public let summary: String?
+    public let start: String?
+    public let end: String?
+
+    enum CodingKeys: String, CodingKey {
+        case min, max, step, unit, action, summary, start, end
+        case eventID = "event_id"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        min = try c.decodeIfPresent(Int.self, forKey: .min)
+        max = try c.decodeIfPresent(Int.self, forKey: .max)
+        step = try c.decodeIfPresent(Int.self, forKey: .step)
+        unit = try c.decodeIfPresent(String.self, forKey: .unit)
+        action = try c.decodeIfPresent(String.self, forKey: .action)
+        eventID = try c.decodeIfPresent(String.self, forKey: .eventID)
+        summary = try c.decodeIfPresent(String.self, forKey: .summary)
+        start = try c.decodeIfPresent(String.self, forKey: .start)
+        end = try c.decodeIfPresent(String.self, forKey: .end)
+    }
 }
 
 /// `ClarifyQuestion` (src/agent/conversation.py:33). `inputType` stays a raw
@@ -189,6 +221,45 @@ extension BlinkDetailsClient {
             label: "elicit/courses",
             session: session
         )
+    }
+
+    /// The YES to a calendar confirm the agent surfaced through `/turn`:
+    /// `POST /v1/workspaces/{ws}/calendar/events {confirm:true, action,
+    /// event_id?, summary?, start?, end?}`, the confirm-gated write the web
+    /// commits to (app.js:6305, server.py:2660). The pending action rides in
+    /// `question.config`; only the keys it actually carries are sent.
+    ///
+    /// Returns on a 200 (the server performed the write), THROWS otherwise —
+    /// `DetailsError.refused` on the 502 a failed Google write becomes,
+    /// `.notSignedIn` on 401/403, `.unreachable` on a dead network — so the
+    /// caller only ever says "Done" after a genuine success. This is the phase-2
+    /// write only; the phone never asks for the phase-1 confirm (the agent does).
+    public func writeCalendarEvent(
+        _ config: TurnQuestionConfig,
+        for session: BlinkSession
+    ) async throws {
+        var body: [String: Any] = ["confirm": true]
+        if let action = config.action { body["action"] = action }
+        if let eventID = config.eventID { body["event_id"] = eventID }
+        if let summary = config.summary { body["summary"] = summary }
+        if let start = config.start { body["start"] = start }
+        if let end = config.end { body["end"] = end }
+
+        let url = baseURL
+            .appendingPathComponent("v1/workspaces")
+            .appendingPathComponent(session.workspaceID)
+            .appendingPathComponent("calendar/events")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(session.token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // A Google write round trip lives behind this one, like sync-google.
+        request.timeoutInterval = 30
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        // Success is the 200 itself; the result body is not read. `send` maps
+        // every non-200 to the shared error vocabulary the caller branches on.
+        _ = try await send(request, label: "calendar/events")
     }
 
     private func post(

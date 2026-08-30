@@ -141,6 +141,17 @@ struct TodayScreen: View {
         }
         .task {
             composer.configure(session: session) { await store.refresh() }
+            #if DEBUG
+            // P18-02 door: seed a calendar confirm exactly as the agent surfaces
+            // one, so its render, YES→/calendar/events and "Not now" can be
+            // exercised without a live turn. `-blinkDebugCalendarConfirm create`
+            // (or edit / delete). Against a debug workspace the write itself will
+            // 502, which is the honest failure path; a real signed-in session
+            // commits for real.
+            if let action = UserDefaults.standard.string(forKey: "blinkDebugCalendarConfirm") {
+                composer.debugSeedCalendarConfirm(action: action)
+            }
+            #endif
             await store.load(session: session)
         }
         // P15-08 — the face preference lives on the account. Wire the
@@ -419,6 +430,11 @@ struct TodayScreen: View {
                 QuestionSurface(question: question) { value in
                     voice.stop()   // answering IS a new turn: the old reply's audio yields
                     Task { await composer.answer(value) }
+                } onConfirm: { yes in
+                    // A calendar confirm's YES commits to /calendar/events, not
+                    // /elicit/answer, and bypasses the elicit guard (P18-02).
+                    voice.stop()
+                    Task { await composer.confirmCalendar(yes) }
                 }
                 .id(question.field)   // fresh selection state per question
                 .transition(swapTransition)
