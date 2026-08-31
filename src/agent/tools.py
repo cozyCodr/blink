@@ -406,6 +406,56 @@ def get_capacity(workspace_id: str, days: int = 7) -> Dict[str, Any]:
         return {"status": "error", "error_message": str(e)}
 
 
+# --- P21-06: the dry run respects user-placed sessions too --------------------
+#
+# `Block.user_placed` (P21-04) marks a session the USER put somewhere, and the
+# five committing paths in server.py leave those alone (P21-05). This DRY RUN
+# did not, and it is the one the model reads before deciding what to book. It
+# would propose a fresh time for a task already sitting where the user put it,
+# and propose OTHER work straight on top of pinned sessions, because
+# `ledger_for` does not subtract existing blocks. Nothing here writes, so the
+# plan could not be corrupted (schedule_task_at runs `_clashes_for` and would
+# refuse the overlap), but Blink would show a plan and then refuse half of it a
+# turn later, and offer the user's own pinned work a time they never asked for.
+# Contradicting itself one turn apart is worse than a scheduling bug.
+#
+# Deliberately local to this module rather than imported from src.api.server:
+# the API imports the tools, and reaching back the other way would invert that.
+
+
+def _plan_around_user_placements(store, now: datetime, days: int = 7):
+    """What a planning pass needs in order to leave user-placed sessions alone.
+
+    Returns (schedulable_tasks, ledger, protected_blocks):
+    - `schedulable_tasks` is the ready/scheduled tasks MINUS any task already
+      holding a still-planned session the user placed. They are held back
+      because they have an answer already, not because they were forgotten, and
+      the caller reports them rather than going quiet about them.
+    - `ledger` counts those sessions as BUSY, so nothing is proposed on top of
+      one. Built the same way `_reschedule_placements` builds its own: real
+      constraints, real no-touch zones, plus the standing sessions, all through
+      one `build_capacity_ledger` call.
+    - `protected_blocks` is what was held back, so the reply can name it.
+    """
+    protected = sorted(
+        (b for b in store.blocks.values()
+         if b.status == "planned" and getattr(b, "user_placed", False)),
+        key=lambda b: b.starts_at,
+    )
+    protected_ids = {b.task_id for b in protected}
+    schedulable = [t for t in store.get_ready_tasks() if t.id not in protected_ids]
+    busy = constraints_to_intervals(list(store.constraints.values()),
+                                    start_date=now, days=days)
+    busy += zones_to_intervals(list(store.zones.values()), start_date=now, days=days)
+    # Only sessions still ahead of us can be proposed over; a window already
+    # behind us is dropped by the scheduler anyway.
+    busy += [TimeInterval(start=b.starts_at, end=b.ends_at)
+             for b in protected if b.ends_at > now]
+    ledger = build_capacity_ledger(start_date=now, days=days,
+                                   constraints=busy, calendar_busy=[])
+    return schedulable, ledger, protected
+
+
 def propose_schedule_for_workspace(workspace_id: str) -> Dict[str, Any]:
     """DRY RUN a schedule: work out where the user's ready tasks WOULD go. Saves nothing.
 
@@ -432,6 +482,15 @@ def propose_schedule_for_workspace(workspace_id: str) -> Dict[str, Any]:
     `starts_at`). `unplaced` is the work that did not fit and the real reason.
     Times are never fabricated: placement comes only from real free capacity.
 
+    `already_placed` is work this draft LEFT ALONE on purpose: the user put
+    those sessions at a time themselves, so nothing here proposes moving them
+    and nothing is proposed on top of them. They are not missing from the plan,
+    they are already answered, and each entry carries the real time it sits at.
+    SAY SO when there are any, naming the time from `starts_at_local` ("the
+    client proposal is already on the fifteenth, I left it where you put it").
+    Presenting the draft as the whole week while quietly omitting them tells the
+    user their work vanished.
+
     Args:
         workspace_id: The workspace to draft a schedule for.
     """
@@ -439,8 +498,8 @@ def propose_schedule_for_workspace(workspace_id: str) -> Dict[str, Any]:
         store = get_or_create_store(workspace_id)
         now = now_naive()
         tz = _workspace_zone(store)
-        ledger = ledger_for(store, now)
-        sched = propose_schedule(store.get_active_commitments(), store.get_ready_tasks(), ledger, now)
+        schedulable, ledger, protected = _plan_around_user_placements(store, now)
+        sched = propose_schedule(store.get_active_commitments(), schedulable, ledger, now)
         proposed = [
             {
                 "task_id": b.task_id,
@@ -471,6 +530,22 @@ def propose_schedule_for_workspace(workspace_id: str) -> Dict[str, Any]:
             # authoritative name is proposed_blocks.
             "blocks": proposed,
             "unplaced": [{"title": u.title, "reason": u.reason} for u in sched.unplaced],
+            # Held back on purpose, and named rather than silently dropped: the
+            # draft has nothing to say about work the user already placed, but
+            # the REPLY does.
+            "already_placed": [
+                {
+                    "task_id": b.task_id,
+                    "block_id": b.id,
+                    "title": _session_title(store, b),
+                    "starts_at": b.starts_at.isoformat(),
+                    "starts_at_local": _fmt_local_day_time(b.starts_at, tz),
+                    "ends_at_local": _fmt_local_day_time(b.ends_at, tz),
+                    "reason": "You picked this time, so I left it where it is.",
+                }
+                for b in protected
+            ],
+            "already_placed_count": len(protected),
             "utilization_pct": sched.diagnostics.get("utilization_pct", 0.0),
         }
     except Exception as e:  # pragma: no cover - defensive
