@@ -187,5 +187,84 @@ class TestTtsStreamEndpoint(unittest.TestCase):
         self.assertEqual(base64.b64decode(r.json()["audio_base64"]), _FAKE_MP3)
 
 
+"""
+2026-09-01 — speech never contains a URL.
+
+The user heard Blink read a Google grounding redirect out loud: hundreds of
+base64 characters. Sources now travel as structured data, but a model can still
+emit a link, so the synthesis path itself strips URLs before speaking. This is
+presentation only: nothing is added, and the TEXT returned to the client is
+never touched by this.
+"""
+
+_GROUNDING_URL = (
+    "https://vertexaisearch.cloud.google.com/grounding-api-redirect/"
+    "AUZIYQG4K1B2j94YC_" + "Qx7Zk9" * 20 + "=="
+)
+
+
+class TestSpeechStripsUrls(unittest.TestCase):
+    def tearDown(self):
+        tts.set_client(None)
+        server.stores.clear()
+
+    def test_speakable_replaces_a_grounding_url_with_a_spoken_standin(self):
+        said = tts.speakable(f"The exam is on 12 November. Source: {_GROUNDING_URL}")
+        self.assertNotIn("http", said)
+        self.assertNotIn("vertexaisearch", said)
+        self.assertIn("12 November", said)
+        self.assertIn(tts.SPOKEN_URL_STANDIN, said)
+
+    def test_speakable_leaves_url_free_text_alone(self):
+        line = "You have two sessions left today, and both fit before six."
+        self.assertEqual(tts.speakable(line), line)
+
+    def test_speakable_handles_www_and_several_links(self):
+        said = tts.speakable("See www.examboard.org and https://gov.uk/exams for dates.")
+        self.assertNotIn("www.", said)
+        self.assertNotIn("https://", said)
+        self.assertEqual(said.count(tts.SPOKEN_URL_STANDIN), 2)
+
+    def test_synthesis_is_handed_text_with_no_url(self):
+        class _Capturing:
+            def __init__(self):
+                self.text = None
+
+            def synthesize_speech(self, *a, **k):
+                self.text = k["input"].text
+                return _FakeResponse(_FAKE_MP3)
+
+        fake = _Capturing()
+        tts.set_client(fake)
+        tts.synthesize(f"The date is confirmed. {_GROUNDING_URL}")
+        self.assertNotIn("http", fake.text)
+        self.assertIn("The date is confirmed.", fake.text)
+
+    def test_streaming_synthesis_is_handed_text_with_no_url(self):
+        fake = _FakeStreamingTtsClient()
+        tts.set_client(fake)
+        list(tts.synthesize_stream(f"The date is confirmed. {_GROUNDING_URL}"))
+        spoken = fake.requests[1].input.text
+        self.assertNotIn("http", spoken)
+        self.assertIn("The date is confirmed.", spoken)
+
+    def test_a_url_only_reply_still_synthesizes(self):
+        tts.set_client(_FakeTtsClient())
+        self.assertEqual(tts.synthesize(_GROUNDING_URL), _FAKE_MP3)
+
+    def test_the_client_text_is_never_rewritten_by_the_tts_call(self):
+        # /tts returns audio only; the reply text the client holds is its own,
+        # and nothing on this path mutates the caller's string.
+        tts.set_client(_FakeTtsClient())
+        server.stores.clear()
+        client = TestClient(server.app)
+        original = f"The exam is on 12 November. {_GROUNDING_URL}"
+        r = client.post("/v1/workspaces/ws_tts_urls/tts", json={"text": original})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(set(r.json()), {"audio_base64", "mime"})
+        self.assertIn(_GROUNDING_URL, original)  # untouched in the caller's hands
+
+
+
 if __name__ == "__main__":
     unittest.main()

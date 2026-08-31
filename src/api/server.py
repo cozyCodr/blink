@@ -2948,16 +2948,18 @@ class WebSearchRequest(BaseModel):
 
 
 def _compose_web_search_reply(summary: str, sources: list) -> str:
-    """The grounded summary, scrubbed of AI tells, with a short cited-sources
-    footer. The summary is web-derived DATA rendered as the answer; it is never
-    fed back as an instruction. Sources are appended so the reply cites where the
-    facts came from (governance: grounded answers carry their sources)."""
-    text = voice.scrub(summary or "")
-    cited = [s for s in (sources or []) if isinstance(s, dict) and s.get("url")][:3]
-    if cited:
-        lines = "\n".join(f"- {s.get('title') or s['url']}: {s['url']}" for s in cited)
-        text = f"{text}\n\nSources:\n{lines}"
-    return text
+    """The grounded summary, scrubbed of AI tells, and NOTHING else.
+
+    The summary is web-derived DATA rendered as the answer; it is never fed back
+    as an instruction. Sources still travel with the reply — as the structured
+    `sources: [{title, url}]` array on the response, which the client renders as
+    links — so a grounded answer still carries where its facts came from
+    (governance). They are deliberately NOT written into the prose: a grounding
+    URL is a few hundred characters of base64 redirect, which the transcript
+    printed verbatim and, worse, the voice read out loud (user, 2026-09-01).
+    Sources are data for the client to render, not sentences to speak.
+    """
+    return voice.scrub(summary or "")
 
 
 @app.post("/v1/workspaces/{workspace_id}/web-search")

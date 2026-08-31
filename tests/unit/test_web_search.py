@@ -99,6 +99,16 @@ class TestGrantedSearch(_WebSearchBase):
         self.assertEqual(out["status"], "success")
         self.assertEqual(out["summary"], _FAKE_TEXT)
         # Sources are cleaned: the duplicate and the non-http entry are dropped.
+        # The MODEL's copy carries no URL at all — it cites by name, and cannot
+        # reproduce a link it never saw (user, 2026-09-01).
+        self.assertEqual(out["sources"], [{"title": "examboard.org", "site": "examboard.org"}])
+        self.assertNotIn("http", repr(out))
+        self.assertIn("Never write a URL", out["citation_rule"])
+
+    def test_run_web_search_still_carries_the_real_urls_for_the_client(self):
+        # The endpoint half keeps the real links: they become the client's
+        # structured `sources` array, rendered as clickable links.
+        out = tools.run_web_search(self.ws, "when is the exam")
         self.assertEqual(out["sources"], [{"title": "examboard.org", "url": "https://examboard.org/dates"}])
 
     def test_consent_is_remembered_second_call_skips_the_ask(self):
@@ -132,8 +142,10 @@ class TestConfirmYesEndpoint(_WebSearchBase):
         body = r.json()
         self.assertEqual(body["type"], "message")
         self.assertIn("12 November 2026", body["text"])
-        self.assertIn("Sources:", body["text"])
-        self.assertIn("https://examboard.org/dates", body["text"])
+        # The reply TEXT carries no URL and no "Sources:" footer: the links are
+        # structured data the client renders, never prose the voice reads out.
+        self.assertNotIn("http", body["text"])
+        self.assertNotIn("Sources:", body["text"])
         self.assertEqual(body["sources"], [{"title": "examboard.org", "url": "https://examboard.org/dates"}])
         # The yes is REMEMBERED on the profile.
         self.assertEqual(self.store.get_profile().web_search_consent, "granted")

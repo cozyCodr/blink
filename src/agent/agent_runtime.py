@@ -335,6 +335,38 @@ def _confirm_to_contract(confirm: Dict[str, Any]) -> Dict[str, Any]:
     return {"type": "question", "input_type": "confirm", "question": nested}
 
 
+def _grounded_reply(
+    workspace_id: str,
+    message: str,
+    history: Optional[List[Dict[str, str]]],
+    context_note: Optional[str],
+) -> Dict[str, Any]:
+    """The fallback reply, guaranteed to carry visible text.
+
+    `conversation.respond` is grounded chat and never claims an action it did
+    not take — but it can itself come back empty (the model returns nothing, or
+    `voice.scrub` removes everything it did return), and an empty `text` on the
+    message path reaches the user as SILENCE (user, 2026-09-01: told Blink about
+    their work and got no reply at all). So the last resort is the SAME honest
+    grounded line `conversation.respond` uses when the model is unavailable:
+    say plainly that no answer came together, and show the real state. Nothing
+    here is invented — the state block is composed from stored values.
+    """
+    out = conversation.respond(workspace_id, message, history, context_note=context_note)
+    if not isinstance(out, dict):  # pragma: no cover - defensive
+        out = {"type": "message", "text": ""}
+    out.setdefault("type", "message")
+    if str(out.get("text") or "").strip():
+        return out
+    decision_log.decision("agent", workspace_id, "empty reply -> grounded state")
+    ctx = conversation._state_context(workspace_id, for_user=True)
+    out["text"] = (
+        "I didn't get a reply together just then. Here's where things stand.\n"
+        f"{ctx}"
+    ).strip()
+    return out
+
+
 def run_chat_turn(
     workspace_id: str,
     message: str,
@@ -356,10 +388,10 @@ def run_chat_turn(
         context_text = _build_context(workspace_id, context_note, now)
         events = list(runner.run_turn(workspace_id, message, context_text))
     except llm.LlmUnavailable:
-        return conversation.respond(workspace_id, message, history, context_note=context_note)
+        return _grounded_reply(workspace_id, message, history, context_note)
     except Exception as e:  # any ADK/Gemini/Google failure degrades, never fabricates
         decision_log.decision("agent", workspace_id, f"degraded: {type(e).__name__}")
-        return conversation.respond(workspace_id, message, history, context_note=context_note)
+        return _grounded_reply(workspace_id, message, history, context_note)
 
     confirm, tool_log, final_text, trace = _extract_from_events(events)
 
@@ -378,14 +410,28 @@ def run_chat_turn(
     if not final_text:
         # The agent produced no visible answer (e.g. only read tools ran, or the
         # model returned nothing usable). Fall back to grounded chat rather than
-        # ship an empty reply.
-        return conversation.respond(workspace_id, message, history, context_note=context_note)
+        # ship an empty reply — and `_grounded_reply` guarantees THAT is not
+        # empty either, so a turn can never answer with nothing. The trace still
+        # rides along: the read tools genuinely ran, and a turn that shows a
+        # trace with no text was exactly the reported silence.
+        out = _grounded_reply(workspace_id, message, history, context_note)
+        if trace and isinstance(out, dict):
+            out.setdefault("trace", trace)
+        return out
 
     if tool_log:
         decision_log.decision(
             "agent", workspace_id, f"tools=[{', '.join(tool_log)}] -> reply",
         )
-    out: Dict[str, Any] = {"type": "message", "text": voice.scrub(final_text)}
+    spoken = voice.scrub(final_text)
+    if not spoken.strip():
+        # scrub can empty a reply that was nothing but AI tells. Same rule: a
+        # message path never ships empty text.
+        out = _grounded_reply(workspace_id, message, history, context_note)
+        if trace and isinstance(out, dict):
+            out.setdefault("trace", trace)
+        return out
+    out: Dict[str, Any] = {"type": "message", "text": spoken}
     # P20-01: the reply carries its evidence — the tool calls this turn GENUINELY
     # made, each with a summary parsed from its real response. A turn with no
     # tool calls carries no `trace` key at all.

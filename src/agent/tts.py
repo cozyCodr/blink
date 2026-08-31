@@ -21,6 +21,7 @@ one-time user/ops step, not something this module can do.
 """
 from __future__ import annotations
 
+import re
 from typing import Iterator
 
 # Blink's voice: Charon, a calm male Chirp 3 HD voice (user-picked 2026-08-26).
@@ -40,6 +41,37 @@ VOLUME_GAIN_DB = 6.0
 #: playable audio and to know how many seconds it is holding.
 STREAM_SAMPLE_RATE = 24000
 STREAM_BYTES_PER_SAMPLE = 2
+
+
+#: A URL in the text to be SPOKEN. Matches an http(s) or bare-www address and
+#: runs to the first whitespace, so a Google grounding redirect — hundreds of
+#: base64 characters — is caught whole.
+_URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+
+#: What a URL becomes in speech. A short noun phrase, so the sentence around it
+#: stays grammatical ("see the link for the dates").
+SPOKEN_URL_STANDIN = "the link"
+
+
+def speakable(text: str) -> str:
+    """The same text with every URL replaced by a short spoken stand-in.
+
+    This is PRESENTATION, not truth: nothing is added and no claim changes, an
+    unspeakable token is simply made speakable. A grounding URL read aloud is
+    minutes of base64 (user, 2026-09-01), so no URL may ever reach synthesis.
+
+    It applies ONLY to what is spoken. The text returned to the client from
+    `/turn`, `/chat` and `/web-search` is never touched — the stripping happens
+    inside the two synthesis functions below, which return audio, so no caller
+    can accidentally ship the shortened text as the reply.
+    """
+    if not text:
+        return text
+    out = _URL_RE.sub(SPOKEN_URL_STANDIN, text)
+    # Trailing punctuation that only existed to introduce the link ("Source:
+    # https://…") would otherwise leave a stranded colon before the stand-in.
+    out = re.sub(r"[:\-–—]\s+" + re.escape(SPOKEN_URL_STANDIN), f" {SPOKEN_URL_STANDIN}", out)
+    return re.sub(r"[ \t]{2,}", " ", out).strip()
 
 
 class TtsUnavailable(RuntimeError):
@@ -94,6 +126,9 @@ def synthesize(text: str, voice_name: str = DEFAULT_VOICE) -> bytes:
     if not text or not text.strip():
         raise TtsUnavailable("No text to synthesize.")
 
+    # Defence in depth: whatever the model wrote, speech never contains a URL.
+    text = speakable(text)
+
     client = get_client()
     try:
         from google.cloud import texttospeech
@@ -146,6 +181,9 @@ def synthesize_stream(
     """
     if not text or not text.strip():
         raise TtsUnavailable("No text to synthesize.")
+
+    # Same defence on the streaming path: no URL is ever synthesized.
+    text = speakable(text)
 
     client = get_client()
     try:

@@ -450,5 +450,68 @@ class TestCrudLandsEndToEnd(_AgentRuntimeBase):
         self.assertEqual(self.spy.deleted, ["google-evt-DENTIST"])
 
 
+# --- (z) a turn NEVER answers with nothing (user, 2026-09-01) ---------------
+# The user told Blink about their work, their busy times and their side
+# projects and got SILENCE; a follow-up showed only a tool-trace line ("list
+# open questions") and still no words. On the message path an empty `text` is a
+# turn that did not answer, so it is now structurally impossible: every route
+# out of run_chat_turn goes through _grounded_reply, whose last resort is the
+# honest grounded state line — never a fabricated sentence.
+
+class TestATurnAlwaysSpeaks(_AgentRuntimeBase):
+    def _assert_speaks(self, out):
+        self.assertEqual(out.get("type"), "message")
+        self.assertTrue(str(out.get("text") or "").strip(), f"empty reply: {out!r}")
+
+    def test_read_tools_only_and_no_model_text_still_answers(self):
+        # Only a READ tool ran and the model produced no final text at all.
+        events = [
+            _FakeEvent(calls=[_FakeFC("list_open_questions", "call_1")]),
+            _FakeEvent(responses=[_FakeFR("list_open_questions", {"status": "success"})]),
+            _FakeEvent(text="", final=True),
+        ]
+        agent_runtime.set_agent_runner(_FakeRunner(events))
+        out = agent_runtime.run_chat_turn(self.ws, "here's what my work looks like")
+        self._assert_speaks(out)
+        # The trace still rides along as evidence the read genuinely ran.
+        self.assertEqual([e["tool"] for e in out["trace"]], ["list_open_questions"])
+
+    def test_model_text_that_scrubs_to_nothing_still_answers(self):
+        agent_runtime.set_agent_runner(_FakeRunner([_FakeEvent(text="   ", final=True)]))
+        self._assert_speaks(agent_runtime.run_chat_turn(self.ws, "tell me about my week"))
+
+    def test_an_empty_grounded_fallback_still_answers(self):
+        # Belt and suspenders: even if grounded chat itself came back empty
+        # (the model returned nothing usable), the turn speaks the state.
+        agent_runtime.set_agent_runner(_FakeRunner([_FakeEvent(text="", final=True)]))
+        orig = agent_runtime.conversation.respond
+        agent_runtime.conversation.respond = lambda *a, **k: {"type": "message", "text": ""}
+        try:
+            out = agent_runtime.run_chat_turn(self.ws, "so, my side projects")
+        finally:
+            agent_runtime.conversation.respond = orig
+        self._assert_speaks(out)
+
+    def test_the_adk_path_being_down_still_answers(self):
+        agent_runtime.set_agent_runner(_RaisingRunner())
+        self._assert_speaks(agent_runtime.run_chat_turn(self.ws, "how's my week looking"))
+
+    def test_turn_endpoint_never_returns_an_empty_message(self):
+        events = [
+            _FakeEvent(calls=[_FakeFC("list_open_questions", "call_1")]),
+            _FakeEvent(responses=[_FakeFR("list_open_questions", {"status": "success"})]),
+            _FakeEvent(text="", final=True),
+        ]
+        agent_runtime.set_agent_runner(_FakeRunner(events))
+        client = TestClient(server.app)
+        r = client.post(f"/v1/workspaces/{self.ws}/turn",
+                        json={"message": "I work weekdays and build side projects at night"})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        if body.get("type") == "message":
+            self.assertTrue(str(body.get("text") or "").strip())
+
+
+
 if __name__ == "__main__":
     unittest.main()
