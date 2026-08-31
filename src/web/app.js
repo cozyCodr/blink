@@ -1695,7 +1695,16 @@
     }
 
     function begin() {
-      if (recording || !canStart() || (isLocked && isLocked())) return;
+      if (recording || (isLocked && isLocked())) return;
+      if (!canStart()) {
+        // A question or an in-flight turn owns the surface. Refusing is right;
+        // refusing SILENTLY read as "the mic is broken" (2026-08-31, local
+        // Chrome sitting on an onboarding question). Say why instead.
+        setHint(agent.get() === "asking"
+          ? "Answer the question on screen first, then hold the mic."
+          : "One moment, still thinking.");
+        return;
+      }
       beginTurn();
 
       if (!supported) {
@@ -5465,11 +5474,22 @@
 
      Returns null when the browser has no Web Audio, which sends the caller
      back to the whole-file path. */
-  function createPcmStream(sampleRate, text) {
-    var AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return null;
-    var ctx;
-    try { ctx = new AC(); } catch (_) { return null; }
+  function createPcmStream(sampleRate, text, sharedCtx) {
+    // An AudioContext born outside a user gesture starts suspended on Safari
+    // and resume() outside a gesture does not lift it, so a fresh context per
+    // reply is a context that may never make a sound. The caller passes the
+    // session's already-unlocked context instead; only when none is given
+    // (replay, tests) does this build its own.
+    var ctx, ownCtx;
+    if (sharedCtx) {
+      ctx = sharedCtx;
+      ownCtx = false;
+    } else {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      try { ctx = new AC(); } catch (_) { return null; }
+      ownCtx = true;
+    }
 
     var pending = [];        // AudioBuffers waiting for play()
     var kept = [];           // EVERY decoded buffer, in order, for replay()
@@ -5576,7 +5596,9 @@
       // Whoever is feeding this player gets to shut the socket too, so an
       // interrupted or unused reply stops downloading instead of draining.
       if (onPause) { var f = onPause; onPause = null; try { f(); } catch (_) {} }
-      try { if (ctx.close) ctx.close(); } catch (_) {}
+      // Close only a context this player created. The shared session context
+      // must outlive every reply, or the first interrupt mutes the session.
+      if (ownCtx) { try { if (ctx.close) ctx.close(); } catch (_) {} }
     }
 
     var api = {
@@ -5725,9 +5747,31 @@
     // else in this file.
     var armed = false;
     var GESTURES = ["pointerdown", "keydown", "touchstart"];
+    /* The streamed reply path plays through Web Audio, which has its own
+       autoplay lock: an AudioContext must be created or resumed inside a real
+       gesture or Safari leaves it suspended forever, playing into silence.
+       So the same gesture that unlocks the <audio> element also unlocks ONE
+       AudioContext for the session. prepareStreamed refuses to stream unless
+       this context is genuinely running, falling back to the whole-file path
+       on the unlocked element, so no reply is ever handed to a player that
+       cannot make a sound. */
+    var sharedAC = null;
+    function unlockCtx() {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      try { if (!sharedAC) sharedAC = new AC(); } catch (_) { sharedAC = null; return; }
+      try { if (sharedAC.resume) sharedAC.resume(); } catch (_) {}
+    }
+    function runningCtx() {
+      return (sharedAC && sharedAC.state === "running") ? sharedAC : null;
+    }
     function onGesture() {
       disarm();
       unlock();
+      unlockCtx();
+      // resume() is async and can quietly fail; keep listening for gestures
+      // until the context is really running, then this stops re-arming.
+      if (!runningCtx()) setTimeout(function () { if (!runningCtx()) arm(); }, 250);
     }
     function disarm() {
       armed = false;
@@ -5736,7 +5780,7 @@
       });
     }
     function arm() {
-      if (armed || unlocked) return;
+      if (armed || (unlocked && runningCtx())) return;
       armed = true;
       // Capture phase: the gesture must reach this even if a handler on the
       // way down stops propagation.
@@ -5833,7 +5877,7 @@
       return h;
     }
 
-    return { arm: arm, unlock: unlock, relock: relock, take: take };
+    return { arm: arm, unlock: unlock, relock: relock, take: take, runningCtx: runningCtx };
   }
 
   var speaker = createSpeaker();
@@ -5920,7 +5964,15 @@
        completes and the full text still lands, so the reply is never lost. */
     function prepareStreamed(text, tok) {
       if (!window.fetch || !window.ReadableStream) return Promise.resolve(null);
-      if (!(window.AudioContext || window.webkitAudioContext)) return Promise.resolve(null);
+      // Stream only into a context that is provably unlocked. Without one the
+      // player would schedule audio into a suspended context: the text lands,
+      // nothing is heard, and nothing says why. The whole-file path on the
+      // unlocked shared element handles the reply instead.
+      var sctx = speaker.runningCtx();
+      if (!sctx) {
+        try { console.debug("[voice] no unlocked AudioContext, taking the whole-file path"); } catch (_) {}
+        return Promise.resolve(null);
+      }
       return fetch("/v1/workspaces/" + WS + "/tts/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -5932,7 +5984,7 @@
         }
         if (tok !== token || !voiceOn()) { try { r.body.cancel(); } catch (_) {} return null; }
         var rate = parseInt(r.headers.get("X-Sample-Rate"), 10) || 24000;
-        var player = createPcmStream(rate, text);
+        var player = createPcmStream(rate, text, sctx);
         if (!player) { try { r.body.cancel(); } catch (_) {} return null; }
         var reader = r.body.getReader();
         player.onPause(function () { try { reader.cancel(); } catch (_) {} });
