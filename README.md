@@ -27,7 +27,7 @@ Nothing here rests on a document's own word.
 | We audited our own agent against 100 realistic requests, fixed the gaps, and re-scored | `docs/AGENT_COVERAGE_AUDIT.md` (effective pass rate 42/100 → 54/100, with every remaining miss still listed) | read §(b) and §(c) |
 | Tool **selection** is measured against the live model, and a destructive mistake is scored separately | `tests/evalsets/tool_selection_probe.py` (exit code 2 is reserved for a delete/cancel that fired where it was not authorised) | `tests/evalsets/TOOL_SELECTION_PROBE.md` |
 | Blink is measured against Google's own agent canon, PARTIAL and ABSENT verdicts included | `docs/AGENTIC_STANDARDS_AUDIT.md` | read it |
-| 849 tests, fully offline: the LLM mocked at one seam, Firestore off | `tests/` | `python -m pytest -q` |
+| 987 tests, fully offline: the LLM mocked at one seam, Firestore off | `tests/` | `python -m pytest -q` |
 | The app boots and serves a turn with **no credentials at all** | deterministic fallbacks on every LLM path; `/_health` reports `"backend": "memory"` | see [Run it locally](#run-it-locally) |
 
 ## The problem
@@ -178,7 +178,7 @@ Open **http://localhost:8080**. Tap the mic, type *"I want to become a data scie
 
 ```bash
 source .venv/bin/activate
-python -m pytest -q     # 849 passing, fully offline (the LLM is mocked, Firestore is off)
+python -m pytest -q     # 987 passing, fully offline (the LLM is mocked, Firestore is off)
 ```
 
 There is also an ADK-native evalset that runs the real `root_agent` in Google's own harness — strict tool-trajectory scoring plus final-response matching (see `tests/evalsets/README.md`; unlike pytest it drives the live Gemini model, so it needs the Vertex credentials from `.env`):
@@ -189,7 +189,7 @@ PYTHONPATH=. .venv/bin/adk eval src/agent tests/evalsets/blink.evalset.json \
   --config_file_path tests/evalsets/test_config.json --print_detailed_results
 ```
 
-The suite covers both halves of agent evaluation: **trajectory** (scenario tests in `tests/scenarios/` drive full pipelines end to end and assert the route and tool path taken) and **final response** (the grounded-reply invariants assert the text matches what actually happened, `tests/unit/test_grounded_responses.py`). The deterministic core, every specialist's fallback, and the disruption pipeline are all covered too. 849 tests, fully offline, with the LLM mocked at the `llm.set_client` seam, so the whole suite runs without spending a single token.
+The suite covers both halves of agent evaluation: **trajectory** (scenario tests in `tests/scenarios/` drive full pipelines end to end and assert the route and tool path taken) and **final response** (the grounded-reply invariants assert the text matches what actually happened, `tests/unit/test_grounded_responses.py`). The deterministic core, every specialist's fallback, and the disruption pipeline are all covered too. 987 tests, fully offline, with the LLM mocked at the `llm.set_client` seam, so the whole suite runs without spending a single token.
 
 ## Deploy to Cloud Run
 
@@ -249,7 +249,7 @@ src/types/          # the Pydantic domain model (entities.py)
 src/memory/         # the memory manager over the durable Memory entity
 src/sim/            # offline simulation: fake store, personas, scenario runner
 companion/          # the iOS companion (SwiftUI): same brain, same API, in your pocket
-tests/              # 849 offline tests (unit + scenario; the LLM is mocked, Firestore off)
+tests/              # 987 offline tests (unit + scenario; the LLM is mocked, Firestore off)
 tests/evalsets/     # the adk eval evalset + the live tool-selection probe (billable, never in CI)
 docs/               # PRD, ARCHITECTURE, DIAGRAMS, the companion design docs, and two
                     #   audits: AGENT_COVERAGE_AUDIT (100 scenarios scored against real
