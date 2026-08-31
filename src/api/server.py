@@ -1167,8 +1167,26 @@ def _session_artifacts(store, blocks: int) -> Optional[List[Dict[str, Any]]]:
     return sessions
 
 
+# The offline zero-task line. It is only ever honest about ONE thing — that the
+# extractor found nothing schedulable in THIS message — so it must never be the
+# reply to a live conversational turn, where it reads as the agent forgetting
+# what was just said. Every live path hands an empty extraction to the agent
+# first (see the `concrete_tasks` branch of `_turn`); this text survives as the
+# OFFLINE fallback only.
+_NO_TASKS_TEXT = ("I looked for something to schedule in that, but I didn't "
+                  "find a concrete task. Want me to plan it properly?")
+
+# The same honest miss, said inside a planning flow the user is already in
+# (synthesis after elicitation), where "want me to plan it properly?" would be
+# a non-sequitur — they are already planning.
+_NO_PLAN_TASKS_TEXT = ("I couldn't turn that into concrete steps I'd be "
+                       "confident scheduling. Tell me a bit more about what "
+                       "the work actually involves and I'll build it out.")
+
+
 def _planned_outcome_response(
-    store, task_count: int, blocks: int, now: Optional[datetime] = None
+    store, task_count: int, blocks: int, now: Optional[datetime] = None,
+    empty_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Grounded planned-turn response (P8-01a): the reply text is derived from
     the REAL outcome, so the agent never claims scheduling it didn't do.
@@ -1183,8 +1201,7 @@ def _planned_outcome_response(
     if task_count == 0:
         return {
             "type": "message",
-            "text": ("I looked for something to schedule in that, but I didn't "
-                     "find a concrete task. Want me to plan it properly?"),
+            "text": empty_text or _NO_TASKS_TEXT,
             "tasks": 0,
             "blocks_scheduled": 0,
         }
@@ -1263,7 +1280,12 @@ def _synthesize_and_schedule(
     if not res.tasks:
         # Nothing to schedule: skip the scheduler pass (it would only reshuffle
         # unrelated tasks) and answer honestly instead of claiming a plan.
-        return _planned_outcome_response(store, 0, 0)
+        # This site is reached ONLY from inside a planning flow the user is
+        # already in (the plan_goal fall-through, /elicit/answer, /elicit/
+        # courses), so it must not offer to "plan it properly" — that is what
+        # they were just doing. Same honest miss, said in context.
+        return _planned_outcome_response(store, 0, 0,
+                                         empty_text=_NO_PLAN_TASKS_TEXT)
     blocks = _schedule_current(store, workspace_id, now)
     return _planned_outcome_response(store, len(res.tasks), blocks, now)
 
@@ -1653,9 +1675,27 @@ def _turn(workspace_id: str, payload: TurnRequest,
     store.add_commitment(comm)
     decomp = decompose(workspace_id=workspace_id, commitment_id=comm.id, raw_text=message, now=now)
     if not decomp.tasks:
-        # Nothing concrete came out: drop the just-created (empty) commitment,
-        # skip scheduling, and say so honestly (P8-01a) instead of pretending.
+        # Nothing concrete came out: drop the just-created (empty) commitment
+        # and skip scheduling. The commitment cleanup happens on BOTH paths
+        # below — an empty commitment must never survive this turn.
         store.commitments.pop(comm.id, None)
+        # Audit gap (the same class already fixed for `checkin` and
+        # `disruption`): this branch is a deterministic decompose-and-schedule
+        # pipeline that never invokes the agent, so when the extractor finds
+        # nothing it has no conversation history and no tools, and the canned
+        # line it used to emit read as the agent forgetting what was just said
+        # ("clear my day" -> sessions cancelled -> "I didn't find a concrete
+        # task. Want me to plan it properly?"). An empty extraction is exactly
+        # the case where the deterministic path knows the LEAST, so hand the
+        # turn to the agent, which has the history and the full tool set and
+        # can answer in context. The canned line stays as the OFFLINE fallback
+        # only — same agent_available() shape as the branches above.
+        if agent_runtime.agent_available():
+            reply = agent_runtime.run_chat_turn(
+                workspace_id, message, payload.history,
+                context_note=_NO_TASKS_CONTEXT_NOTE)
+            reply.setdefault("type", "message")
+            return reply
         return _planned_outcome_response(store, 0, 0)
     finish_naming(comm)
     for t in decomp.tasks:
@@ -1664,6 +1704,22 @@ def _turn(workspace_id: str, payload: TurnRequest,
         store.questions[q.id] = q
     blocks = _schedule_current(store, workspace_id, now)
     return _planned_outcome_response(store, len(decomp.tasks), blocks, now)
+
+
+_NO_TASKS_CONTEXT_NOTE = (
+    "This message was routed as new work to break down, but the task "
+    "extractor found nothing concrete in it to schedule, so nothing was "
+    "planned and nothing was changed by that attempt. Do NOT announce that "
+    "failure and do NOT offer to \"plan it properly\" as if the message were a "
+    "fresh goal — the router may simply have been wrong about what they "
+    "meant. Read the conversation above and answer THE MESSAGE THEY ACTUALLY "
+    "SENT, in context, using your tools to find out what is true before you "
+    "speak: if they are asking about, correcting or reacting to something you "
+    "just did, respond to that. Only if the message really is new work with "
+    "no concrete task in it should you ask what the work involves, and then "
+    "in one short question. Never claim you scheduled, planned, cancelled or "
+    "changed anything unless a tool returned that it happened."
+)
 
 
 _DISRUPTION_CONTEXT_NOTE = (

@@ -2889,6 +2889,11 @@ def cancel_session(workspace_id: str, block_id: str) -> Dict[str, Any]:
     calendar_deleted is 0 do not claim the calendar changed — the session is
     still off the plan. An unknown id cancels nothing and says so.
 
+    Say BOTH halves of what happened: the time is free, and the task is still on
+    their list as unscheduled work. The user cannot tell that from the outside,
+    and a reply that reports only the cancel reads as though the work went with
+    it.
+
     Args:
         workspace_id: The workspace the session belongs to.
         block_id: The session's id, from list_todays_sessions or the plan.
@@ -2942,6 +2947,12 @@ def cancel_sessions(workspace_id: str, block_ids: List[str]) -> Dict[str, Any]:
     / `end_date` for exactly this — so "cleared your week" is never said over a
     single day's ids. Never report a partial sweep as a clean one. An empty list
     is a clean no-op. More than 25 at once is refused whole, changing nothing.
+
+    Say BOTH halves of what happened, and name the real `cancelled_count`: that
+    many sessions came off, the time is theirs again, AND every one of those
+    tasks is still on their list as unscheduled work. The user cannot tell a
+    time-only clear from a wipe by looking, so a reply that reports only the
+    cancel leaves them unsure whether their work survived.
 
     Args:
         workspace_id: The workspace the sessions belong to.
