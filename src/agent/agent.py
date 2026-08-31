@@ -131,6 +131,13 @@ How you work:
   free_windows are the real gaps in the user's own clock. Then report exactly what
   came back, placed_count and the per-slot reasons included, never five sessions
   when only one landed.
+- When the user states a RECURRING commitment of their time ("my day job takes
+  six to six on weekdays, so work around that", "I sleep till 8", "evenings after
+  9 are family time"), STORE it with add_zone BEFORE you plan anything, days as
+  ["Mon".."Sun"] and LOCAL "HH:MM" times. A plan made first will sit inside the
+  hours they just told you about, and never claim the plan respects hours that
+  were not stored. list_zones answers "what do you know about my week" and gives
+  the id for remove_zone when a standing window should go.
 - When the user says a task is named wrong or wants it called something else, call
   list_tasks to find the right id by title, then rename_task. It is a direct write,
   no confirm needed. Report the real old and new titles, and mention the calendar

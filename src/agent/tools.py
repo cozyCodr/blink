@@ -9,6 +9,7 @@ invent times. Import these both as ADK function tools and as orchestration helpe
 """
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Dict, Any, List, Optional
@@ -24,7 +25,7 @@ from src.core.capacity.capacity_ledger import build_capacity_ledger
 from src.core.calendar.calendar_sync import constraints_to_intervals
 from src.core.zones import zones_to_intervals
 from src.core.utils.date_utils import TimeInterval, intervals_overlap
-from src.types.entities import Block
+from src.types.entities import Block, Zone
 
 
 def _confirm_question(question: str, why: str, field: str, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -2880,6 +2881,297 @@ def schedule_task_sessions(workspace_id: str, task_id: str, starts: List[str],
         return {"status": "error", "placed_count": 0, "error_message": str(e)}
 
 
+# --- P21-09: standing busy time the agent can actually store -----------------
+# "My day job takes six to six on weekdays, so work around that" was
+# acknowledged and silently dropped: the right structure (Zone, P9-08) existed,
+# onboarding wrote them, the ledger planned around them, and the model had NO
+# tool to create one. So the reply claimed the plan respected hours that were
+# never stored, and the video-prep session landed at 4:30 PM inside the user's
+# stated work day. These three tools close that hole. add_zone and remove_zone
+# are DIRECT writes like create_task: a user stating their own hours is not
+# ambiguous, and honesty comes from returning the real stored window.
+#
+# CLOCK CONTRACT, load-bearing: zones_to_intervals expands Zone.start/end
+# against the ledger's NAIVE-UTC day, so what a Zone STORES is the naive-UTC
+# wall clock. The user speaks LOCAL. These tools convert on the way in and back
+# on the way out through _workspace_zone, shifting the weekday when the
+# conversion crosses midnight (01:00 Mon in Lusaka is 23:00 Sun UTC). Storing
+# the local strings raw would block the WRONG hours for any non-UTC user,
+# which is the same bug with a different sign.
+
+_ZONE_DAY_ORDER = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_ZONE_DAY_ALIASES = {
+    "mon": "Mon", "monday": "Mon",
+    "tue": "Tue", "tues": "Tue", "tuesday": "Tue",
+    "wed": "Wed", "weds": "Wed", "wednesday": "Wed",
+    "thu": "Thu", "thur": "Thu", "thurs": "Thu", "thursday": "Thu",
+    "fri": "Fri", "friday": "Fri",
+    "sat": "Sat", "saturday": "Sat",
+    "sun": "Sun", "sunday": "Sun",
+}
+# One zone may not swallow the whole week's memory by accident.
+_MAX_ZONES = 20
+
+
+def _zone_hhmm(value) -> Optional[tuple]:
+    """STRICT "HH:MM" -> (hour, minute), or None. Never guesses: "6", "6am" and
+    "18.00" all refuse, because a mis-read window silently blocks the wrong
+    hours every week from then on."""
+    m = re.match(r"^(\d{1,2}):(\d{2})$", str(value or "").strip())
+    if not m:
+        return None
+    h, mm = int(m.group(1)), int(m.group(2))
+    if h > 23 or mm > 59:
+        return None
+    return h, mm
+
+
+def _zone_days_canonical(days) -> tuple:
+    """(canonical_days, bad_tokens). Case-insensitive names and the usual
+    abbreviations only; anything else is returned as a bad token so the call
+    can refuse WHOLE rather than store a window missing a day."""
+    if isinstance(days, str) or not isinstance(days, (list, tuple)):
+        return [], [repr(days)]
+    seen, out, bad = set(), [], []
+    for d in days:
+        key = str(d or "").strip().lower()
+        canon = _ZONE_DAY_ALIASES.get(key)
+        if canon is None:
+            bad.append(str(d))
+        elif canon not in seen:
+            seen.add(canon)
+            out.append(canon)
+    out.sort(key=_ZONE_DAY_ORDER.index)
+    return out, bad
+
+
+def _shift_zone_days(days, delta: int):
+    """Each weekday moved by delta (-1, 0 or +1), wrapping the week."""
+    return [_ZONE_DAY_ORDER[(_ZONE_DAY_ORDER.index(d) + delta) % 7] for d in days]
+
+
+def _zone_window_to_stored(store, days, start_hm, end_hm):
+    """A LOCAL weekly window -> the naive-UTC one the ledger actually reads.
+
+    The offset is taken at today's date in the workspace zone; a recurring
+    HH:MM window has no date of its own, so today's offset is the honest best
+    available (DST-shifting zones drift an hour at the changeover, same as
+    every HH:MM structure in this codebase).
+    """
+    tz = _workspace_zone(store)
+    ref = localtime.local_date(now_naive(), tz)
+    local_start = datetime.combine(ref, time(start_hm[0], start_hm[1]), tzinfo=tz)
+    local_end = datetime.combine(ref, time(end_hm[0], end_hm[1]), tzinfo=tz)
+    utc_start = local_start.astimezone(timezone.utc)
+    utc_end = local_end.astimezone(timezone.utc)
+    # Crossing midnight during conversion moves the weekday the window sits on.
+    delta = (utc_start.date() - ref).days
+    return (_shift_zone_days(days, delta),
+            utc_start.strftime("%H:%M"), utc_end.strftime("%H:%M"))
+
+
+def _zone_local_view(store, z) -> Dict[str, Any]:
+    """One stored (naive-UTC) zone as the user's own wall clock, for replies."""
+    tz = _workspace_zone(store)
+    ref = localtime.local_date(now_naive(), tz)
+    out_days = list(getattr(z, "days", None) or ())
+    start_hm = _zone_hhmm(z.start)
+    end_hm = _zone_hhmm(z.end)
+    start_local, end_local = z.start, z.end
+    if start_hm and end_hm:
+        utc_start = datetime.combine(ref, time(*start_hm), tzinfo=timezone.utc)
+        utc_end = datetime.combine(ref, time(*end_hm), tzinfo=timezone.utc)
+        local_start = utc_start.astimezone(tz)
+        local_end = utc_end.astimezone(tz)
+        delta = (local_start.date() - ref).days
+        out_days = _shift_zone_days([d for d in out_days if d in _ZONE_DAY_ORDER], delta)
+        start_local = local_start.strftime("%H:%M")
+        end_local = local_end.strftime("%H:%M")
+    return {
+        "zone_id": z.id,
+        "label": z.label,
+        "days": out_days,
+        "start_local": start_local,
+        "end_local": end_local,
+        "window": f"{z.label} {_zone_clock_label(start_local)} to "
+                  f"{_zone_clock_label(end_local)} {_zone_days_phrase(out_days)}",
+        "source": getattr(z, "source", "taught"),
+    }
+
+
+def _zone_clock_label(hhmm: str) -> str:
+    """'18:00' -> '6:00 PM', purely for the reply sentence."""
+    hm = _zone_hhmm(hhmm)
+    if not hm:
+        return hhmm
+    h, m = hm
+    return f"{(h % 12) or 12}:{m:02d} {'AM' if h < 12 else 'PM'}"
+
+
+def _zone_days_phrase(days) -> str:
+    """Local copy of onboarding's days_phrase (importing it would close a
+    module cycle through conversation -> tools)."""
+    ds = set(days)
+    if ds == set(_ZONE_DAY_ORDER):
+        return "every day"
+    if ds == {"Mon", "Tue", "Wed", "Thu", "Fri"}:
+        return "on weekdays"
+    if ds == {"Sat", "Sun"}:
+        return "on weekends"
+    ordered = [d for d in _ZONE_DAY_ORDER if d in ds]
+    return "on " + ", ".join(ordered) if ordered else ""
+
+
+def add_zone(workspace_id: str, label: str, days: List[str],
+             start: str, end: str) -> Dict[str, Any]:
+    """Store a RECURRING weekly busy window so every plan works around it.
+
+    This is the tool for "my day job takes six to six on weekdays, so work
+    around that", "I'm busy 6am to 6pm Monday to Friday", "I sleep till 8",
+    "evenings after 9 are family time", "Saturdays are for church". When the
+    user states a standing commitment of their time, STORE it with this BEFORE
+    planning; a plan made first will happily sit inside the hours they just
+    told you about. Never claim the plan respects hours you did not store.
+
+    The window folds into the capacity ledger as busy time, so the scheduler,
+    get_capacity's free_windows and every placement path respect it from the
+    moment it exists. It is memory, not an event: nothing is written to Google
+    Calendar. One window per call; for a shape like "9 to 5 weekdays and
+    Saturday mornings", call it once per distinct window.
+
+    You resolve the words into the arguments: `days` is a list of "Mon".."Sun"
+    ("weekdays" is the five, "every day" is all seven), and `start`/`end` are
+    the user's LOCAL wall clock as 24-hour "HH:MM" ("six to six" is "06:00" to
+    "18:00"). end <= start means the window crosses midnight ("22:00" to
+    "06:00" is a real sleep window). This tool converts to what the planner
+    stores; never convert to UTC yourself.
+
+    Refuses whole, storing nothing, when any day string is unknown, a time is
+    not "HH:MM", start equals end, or the label is empty. Calling it again with
+    the same label and window returns the existing zone with `created` false
+    rather than stacking a duplicate. On success, report the `window` sentence
+    back so the user hears exactly what was stored.
+
+    Args:
+        workspace_id: The workspace whose week this describes.
+        label: What the time is ("Day job", "Sleep", "Family time").
+        days: The weekdays it applies to, e.g. ["Mon","Tue","Wed","Thu","Fri"].
+        start: LOCAL start, 24-hour "HH:MM", e.g. "06:00".
+        end: LOCAL end, 24-hour "HH:MM", e.g. "18:00". end <= start crosses
+            midnight.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        clean_label = " ".join(str(label or "").split())[:40]
+        if not clean_label:
+            return {"status": "error", "created": False,
+                    "error_message": "The window needs a name, like 'Day job' or 'Sleep'."}
+        canon_days, bad = _zone_days_canonical(days)
+        if bad:
+            return {"status": "error", "created": False,
+                    "error_message": (f"I don't recognise {', '.join(bad)} as days. "
+                                      f"Use Mon, Tue, Wed, Thu, Fri, Sat, Sun. "
+                                      f"Nothing was stored.")}
+        if not canon_days:
+            return {"status": "error", "created": False,
+                    "error_message": "I need at least one day, like [\"Mon\"]. Nothing was stored."}
+        start_hm, end_hm = _zone_hhmm(start), _zone_hhmm(end)
+        if start_hm is None or end_hm is None:
+            return {"status": "error", "created": False,
+                    "error_message": ("Times have to be 24-hour HH:MM, like \"06:00\" and "
+                                      "\"18:00\". Nothing was stored.")}
+        if start_hm == end_hm:
+            return {"status": "error", "created": False,
+                    "error_message": ("Start and end are the same minute, so there is no "
+                                      "window there. Nothing was stored.")}
+
+        stored_days, stored_start, stored_end = _zone_window_to_stored(
+            store, canon_days, start_hm, end_hm)
+
+        # Dedup on what would actually be STORED: the same standing fact said
+        # twice must not subtract its hours twice.
+        for z in store.zones.values():
+            if (z.label.casefold() == clean_label.casefold()
+                    and set(z.days) == set(stored_days)
+                    and z.start == stored_start and z.end == stored_end):
+                view = _zone_local_view(store, z)
+                view.update({"status": "success", "created": False,
+                             "note": "Already stored; the planner was respecting it."})
+                return view
+
+        if len(store.zones) >= _MAX_ZONES:
+            return {"status": "error", "created": False,
+                    "error_message": (f"There are already {_MAX_ZONES} standing windows "
+                                      f"stored. Remove one first (list_zones, then "
+                                      f"remove_zone).")}
+
+        zone = Zone(
+            id=f"z_{uuid.uuid4().hex[:10]}",
+            workspace_id=workspace_id,
+            label=clean_label,
+            days=stored_days,
+            start=stored_start,
+            end=stored_end,
+            source="taught",
+        )
+        store.add_zone(zone)
+        view = _zone_local_view(store, zone)
+        view.update({"status": "success", "created": True,
+                     "zone_count": len(store.zones)})
+        return view
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "created": False, "error_message": str(e)}
+
+
+def list_zones(workspace_id: str) -> Dict[str, Any]:
+    """The standing weekly busy windows Blink plans around, in LOCAL time.
+
+    This is the answer to "what do you know about my week", "what hours am I
+    busy", "do you remember my work hours". It is also where you get a
+    `zone_id` before remove_zone. Windows come back in the user's own wall
+    clock with a ready-made `window` sentence; quote those, never re-derive
+    the hours yourself.
+
+    Args:
+        workspace_id: The workspace to read.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        zones = [_zone_local_view(store, z) for z in store.zones.values()]
+        zones.sort(key=lambda v: (v["label"].casefold(), v["start_local"]))
+        return {"status": "success", "count": len(zones), "zones": zones}
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "error_message": str(e)}
+
+
+def remove_zone(workspace_id: str, zone_id: str) -> Dict[str, Any]:
+    """Delete one standing busy window, so its hours open back up for planning.
+
+    For "actually I quit that job", "stop blocking my evenings", "remove the
+    sleep window". Get the id from list_zones and match on the label; never
+    guess an id. Direct write: the reply carries the REAL label and window
+    that were removed, which is the safety. An unknown id removes nothing and
+    says so.
+
+    Args:
+        workspace_id: The workspace the zone lives in.
+        zone_id: The zone's id, from list_zones.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        z = store.zones.get(zone_id)
+        if z is None:
+            return {"status": "error", "removed": False,
+                    "error_message": f"No standing window with id {zone_id!r} here."}
+        view = _zone_local_view(store, z)
+        del store.zones[zone_id]
+        view.update({"status": "success", "removed": True,
+                     "zone_count": len(store.zones)})
+        return view
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "removed": False, "error_message": str(e)}
+
+
 # --- P20-03: the rest of CRUD — create and delete -----------------------------
 # The agent could list, rename, place and move work, but it could not ADD a task
 # or REMOVE one, and had to tell the user so ("I don't have a tool to delete
@@ -3574,6 +3866,17 @@ ALL_TOOLS = [
     create_task,
     delete_task,
     delete_tasks,
+    # P21-09: standing busy time, storable at last. "I work six to six on
+    # weekdays" used to be agreed with and dropped, because zones existed
+    # (onboarding wrote them, every ledger respected them) and the model had
+    # no tool to make one, so the very next plan sat inside the user's stated
+    # work day. add_zone/remove_zone are DIRECT writes like create_task: a
+    # user stating their own hours is unambiguous, and honesty is the return
+    # carrying the real stored window. list_zones is the read that gives
+    # "what do you know about my week" an answer and remove_zone its ids.
+    add_zone,
+    list_zones,
+    remove_zone,
     cancel_session,
     cancel_sessions,
     # The safety net under the four tools above: one step back, briefly. A hard
