@@ -53,32 +53,38 @@ struct PlanComposeField: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Bindable var composer: PlanComposer
     var prompt: String
-    /// P15-12: hold-to-talk. Owned by the screen so the eyes can react to it.
+    /// P15-12: the mic. Owned by the screen so the eyes can react to it. Read
+    /// here ONLY for whether it can listen at all; the words it hears never
+    /// come through this view (see `onTalk`).
     var voice: VoiceCapture?
     /// Fired the moment a send actually leaves, so the screen can cut any
     /// reply audio (an interrupt is something you do to send — the web's rule).
     var onSend: () -> Void = {}
+    /// P18-06: the mic tap. It starts the SPOKEN CONVERSATION LOOP on the
+    /// screen (VoiceLoop.startConversation), which replaces this whole dock
+    /// with its own quiet status bar. This view does not listen, does not hold
+    /// a transcript, and has nothing to put one in.
+    var onTalk: () -> Void = {}
 
     /// The person asked for the field by tapping the keyboard. Cleared when
     /// they leave it with nothing typed, and by a send.
     @State private var typing = false
     @FocusState private var fieldFocused: Bool
 
-    /// While the hold is live the transcript streams straight into the draft,
-    /// which IS the review surface: release leaves it there, editable, never
-    /// auto-sent (createVoiceInput's release-to-edit flow, app.js:1141-1148).
+    /// Whether the mic is live. The dock is swapped out for the loop's own bar
+    /// the moment talking starts, so this is only ever briefly true here (the
+    /// permission ask, the frame before the swap); it exists so the mic circle
+    /// does not flicker back to its resting look in that frame.
     private var isListening: Bool { voice?.isRecording ?? false }
 
     private var draftText: String {
         composer.draft.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// NEVER STRAND WHAT WAS TYPED OR SAID. The field is up whenever it was
-    /// asked for, and it stays up for as long as there are words in the draft
-    /// whatever the keyboard is doing. This is also what keeps the release-to-
-    /// review contract: a transcript settles in `composer.draft`, so the moment
-    /// listening stops with text the field is on screen holding it, readable
-    /// and editable, and still nothing was sent on the person's behalf.
+    /// NEVER STRAND WHAT WAS TYPED. The field is up whenever it was asked for,
+    /// and it stays up for as long as there are words in the draft whatever the
+    /// keyboard is doing. Everything in that draft was TYPED by the person; no
+    /// speech ever lands in it (P18-06).
     private var fieldUp: Bool { typing || !draftText.isEmpty }
 
     private func send() {
@@ -110,13 +116,14 @@ struct PlanComposeField: View {
         }
         .animation(reduceMotion ? nil : face.motion.swapAnimation, value: fieldUp)
         .animation(reduceMotion ? nil : face.motion.swapAnimation, value: isListening)
-        // Live transcription: while the hold is on, the words land in the
-        // draft as they are heard, so release-to-review is seamless (the
-        // web's interim results streaming onto the surface, app.js:1170-1178).
-        .onChange(of: voice?.transcript ?? "") { _, live in
-            guard let voice, voice.isRecording else { return }
-            composer.draft = live
-        }
+        // P18-06: THERE IS NO TRANSCRIPT ON THIS SURFACE. What used to sit here
+        // was an `.onChange(of: voice.transcript)` that streamed the recognizer's
+        // live guesses into `composer.draft`, and a mic tap that settled the
+        // final guess there too. Both are gone. Reading your own words back with
+        // the recognizer's mistakes in them is worse than not seeing them at all
+        // (user, 2026-09-01), and the words are not the point: the reply is.
+        // Speech now goes straight from VoiceLoop to the server, never on screen.
+        //
         // Leaving the field with nothing in it puts the dock back. Leaving it
         // with something in it does NOT: see `fieldUp`.
         .onChange(of: fieldFocused) { _, focused in
@@ -215,12 +222,12 @@ struct PlanComposeField: View {
         .accessibilityLabel("Send to Blink")
     }
 
-    /// TAP to start listening, tap again to stop. Hands-free, so you are not
-    /// pinning a small button down the whole time you talk — the hold gesture
-    /// that preceded this was awkward on a phone (user, 2026-08-30). The
-    /// transcript streams into the draft live and settles there for review on
-    /// stop. A tap while denied explains once, then stays quiet. A light haptic
-    /// marks each start and stop so the toggle feels definite without looking.
+    /// TAP TO TALK WITH BLINK. The mic is not a dictation button, it is the
+    /// conversation option (user, 2026-09-01): one tap hands the screen over to
+    /// the spoken loop, where going quiet for a moment sends what you said, the
+    /// reply is spoken back, and the mic reopens on its own. Nothing you say is
+    /// ever written on screen. A tap while denied explains once, then stays
+    /// quiet. A light haptic marks the start so the switch feels definite.
     ///
     /// THE HERO, BY WEIGHT AND NOT BY SIZE (the web's dock comment). On the
     /// resting dock the mic wears the accent fill against the keyboard's quiet
@@ -235,21 +242,16 @@ struct PlanComposeField: View {
 
     private func micBody(_ voice: VoiceCapture, filled: Bool) -> some View {
         Button {
-            if isListening {
-                let text = voice.endHold()
-                if !text.isEmpty { composer.draft = text }
-                return
-            }
-            guard !composer.isSending else { return }
+            guard !composer.isSending, !isListening else { return }
             if voice.limitationLine != nil {
                 // Cannot listen. Say so once, then stay quiet.
                 if !voice.explained { voice.markExplained() }
                 return
             }
-            // Talking replaces typing: let the keyboard go so the words being
-            // heard are not landing behind it.
+            // Talking replaces typing: let the keyboard go, then hand the
+            // screen to the spoken loop.
             fieldFocused = false
-            voice.beginHold()
+            onTalk()
         } label: {
             Image(systemName: isListening ? "waveform" : "mic")
                 .font(face.bodyFont.weight(.semibold))
@@ -264,7 +266,7 @@ struct PlanComposeField: View {
         }
         .buttonStyle(.plain)
         .sensoryFeedback(.impact(weight: .light), trigger: isListening)
-        .accessibilityLabel(isListening ? "Listening. Tap to stop." : "Tap to talk")
+        .accessibilityLabel("Talk with Blink")
     }
 }
 
