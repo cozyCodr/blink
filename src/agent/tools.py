@@ -280,11 +280,59 @@ def delete_event_confirmed(workspace_id: str, event_id: str) -> Dict[str, Any]:
         return {"status": "error", "error_message": str(e)}
 
 
+# A gap shorter than this is not a session, it is a crack between two things.
+# Dropping them keeps the free-window payload readable instead of a list of
+# five-minute slivers the model would have to filter itself.
+_MIN_FREE_WINDOW_MINUTES = 15
+
+
+def _local_clock(dt: datetime, tz) -> str:
+    """A naive-UTC instant as a 24-hour local wall clock, e.g. '09:00'.
+
+    Same conversion path as `_fmt_local_time` (store keeps naive UTC, the user
+    speaks local); the 24-hour shape is deliberate here because these strings
+    are meant to be composed straight back into an ISO local start
+    ("2026-09-03" + "T" + "09:00") when the model books the window.
+    """
+    return dt.replace(tzinfo=timezone.utc).astimezone(tz).strftime("%H:%M")
+
+
+def _free_windows_local(day, tz) -> List[Dict[str, Any]]:
+    """One ledger day's real free windows as local wall-clock dicts.
+
+    Reports only what the ledger actually computed: nothing is widened, nothing
+    is invented, and a window under _MIN_FREE_WINDOW_MINUTES is dropped rather
+    than offered as a slot no work fits in.
+    """
+    out: List[Dict[str, Any]] = []
+    for iv in getattr(day, "free_windows", None) or ():
+        minutes = int((iv.end - iv.start).total_seconds() // 60)
+        if minutes < _MIN_FREE_WINDOW_MINUTES:
+            continue
+        out.append({
+            "start": _local_clock(iv.start, tz),
+            "end": _local_clock(iv.end, tz),
+            "minutes": minutes,
+        })
+    return out
+
+
 def get_capacity(workspace_id: str, days: int = 7) -> Dict[str, Any]:
-    """Return how much schedulable time the user actually has over the coming days.
+    """How much time the user has free over the coming days, AND WHEN each gap is.
 
     Capacity is waking hours minus fixed commitments, minus calendar events, minus a
     reserve buffer. Use this before claiming the user has room for something.
+
+    `by_day[].available_hours` is HOW MUCH. `by_day[].free_windows` is WHEN: the
+    real gaps on that day in the user's own wall clock, as
+    {"start": "09:00", "end": "11:30", "minutes": 150}. This is how you find a
+    time that is genuinely free before you offer it. Gaps under 15 minutes are
+    left out, so a day can show hours available and still list few windows.
+
+    These windows are computed from real busy time, never guessed, so quote them
+    as they are. To then BOOK inside them, call schedule_task_at (one slot) or
+    schedule_task_sessions (the same task across several days) with the day plus
+    the window's start, e.g. "2026-09-03T09:00".
 
     Args:
         workspace_id: The workspace to compute capacity for.
@@ -292,14 +340,20 @@ def get_capacity(workspace_id: str, days: int = 7) -> Dict[str, Any]:
     """
     try:
         store = get_or_create_store(workspace_id)
+        tz = _workspace_zone(store)
         ledger = ledger_for(store, now_naive(), days=days)
         return {
             "status": "success",
             "total_available_hours": round(ledger.total_available_minutes / 60.0, 1),
             "by_day": [
-                {"date": d.date, "available_hours": round(d.available_minutes / 60.0, 1)}
+                {
+                    "date": d.date,
+                    "available_hours": round(d.available_minutes / 60.0, 1),
+                    "free_windows": _free_windows_local(d, tz),
+                }
                 for d in ledger.by_day
             ],
+            "timezone": str(getattr(tz, "key", tz)),
         }
     except Exception as e:  # pragma: no cover - defensive
         return {"status": "error", "error_message": str(e)}
@@ -2374,6 +2428,13 @@ def schedule_task_at(workspace_id: str, task_id: str, start: str,
     against their own work. If you do not have the task's id, call list_tasks
     and match on the title; never guess an id.
 
+    ONE task, ONE time. Because it moves rather than duplicates, calling it
+    repeatedly for the same task will not build up several sittings: each call
+    picks the one session up and puts it down again. When the user wants the
+    SAME work spread over several days ("Monday through Friday", "a few
+    sessions this week"), call schedule_task_sessions instead, which ADDS one
+    session per time you give it.
+
     You resolve the words into a date and time — you know today's date — and
     TIME CONVENTION — LOCAL: pass `start` as ISO 8601 in the user's OWN LOCAL
     WALL CLOCK, e.g. "2026-09-03T14:00". Never convert to UTC yourself; this
@@ -2497,6 +2558,191 @@ def schedule_task_at(workspace_id: str, task_id: str, start: str,
         }
     except Exception as e:  # pragma: no cover - defensive
         return {"status": "error", "scheduled": False, "error_message": str(e)}
+
+
+# --- P21-01: one task, many days ---------------------------------------------
+# "Plan the client project Monday through Friday" used to land on Monday only.
+# schedule_task_at is right to MOVE the task's standing session rather than
+# duplicate it, so five calls to it produce one session that has been picked up
+# and put down four times. This is the additive sibling: every start time you
+# hand it becomes its own NEW session on the same task, and no existing block is
+# ever touched.
+#
+# One call must not be able to carpet a month, so the batch is capped and a
+# batch over the cap is refused whole rather than silently truncated (the same
+# rule _MAX_BATCH_DELETE follows).
+_MAX_SESSION_STARTS = 14
+
+
+def schedule_task_sessions(workspace_id: str, task_id: str, starts: List[str],
+                           duration_minutes: Optional[int] = None) -> Dict[str, Any]:
+    """Spread ONE task across SEVERAL times: one new session per start time you give.
+
+    This is the tool for "work on the client project Monday through Friday",
+    "spread the six hours across this week", "same project, a few days,
+    different times each day", "book three sessions for the thesis this week".
+    Each start becomes its own NEW session on the SAME task. Nothing already on
+    the plan is moved or reused, which is exactly what separates this from
+    schedule_task_at: that one places a task at ONE named time and moves the
+    task's existing session if it has one, so calling it five times leaves one
+    session, not five. Use propose_schedule_for_workspace instead when the user
+    wants BLINK to pick the times.
+
+    Find the times first. get_capacity returns per-day `free_windows` in the
+    user's own wall clock, so you can put each session where the day is really
+    free instead of guessing an hour. If the user named a day but no time, ask,
+    or offer a free window; never invent one.
+
+    TIME CONVENTION (LOCAL): every entry in `starts` is ISO 8601 in the user's
+    OWN LOCAL WALL CLOCK, e.g. ["2026-09-01T09:00", "2026-09-02T14:00"]. Never
+    convert to UTC yourself. One `duration_minutes` applies to EVERY slot; when
+    the sittings need different lengths, call this tool more than once, once per
+    length. Omit it and each session takes the task's own estimate.
+
+    Refuses the whole call, changing nothing, when `starts` is empty or has more
+    than 14 entries, when the task id is unknown, or when `duration_minutes` is
+    out of range.
+
+    Otherwise it is PER SLOT and partial success is normal. `results` has one
+    entry per requested start with `status` "placed" or "skipped" and, when
+    skipped, a real `reason`: unreadable time, already past, collides with
+    something on the calendar, or overlaps another start in this same call (the
+    later one gives way). Report what `placed_count` and the reasons actually
+    say. If `placed_count` is 0 the call still comes back "success", and the
+    honest reply is why nothing landed, not a win. The calendar is a SEPARATE
+    truth: `calendar_created` is what really reached Google and
+    `calendar_failures` what did not.
+
+    Args:
+        workspace_id: The workspace the task belongs to.
+        task_id: The task's id, from list_tasks.
+        starts: The start times, each ISO 8601 in the user's LOCAL time, e.g.
+            ["2026-09-01T09:00", "2026-09-02T14:00"]. At most 14.
+        duration_minutes: Optional length in minutes, applied to every slot.
+            Omit to use the task's own planned estimate.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        task = store.tasks.get(task_id)
+        if task is None:
+            return {"status": "error", "placed_count": 0,
+                    "error_message": f"No task with id {task_id!r} in this workspace."}
+
+        if isinstance(starts, str) or not isinstance(starts, (list, tuple)):
+            return {"status": "error", "placed_count": 0,
+                    "error_message": ("`starts` has to be a list of local start times, "
+                                      "one per session.")}
+        requested = list(starts)
+        if not requested:
+            return {"status": "error", "placed_count": 0,
+                    "error_message": ("I need at least one start time. Give between 1 and "
+                                      f"{_MAX_SESSION_STARTS} of them.")}
+        if len(requested) > _MAX_SESSION_STARTS:
+            return {
+                "status": "error",
+                "placed_count": 0,
+                "error_message": (f"That is {len(requested)} sessions in one go and the "
+                                  f"limit is {_MAX_SESSION_STARTS}. Nothing scheduled. "
+                                  f"Split it into smaller batches."),
+            }
+
+        if duration_minutes is None:
+            minutes = int(task.estimate_minutes or task.min_block_minutes or 30)
+            duration_source = "task_estimate" if task.estimate_minutes else "task_min_block"
+        else:
+            problem = _duration_error(duration_minutes)
+            if problem:
+                return {"status": "error", "placed_count": 0, "error_message": problem}
+            minutes = int(duration_minutes)
+            duration_source = "requested"
+
+        tz = _workspace_zone(store)
+        now = now_naive()
+        span = timedelta(minutes=minutes)
+
+        # Results keep the caller's own order, so the reply can walk the list the
+        # user said it in. Placement decisions, though, run CHRONOLOGICALLY: when
+        # two requested times overlap each other it is the later one that gives
+        # way, whichever order they arrived in.
+        results: List[Dict[str, Any]] = [
+            {"start": raw, "start_local": None, "status": "skipped",
+             "block_id": None, "reason": ""}
+            for raw in requested
+        ]
+        pending = []
+        for i, raw in enumerate(requested):
+            begin = _parse_local_to_naive_utc(raw if isinstance(raw, str) else "", tz)
+            if begin is None:
+                results[i]["reason"] = f"I couldn't read {raw!r} as a time. {_LOCAL_FORMAT_HINT}"
+                continue
+            results[i]["start_local"] = _fmt_local_day_time(begin, tz)
+            if begin < now:
+                results[i]["reason"] = (f"{_fmt_local_day_time(begin, tz)} is already past, "
+                                        f"so nothing was booked there.")
+                continue
+            pending.append((begin, i))
+
+        placed_blocks = []
+        accepted = []  # (start, end, index) of the slots already taken in this call
+        for begin, i in sorted(pending, key=lambda p: (p[0], p[1])):
+            end = begin + span
+            earlier = next((a for a in accepted if a[0] < end and a[1] > begin), None)
+            if earlier is not None:
+                results[i]["reason"] = (
+                    f"That overlaps the "
+                    f"{_fmt_local_day_time(earlier[0], tz)} session you also asked for, "
+                    f"so this one was left out."
+                )
+                continue
+            hard, _soft = _clashes_for(store, tz, begin, end, ())
+            if hard:
+                results[i]["reason"] = (f"That time runs into {_join_times(c['title'] for c in hard)}, "
+                                        f"so nothing was booked there.")
+                continue
+            block = Block(
+                id=f"blk_{uuid.uuid4().hex[:12]}",
+                workspace_id=workspace_id,
+                task_id=task_id,
+                starts_at=begin,
+                ends_at=end,
+                # gcal_event_id stays None until the mirror below really creates one.
+            )
+            placed_blocks.append(block)
+            accepted.append((begin, end, i))
+            results[i].update({"status": "placed", "block_id": block.id, "reason": ""})
+
+        created = 0
+        failures = 0
+        if placed_blocks:
+            store.commit_blocks(placed_blocks)
+            # Local import avoids a module-load cycle: calendar_mirror imports
+            # _session_title from this module.
+            from src.api.calendar_mirror import mirror_commit
+
+            mirror = mirror_commit(store, workspace_id, placed_blocks)
+            created = mirror.created
+            failures = len(mirror.failures)
+
+        placed_count = len(placed_blocks)
+        return {
+            # Still "success" with nothing placed: the call did what it could and
+            # every reason is on the record, which is what lets the reply say why
+            # rather than invent a win.
+            "status": "success",
+            "task_id": task_id,
+            "title": task.title,
+            "requested_count": len(requested),
+            "placed_count": placed_count,
+            "skipped_count": len(requested) - placed_count,
+            "duration_minutes": minutes,
+            "duration_source": duration_source,
+            "results": results,
+            "calendar_created": created,
+            "calendar_failures": failures,
+            "timezone": str(getattr(tz, "key", tz)),
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "placed_count": 0, "error_message": str(e)}
 
 
 # --- P20-03: the rest of CRUD — create and delete -----------------------------
@@ -3165,6 +3411,17 @@ ALL_TOOLS = [
     # calendar counts.
     move_session,
     schedule_task_at,
+    # P21-01: the division of labour inside explicit placement. schedule_task_at
+    # is ONE task at ONE named time, and it MOVES the task's standing session
+    # rather than duplicating it, so five calls to it leave one session that has
+    # been shuffled four times. schedule_task_sessions is the additive sibling:
+    # every start it is given becomes its own new session on the same task, and
+    # nothing already on the plan is touched. propose_schedule_for_workspace
+    # stays the tool for when Blink picks the times. The docstrings carry the
+    # real phrasings ("Monday through Friday", "spread the six hours across this
+    # week"), because the choice belongs to the model reading them and there is
+    # no keyword routing anywhere behind it.
+    schedule_task_sessions,
     # Read-only clash check, so a time can be TESTED before it is offered. Same
     # collision logic the two writes above run, which is what makes it worth
     # anything: what it says here is what they will do.
