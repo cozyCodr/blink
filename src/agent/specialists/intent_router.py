@@ -11,10 +11,16 @@ Three intents:
 - `plan_goal`       = a first-person aspirational goal that is too loose to
                       schedule yet ("I want to become a data scientist"), so the
                       agent fishes for context via elicitation.
-- `concrete_tasks`  = work to plan AND commit into time: a task list, a duration
-                      hint, or an imperative ("schedule dentist Tuesday 3pm").
-                      Capturing one item ("add a task called X") or an explicit
-                      "don't schedule it" is NOT this route — it books time.
+- `concrete_tasks`  = NEW work to plan AND commit into time: a task list, a
+                      duration hint, or an imperative ("schedule dentist Tuesday
+                      3pm"). Capturing one item ("add a task called X") or an
+                      explicit "don't schedule it" is NOT this route, which
+                      books time. Neither is spreading work that ALREADY EXISTS over
+                      several days ("work on the client project Monday through
+                      Friday"): that is `chat`, the only route that reaches the
+                      agent, whose list_tasks / get_capacity /
+                      schedule_task_sessions place the sittings precisely instead
+                      of decomposing one sentence into invented tasks (P21-03).
 - `disruption`      = life happened and TODAY's plan is impacted ("my meeting
                       ran over", "I'm sick today", "I lost my morning"), so the
                       agent should rebalance. Pure mood ("I'm tired") without a
@@ -64,9 +70,11 @@ class Intent(BaseModel):
         description=(
             "chat = general conversation, questions, greetings, off-domain, or "
             "anything ambiguous. plan_goal = a loose aspirational goal to plan. "
-            "concrete_tasks = specific work to plan AND book into time now, or "
-            "an imperative scheduling command; capturing a single task, or work "
-            "the user says not to schedule, is chat instead. "
+            "concrete_tasks = NEW work, described for the first time, to plan "
+            "AND book into time now, or an imperative scheduling command; "
+            "capturing a single task, work the user says not to schedule, or "
+            "arranging work that ALREADY EXISTS across several days or sittings, "
+            "is chat instead. "
             "disruption = life happened and today's schedule is impacted. "
             "reschedule = the user wants to re-place today's already-missed or "
             "undone sessions into later free time. "
@@ -92,8 +100,11 @@ Classify the user's message into exactly one of these intents.
   questions ("what do you think about politics"), greetings ("hi"), and thanks
   ("thanks"). Also VIEWING requests about the existing plan — "what does my week
   look like", "show me my week", "how's my week looking", "what's on today" —
-  the user wants to SEE the schedule, not create work. Anything conversational,
-  and anything you are unsure about.
+  the user wants to SEE the schedule, not create work. Also ARRANGING work that
+  already exists across several days or several sittings ("work on the client
+  project Monday through Friday", "spread the six hours across this week"), since
+  the agent can find the existing task and place each sitting where the days are
+  really free. Anything conversational, and anything you are unsure about.
 - plan_goal: a first-person aspirational goal that is too loose to schedule yet.
   Examples: "I want to become a data scientist", "help me learn Spanish", "get fit".
 - concrete_tasks: specific work the user wants PLANNED AND BOOKED INTO TIME, or
@@ -105,6 +116,20 @@ Classify the user's message into exactly one of these intents.
   renew my passport", "put 'call the dentist' on my list"), or anything that
   says not to schedule it ("add this but don't schedule it yet") — those are
   chat, where the agent can record the task without booking any time.
+  ALSO NOT concrete_tasks: ARRANGING WORK THAT ALREADY EXISTS across several
+  days or several sittings. Examples: "work on the client project Monday through
+  Friday", "I want to do the client project on five different days this week,
+  ninety minutes each", "spread the six hours across this week", "put the thesis
+  in three times this week at times that are free", "same project, a few days,
+  different times each day". The tell is that the work is REFERRED TO, not
+  described for the first time, and that the request is about the SHAPE of the
+  time (several days, several sittings, spread, each day, times that are free)
+  rather than about what the work is. Those are chat, where the agent can look
+  the task up, check when the user is really free, and place every sitting on the
+  one existing task. Routing them here instead invents new tasks out of one
+  sentence and stacks the sittings on a single day. A named duration or a named
+  day does not make such a message concrete_tasks: concrete_tasks is for work
+  that does not exist yet.
 - disruption: life happened and TODAY's schedule is impacted, so the plan needs
   rebalancing. Examples: "my meeting ran over", "I'm sick today", "I lost my
   whole morning", "cancel my afternoon, something came up", "I can't do today's
