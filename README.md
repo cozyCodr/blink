@@ -98,6 +98,8 @@ change: filtered to what the evidence supports, and gated on your consent.
 
 ## Architecture
 
+![Blink architecture: Gemini + ADK decides what to do, a deterministic core computes what is true, calendar writes pass through the user's yes, Firestore remembers what survived](docs/images/architecture.png)
+
 See **[`docs/DIAGRAMS.md`](docs/DIAGRAMS.md)** for the full set (system topology,
 the loose-goal flow, the division of labour, and the truthfulness contract —
 mermaid, renders inline on GitHub). Structurally, Blink is the agent triad from
