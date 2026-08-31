@@ -86,7 +86,9 @@ class TestListSessionsOneDay(unittest.TestCase):
         _add(store, "b_yest", "Yesterday", today - timedelta(days=1), 15)
         _add(store, "b_tom", "Tomorrow", today + timedelta(days=1), 9)
 
-        out = tools.list_sessions(_WS)
+        # R-1: the window is always explicit now. A single day is days=1; the
+        # bare call deliberately means a WEEK (see TestWindowIsNeverSilent).
+        out = tools.list_sessions(_WS, days=1)
         self.assertEqual(out["status"], "success", out)
         self.assertEqual(out["start_date"], today.isoformat())
         self.assertEqual(out["end_date"], today.isoformat())
@@ -385,6 +387,169 @@ class TestOneDatetimeConvention(unittest.TestCase):
                                          "2099-09-03T15:00", "2099-09-03T14:00")
         self.assertEqual(out["status"], "error")
         self.assertIn("end before it starts", out["error_message"])
+
+
+# --- R-1: a week sweep cannot silently cover one day -------------------------
+
+class TestWindowIsNeverSilent(unittest.TestCase):
+    """R-1. list_sessions is the first step of every destructive sweep, and it
+    used to default to days=1. A model asked to "wipe this week" that called it
+    bare got TODAY ONLY, cancelled exactly the ids it was handed, and reported
+    that truthfully — while six days stayed booked. Under-selection is invisible;
+    over-selection is not. So the bare call now covers a WEEK, and the window
+    actually covered rides back with the answer."""
+
+    def tearDown(self):
+        reg.stores.clear()
+
+    def _week(self, store):
+        today = _today_local(store)
+        for offset in range(7):
+            _add(store, f"b_d{offset}", f"Day {offset}", today + timedelta(days=offset), 9)
+        return today
+
+    def test_a_bare_call_covers_a_week_not_a_day(self):
+        store = _seed()
+        today = self._week(store)
+        out = tools.list_sessions(_WS)
+        self.assertEqual(out["status"], "success", out)
+        self.assertEqual(out["days"], 7)
+        self.assertEqual(out["start_date"], today.isoformat())
+        self.assertEqual(out["end_date"], (today + timedelta(days=6)).isoformat())
+        self.assertEqual(out["session_count"], 7)
+        # The whole point: every day of the week is selectable from a bare call.
+        self.assertEqual(len(out["actionable_ids"]), 7)
+
+    def test_a_bare_call_then_cancel_really_clears_the_whole_week(self):
+        """The end-to-end shape of the bug: list bare, cancel what came back,
+        and nothing is left standing anywhere in the week."""
+        store = _seed()
+        self._week(store)
+        listed = tools.list_sessions(_WS)
+        res = tools.cancel_sessions(_WS, listed["actionable_ids"])
+        self.assertEqual(res["cancelled_count"], 7)
+        self.assertEqual(store.blocks, {})
+
+    def test_the_covered_window_is_reported_back(self):
+        store = _seed()
+        today = _today_local(store)
+        out = tools.list_sessions(_WS, start_date=today.isoformat(), days=3)
+        self.assertEqual(out["days"], 3)
+        self.assertEqual(out["days_requested"], 3)
+        self.assertFalse(out["window_clamped"])
+        # A plain-language span the reply can quote instead of inventing one.
+        self.assertIn(today.strftime("%A"), out["window"])
+        self.assertIn("3 local days", out["window"])
+        self.assertIn(_ZONE, out["window"])
+
+    def test_a_clamped_window_says_so_rather_than_lying(self):
+        store = _seed()
+        today = _today_local(store)
+        out = tools.list_sessions(_WS, start_date=today.isoformat(), days=90)
+        self.assertEqual(out["days"], 31)
+        self.assertEqual(out["days_requested"], 90)
+        self.assertTrue(out["window_clamped"])
+        self.assertEqual(out["end_date"], (today + timedelta(days=30)).isoformat())
+
+    def test_one_day_is_still_reachable_explicitly(self):
+        store = _seed()
+        today = _today_local(store)
+        _add(store, "b_today", "Today", today, 9)
+        _add(store, "b_tom", "Tomorrow", today + timedelta(days=1), 9)
+        out = tools.list_sessions(_WS, days=1)
+        self.assertEqual(out["days"], 1)
+        self.assertEqual([s["id"] for s in out["sessions"]], ["b_today"])
+
+
+# --- R-2: the actionable id list includes missed sessions --------------------
+
+class TestActionableIdsIncludeMissed(unittest.TestCase):
+    """R-2. `planned_ids` filters to status "planned", but a MISSED session is
+    still sitting on the user's day: cancel_sessions removes it and move_session
+    accepts it. "Clear today" driven off planned_ids left the missed ones booked
+    and reported a clean sweep."""
+
+    def tearDown(self):
+        reg.stores.clear()
+
+    def _day(self, store):
+        today = _today_local(store)
+        _add(store, "b_planned", "Still standing", today, 9)
+        _add(store, "b_missed", "Skipped reading", today, 11, status="missed")
+        _add(store, "b_done", "Early run", today, 6, status="done")
+        _add(store, "b_cancelled", "Gone already", today, 13, status="cancelled")
+        return today
+
+    def test_actionable_ids_are_planned_plus_missed_and_nothing_else(self):
+        store = _seed()
+        self._day(store)
+        out = tools.list_sessions(_WS, days=1)
+        self.assertEqual(out["actionable_ids"], ["b_planned", "b_missed"])
+        # planned_ids keeps its original, narrower meaning — nothing that
+        # depends on it changes underneath.
+        self.assertEqual(out["planned_ids"], ["b_planned"])
+        self.assertEqual(out["missed_ids"], ["b_missed"])
+
+    def test_clearing_a_day_off_actionable_ids_leaves_nothing_booked(self):
+        store = _seed()
+        self._day(store)
+        listed = tools.list_sessions(_WS, days=1)
+        res = tools.cancel_sessions(_WS, listed["actionable_ids"])
+        self.assertEqual(res["status"], "success", res)
+        self.assertEqual(res["cancelled_count"], 2)
+        self.assertEqual(res["not_found_count"], 0)
+        # The missed session really went, and its task survived.
+        self.assertNotIn("b_missed", store.blocks)
+        self.assertIn("task_b_missed", store.tasks)
+
+    def test_a_missed_id_is_accepted_by_move_session(self):
+        """"move what I missed to tonight" — missed_ids feeds move_session."""
+        store = _seed()
+        today = self._day(store)
+        tomorrow = today + timedelta(days=1)
+        listed = tools.list_sessions(_WS, days=1)
+        res = tools.move_session(_WS, listed["missed_ids"][0],
+                                 f"{tomorrow.isoformat()}T20:00")
+        self.assertEqual(res["status"], "success", res)
+        self.assertTrue(res["moved"])
+        self.assertEqual(store.blocks["b_missed"].starts_at,
+                         _local_naive_utc(tomorrow, 20))
+
+
+# --- R-3: the wire tools are not in the model's toolset ----------------------
+
+class TestConfirmedToolsAreNotInTheModelsToolset(unittest.TestCase):
+    """R-3. The instruction says every time-taking tool takes LOCAL, while
+    create_event_confirmed / edit_event_confirmed sat in ALL_TOOLS documenting
+    NAIVE UTC — a flat contradiction inside the model's own prompt. The
+    *_confirmed tools are the WIRE half: the confirm endpoints call them
+    directly, so they belong nowhere near the model."""
+
+    def test_no_confirmed_tool_is_exposed_to_the_model(self):
+        names = [getattr(t, "__name__", "") for t in tools.ALL_TOOLS]
+        self.assertEqual([n for n in names if n.endswith("_confirmed")], [])
+
+    def test_the_propose_halves_are_still_exposed(self):
+        names = [getattr(t, "__name__", "") for t in tools.ALL_TOOLS]
+        for name in ("propose_create_event", "propose_edit_event",
+                     "propose_delete_event", "propose_reschedule"):
+            self.assertIn(name, names)
+
+    def test_the_wire_tools_still_exist_for_the_confirm_endpoints(self):
+        # Removed from the toolset, NOT from the module: server.py calls these
+        # directly on the confirm route.
+        for name in ("create_event_confirmed", "edit_event_confirmed",
+                     "delete_event_confirmed", "reschedule_confirmed"):
+            self.assertTrue(callable(getattr(tools, name)), name)
+
+    def test_no_exposed_tool_documents_the_utc_wire_convention(self):
+        """The contradiction itself: nothing the model can read may tell it to
+        pass a UTC time."""
+        for tool in tools.ALL_TOOLS:
+            doc = (tool.__doc__ or "")
+            self.assertNotIn("NAIVE UTC", doc,
+                             f"{getattr(tool, '__name__', tool)} still tells the "
+                             f"model about the UTC wire convention")
 
 
 if __name__ == "__main__":

@@ -745,10 +745,20 @@ def list_todays_sessions(workspace_id: str) -> Dict[str, Any]:
 # silently skips half a day and then reports success is exactly the
 # degrade-never-fabricate failure the governance rules forbid.
 _MAX_LIST_SESSIONS_DAYS = 31
+# R-1: the default WINDOW, not a default of convenience. This tool is the first
+# step of every destructive sweep, and the two failure directions are not
+# symmetric: over-listing is visible and harmless (the model still chooses the
+# ids), while under-listing is INVISIBLE — a bare call for "wipe this week" that
+# returned today only would let a cancel report every id it was given while six
+# days stayed booked, which is exactly the fabricated-success the governance
+# rules forbid. So a caller that forgets the window gets a WEEK, and the covered
+# window is echoed back in `start_date` / `end_date` / `days` / `window` so the
+# reply can only ever name the span that was really swept.
+_DEFAULT_LIST_SESSIONS_DAYS = 7
 
 
 def list_sessions(workspace_id: str, start_date: Optional[str] = None,
-                  days: int = 1) -> Dict[str, Any]:
+                  days: int = _DEFAULT_LIST_SESSIONS_DAYS) -> Dict[str, Any]:
     """List EVERY focus session booked over a range of the user's local days.
 
     THIS IS THE FIRST STEP OF ANY BULK CHANGE. The flow is always: list, then act
@@ -762,6 +772,23 @@ def list_sessions(workspace_id: str, start_date: Optional[str] = None,
 
     Use it for any day or span. list_todays_sessions is the narrower check-in
     view of today alone.
+
+    ALWAYS PASS THE WINDOW YOU ACTUALLY MEAN. `start_date` and `days` are how
+    you say which days you are about to touch, and getting them wrong is how a
+    sweep half-runs: ask for one day when the user said "this week" and you will
+    cancel every id you were handed, report it honestly, and still leave six
+    days booked. "Clear Friday" is start_date=that Friday, days=1. "Wipe this
+    week" is days=7 from today (or from Monday, if that is what they meant).
+    "Clear tomorrow" is start_date=tomorrow, days=1. If you omit `days` you get
+    SEVEN days, not one — the safe direction, because an over-wide listing is
+    something you can filter and a too-narrow one you cannot even see.
+
+    THE WINDOW COMES BACK WITH THE ANSWER. `start_date`, `end_date`, `days` and
+    the plain-language `window` describe the span that was REALLY covered (after
+    any clamping — see `days_requested` and `window_clamped`). Say that window
+    back to the user when you report a sweep: "cleared the 4 sessions you had
+    between Monday 31 Aug and Sunday 6 Sep". Never describe a span wider than
+    the one these fields name.
 
     WHAT COMES BACK: `sessions`, sorted by time, one entry per session with
       - `id`          the session id the write tools take (cancel_sessions,
@@ -785,8 +812,19 @@ def list_sessions(workspace_id: str, start_date: Optional[str] = None,
     and report success. YOU do the filtering, out loud: if the user means only
     the ones still standing, take the entries whose `status` is "planned"; a
     "done" or "cancelled" one is history and cancelling it changes nothing.
-    `status_counts` and `planned_ids` are provided so you can say what you are
-    about to touch before you touch it.
+
+    THREE ID LISTS, and they do not mean the same thing:
+      - `actionable_ids` — EVERYTHING still occupying the user's calendar time:
+        status "planned" AND status "missed". This is the one to use for a FULL
+        clear ("clear today", "wipe this week", "unschedule Friday"). A missed
+        session is a block the user did not do; it is still sitting on their day
+        and cancel_sessions / move_session both act on it. Sweeping with
+        `planned_ids` instead leaves those behind and reports a clean day.
+      - `planned_ids` — the "planned" ones ONLY. Use it when the user explicitly
+        means the work still standing and not the ones they already missed.
+      - `missed_ids` — just the missed ones, for "move what I missed to tonight".
+    `status_counts` is provided alongside so you can say what you are about to
+    touch, and how many of each kind, before you touch it.
 
     Batches cap at 25 ids, so for a long week cancel in chunks and report the
     real running total; never claim a sweep you only partly ran.
@@ -799,9 +837,13 @@ def list_sessions(workspace_id: str, start_date: Optional[str] = None,
         start_date: The first day to include, as the user's LOCAL calendar date
             in ISO form, e.g. "2026-09-03". You know today's date, so resolve
             "Friday" or "tomorrow" yourself. Omit for today.
-        days: How many local days to include, starting at start_date. 1 is a
-            single day ("clear Friday"); 7 is a week ("wipe this week"). Clamped
-            to 1-31.
+        days: How many local days to include, starting at start_date. PASS THE
+            SPAN YOU MEAN — this is the difference between clearing a week and
+            clearing a day and calling it a week. 1 is a single day ("clear
+            Friday"); 7 is a week ("wipe this week"); 31 is the maximum. Clamped
+            to 1-31, and the clamp is reported back in `days` / `window_clamped`.
+            Omitted means 7, deliberately: a forgotten window must over-list, not
+            under-list.
     """
     try:
         store = get_or_create_store(workspace_id)
@@ -824,10 +866,10 @@ def list_sessions(workspace_id: str, start_date: Optional[str] = None,
             first_day = localtime.local_today(now, tz)
 
         try:
-            span = int(days)
+            requested_span = int(days)
         except (TypeError, ValueError):
-            span = 1
-        span = max(1, min(_MAX_LIST_SESSIONS_DAYS, span))
+            requested_span = _DEFAULT_LIST_SESSIONS_DAYS
+        span = max(1, min(_MAX_LIST_SESSIONS_DAYS, requested_span))
         last_day = first_day + timedelta(days=span - 1)
 
         # Local-day bounds, not a 24h multiple: day_bounds_utc is computed from
@@ -864,17 +906,40 @@ def list_sessions(workspace_id: str, start_date: Optional[str] = None,
         for s in sessions:
             counts[s["status"]] = counts.get(s["status"], 0) + 1
 
+        day_label = f"{span} local day" + ("" if span == 1 else "s")
+        window = (
+            f"{first_day.strftime('%A %-d %b %Y')} to "
+            f"{last_day.strftime('%A %-d %b %Y')} ({day_label}, "
+            f"{str(getattr(tz, 'key', tz))})"
+        )
+
         return {
             "status": "success",
+            # R-1: the covered window rides back with the answer so a reply can
+            # only ever name the span that was really swept. `days` is the span
+            # ACTUALLY used; `days_requested` is what the caller asked for, and
+            # they differ only when the 1-31 clamp bit.
             "start_date": first_day.isoformat(),
             "end_date": last_day.isoformat(),
             "days": span,
+            "days_requested": requested_span,
+            "window_clamped": span != requested_span,
+            "window": window,
             "timezone": str(getattr(tz, "key", tz)),
             "session_count": len(sessions),
             "status_counts": counts,
-            # The subset a cancel or a move can actually act on; the rest is
-            # history. Handed over so the model never has to derive it wrong.
+            # R-2: three honest id lists instead of one ambiguous one.
+            # `actionable_ids` is everything still occupying calendar time —
+            # planned AND missed — and is what a FULL clear must act on. A
+            # missed session is still booked on the user's day and both
+            # cancel_sessions and move_session act on it, so a sweep driven off
+            # `planned_ids` alone leaves it behind and reports a clean day.
+            # `planned_ids` keeps its original meaning (planned only) because
+            # callers and tests already depend on it.
+            "actionable_ids": [s["id"] for s in sessions
+                               if s["status"] in _MOVABLE_BLOCK_STATUSES],
             "planned_ids": [s["id"] for s in sessions if s["status"] == "planned"],
+            "missed_ids": [s["id"] for s in sessions if s["status"] == "missed"],
             "sessions": sessions,
         }
     except Exception as e:  # pragma: no cover - defensive
@@ -1228,32 +1293,84 @@ def reschedule_confirmed(workspace_id: str, token: str) -> Dict[str, Any]:
 _OPEN_TASK_STATUSES = ("draft", "ready", "scheduled", "in_progress")
 
 
-def list_tasks(workspace_id: str) -> Dict[str, Any]:
-    """List the user's open tasks with their ids, so you can act on the one they mean.
+def list_tasks(workspace_id: str, include_done: bool = False) -> Dict[str, Any]:
+    """List the user's tasks with their ids AND which project each belongs to, so
+    you can act on the ones they mean without guessing from a title.
 
-    Call this whenever the user refers to a piece of work by NAME rather than by
-    id — "rename my bus ticket task", "that Dahod thing is called the wrong
-    thing", "change the name of the linear algebra one". Match their words to a
-    title here, then use that task's id.
+    Call this whenever the user refers to work by NAME or by PROJECT rather than
+    by id — "rename my bus ticket task", "delete all the thesis tasks", "get rid
+    of everything for the Dahod project", "that linear algebra one".
 
-    Returns only the tasks that are still live (draft, ready, scheduled, or in
-    progress), each as {id, title, status}. Finished and dropped work is left
-    out. If two titles could plausibly be what they meant, ask which one instead
-    of guessing; if the list is empty, say so plainly rather than inventing a task.
+    EACH ROW: {id, title, status, commitment_id, commitment_title,
+    estimate_minutes}. `commitment_id` / `commitment_title` are the PROJECT the
+    task sits under, and they are how you select a whole project properly:
+    filter the rows by `commitment_id`, do not pattern-match the project's name
+    against task titles. A task called "read chapter 3" belongs to the thesis
+    without the word "thesis" appearing anywhere in it, and delete_tasks is a
+    HARD delete — a title guess there removes the wrong work and reports success.
+
+    `commitments` comes back too: every project in this listing, as {id, title,
+    task_count}. Use it to resolve what the user called the project into one
+    commitment_id. If their words match more than one, or match none of them
+    well, ASK which one they mean and name the candidates — never pick the
+    closest-looking title and act on it. Same when two task titles could
+    plausibly be what they meant. An empty list means no tasks: say so plainly
+    rather than inventing one.
+
+    `estimate_minutes` is how long the task is planned to take (None when nobody
+    has estimated it). It has no session ids in it — SESSION ids come from
+    list_sessions or list_todays_sessions.
 
     Args:
         workspace_id: The workspace whose tasks to read.
+        include_done: False (the default) lists only work that is still live —
+            draft, ready, scheduled, in progress. Pass True to ALSO include
+            finished and dropped tasks, which is what "remove all the ones I
+            already finished" or "what have I got done" needs; each row's
+            `status` tells you which is which.
     """
     try:
         store = get_or_create_store(workspace_id)
-        tasks = [t for t in store.tasks.values() if t.status in _OPEN_TASK_STATUSES]
+        if include_done:
+            tasks = list(store.tasks.values())
+        else:
+            tasks = [t for t in store.tasks.values() if t.status in _OPEN_TASK_STATUSES]
         tasks.sort(key=lambda t: (t.order_index, t.title or ""))
+
+        def _commitment_title(task) -> Optional[str]:
+            comm = store.commitments.get(getattr(task, "commitment_id", None))
+            return (comm.title or None) if comm is not None else None
+
+        rows = [
+            {
+                "id": t.id,
+                "title": t.title,
+                "status": t.status,
+                # Ranked gap #2: without the project on the row, "delete all the
+                # X tasks" is a title guess feeding a hard delete.
+                "commitment_id": getattr(t, "commitment_id", None),
+                "commitment_title": _commitment_title(t),
+                "estimate_minutes": getattr(t, "estimate_minutes", None),
+            }
+            for t in tasks
+        ]
+
+        seen: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            cid = r["commitment_id"]
+            if not cid:
+                continue
+            entry = seen.setdefault(
+                cid, {"id": cid, "title": r["commitment_title"], "task_count": 0}
+            )
+            entry["task_count"] += 1
+
         return {
             "status": "success",
-            "tasks": [
-                {"id": t.id, "title": t.title, "status": t.status}
-                for t in tasks
-            ],
+            "include_done": bool(include_done),
+            "task_count": len(rows),
+            "commitments": list(seen.values()),
+            "tasks": rows,
         }
     except Exception as e:  # pragma: no cover - defensive
         return {"status": "error", "error_message": str(e)}
@@ -1486,6 +1603,35 @@ def _fmt_local_day_time(dt: datetime, tz) -> str:
     return f"{local.strftime('%A %-d %b')}, {_fmt_local_time(dt, tz)}"
 
 
+def local_now_context(workspace_id: str, now: datetime) -> Dict[str, Any]:
+    """The user's CURRENT LOCAL wall clock for the agent's grounded context.
+
+    Not a tool — the runtime calls it when building the context block. The agent
+    used to be told only the DATE, so "what's next?" had no clock to compare the
+    session labels against and the model had to guess what time it was. This
+    hands it the real one.
+
+    Deliberately NOT a second conversion path: it resolves the zone with
+    `_workspace_zone` and formats with `_fmt_local_day_time`, exactly as every
+    session listing does, so the context clock and the `*_local` labels the model
+    reads can never disagree. Degrades to UTC the same way (`resolve_zone`
+    returns UTC for a missing or unusable zone) rather than raising.
+
+    `now` is the naive-UTC instant the caller already has; nothing here reads a
+    clock of its own, so a test that pins `now` pins this too.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        tz = _workspace_zone(store)
+    except Exception:  # pragma: no cover - defensive: never break a turn
+        tz = localtime.resolve_zone(None)
+    return {
+        "local_label": _fmt_local_day_time(now, tz),
+        "local_date": localtime.local_date(now, tz).isoformat(),
+        "timezone": str(getattr(tz, "key", tz)),
+    }
+
+
 def _duration_error(duration_minutes) -> Optional[str]:
     """The honest complaint about an out-of-range duration, or None if it's fine."""
     try:
@@ -1569,7 +1715,10 @@ def move_session(workspace_id: str, block_id: str, new_start: str,
     this tool converts from the workspace's real zone. Never invent a time you
     are unsure of — if the user said a day but no time, ask which time rather
     than assuming. If you do not have the session's id, call list_sessions for
-    the day it is on (list_todays_sessions covers today); never guess an id.
+    the day it is on (list_todays_sessions covers today); never guess an id. A
+    MISSED session moves like any other — "move what I missed to tonight" is
+    this tool over list_sessions' `missed_ids` (or `actionable_ids`), not a
+    reason to say the session is gone.
 
     The session keeps its current length unless you pass `duration_minutes`, and
     keeps its identity, so its existing Google Calendar event is PATCHED to the
@@ -2139,11 +2288,21 @@ def cancel_sessions(workspace_id: str, block_ids: List[str]) -> Dict[str, Any]:
     so if they want the work itself gone use delete_tasks.
 
     GET THE IDS FIRST, ALWAYS. Call list_sessions for the day or range in
-    question ("clear Friday" -> start_date Friday, days 1; "wipe this week" ->
-    days 7) and pass the ids of the sessions you actually mean — normally its
-    `planned_ids`, since a done or cancelled session is history. list_sessions
-    shows every session in the window with local times, so you can name what you
-    are about to cancel before you cancel it. This is a HARD delete of the
+    question — and pass it the window you actually mean, because a day-wide
+    listing behind a week-wide request produces a sweep that is honest about the
+    ids it got and silently wrong about the week ("clear Friday" -> start_date
+    Friday, days 1; "wipe this week" -> days 7).
+
+    THEN PICK THE RIGHT ID LIST. For a FULL clear ("clear today", "wipe this
+    week", "unschedule Friday") use `actionable_ids`: that is everything still
+    occupying the user's time, planned AND missed. `planned_ids` omits the
+    missed ones, so a sweep built on it leaves this morning's missed session
+    booked while you report the day clear. Use `planned_ids` only when the user
+    explicitly means the work still standing. Done and cancelled sessions are
+    history and are in neither list.
+
+    list_sessions shows every session in the window with local times, so you can
+    name what you are about to cancel before you cancel it. This is a HARD delete of the
     session: an id you guessed or matched off a UTC time is a wrong session
     removed and reported as a success.
 
@@ -2151,9 +2310,11 @@ def cancel_sessions(workspace_id: str, block_ids: List[str]) -> Dict[str, Any]:
     reply carries a per-session `results` list saying which were really
     cancelled (with their REAL titles) and which came back not-found, plus
     `cancelled_count`, `not_found_count`, and the summed `calendar_deleted` /
-    `calendar_failures`. Say what really went and what did not; never report a
-    partial sweep as a clean one. An empty list is a clean no-op. More than 25 at
-    once is refused whole, changing nothing.
+    `calendar_failures`. Say what really went and what did not, and name the
+    WINDOW you actually swept — list_sessions handed you `window` / `start_date`
+    / `end_date` for exactly this — so "cleared your week" is never said over a
+    single day's ids. Never report a partial sweep as a clean one. An empty list
+    is a clean no-op. More than 25 at once is refused whole, changing nothing.
 
     Args:
         workspace_id: The workspace the sessions belong to.
@@ -2185,21 +2346,29 @@ def cancel_sessions(workspace_id: str, block_ids: List[str]) -> Dict[str, Any]:
 
 
 # The tool set exposed to the agent. Keep small (ADK guidance: ~10-20 max).
-# Calendar writes are two-phase: the propose_* tools only ask; the *_confirmed
-# tools execute and must never be called before the user answers yes. The read
-# path (list_calendar_events) needs no confirm: reading is not acting.
+# Calendar writes are two-phase: the propose_* tools only ask, and are the ONLY
+# half the model sees. The *_confirmed tools execute, and are deliberately absent
+# from this list (R-3) — they belong to the confirm ENDPOINTS, which call them
+# directly, and they document the naive-UTC wire convention that the model must
+# never use. The read path (list_calendar_events) needs no confirm: reading is
+# not acting.
 ALL_TOOLS = [
     get_capacity,
     list_calendar_events,
     propose_schedule_for_workspace,
     validate_plan,
     list_open_questions,
+    # R-3: only the PROPOSE halves are exposed. The `*_confirmed` tools are the
+    # WIRE half — the confirm endpoints call them directly
+    # (server.calendar_event_endpoint, server.reschedule_endpoint), the model
+    # never can, and _block_unconfirmed_writes blocked every attempt anyway. They
+    # were nevertheless sitting in the model's prompt documenting NAIVE UTC while
+    # the instruction says every tool takes LOCAL, so the prompt contradicted
+    # itself over tools that were unreachable by construction. Removing them
+    # removes the contradiction; the structural gate stays as the belt.
     propose_create_event,
-    create_event_confirmed,
     propose_edit_event,
-    edit_event_confirmed,
     propose_delete_event,
-    delete_event_confirmed,
     # P17-03: permission-gated web lookup. Non-writing, so the confirm-gate
     # callback (_block_unconfirmed_writes) leaves it alone; its own consent gate
     # is what makes the first use ask before it searches.
@@ -2215,11 +2384,10 @@ ALL_TOOLS = [
     list_sessions,
     # P19-03: reschedule today's missed / past-due sessions. Two-phase like the
     # calendar writes: propose_reschedule only asks (surfaced by _PROPOSE_TOOLS);
-    # reschedule_confirmed executes and is structurally blocked inside an agent
-    # turn by _block_unconfirmed_writes (its name ends "_confirmed"). Store-only:
-    # no Google Calendar interaction here.
+    # reschedule_confirmed is the wire half, kept out of the model's toolset with
+    # the other *_confirmed tools (R-3) and called by server.reschedule_endpoint.
+    # Store-only: no Google Calendar interaction here.
     propose_reschedule,
-    reschedule_confirmed,
     # Task-level CRUD. list_tasks is a read (ids for a title the user said);
     # rename_task is a DIRECT low-risk write — deliberately not two-phase and
     # deliberately not named "*_confirmed", so the confirm-gate leaves it alone.

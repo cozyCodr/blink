@@ -104,6 +104,21 @@ class TestDisruptionReachesTheAgent(unittest.TestCase):
         self.assertIn("cancel_sessions", note)
         self.assertIn("list_todays_sessions", note)
 
+    def test_the_note_names_the_tool_that_can_see_a_day_that_is_not_today(self):
+        """R-4. The classifier labels "clear Friday, something came up" a
+        disruption, and the note used to name list_todays_sessions ALONE — a
+        tool that cannot see Friday. A non-today disruption then had no
+        selection step at all, on the route where a wrong cancel is a hard
+        delete."""
+        # Asserted on the note itself, not through the classifier: which day the
+        # user named is exactly what the note must stop assuming.
+        note = server._DISRUPTION_CONTEXT_NOTE
+        self.assertIn("list_sessions", note)
+        self.assertIn("start_date", note)
+        # And it must send a full clear at the id list that includes the missed
+        # sessions, not at the planned-only one (R-2).
+        self.assertIn("actionable_ids", note)
+
     def test_disruption_turn_falls_back_to_the_rebalancer_when_the_agent_is_down(self):
         # No runner injected and no credentials in the test env -> agent down.
         self.assertFalse(agent_runtime.agent_available())

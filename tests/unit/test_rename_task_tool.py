@@ -26,7 +26,7 @@ from src.agent import tools
 from src.agent import workspace_registry as reg
 from src.agent.workspace_registry import get_or_create_store
 from src.api.calendar_mirror import mirror_rename
-from src.types.entities import Block, Task
+from src.types.entities import Block, Commitment, Task
 
 
 def _env():
@@ -232,8 +232,15 @@ class TestListTasks(unittest.TestCase):
             [("t1", "Book bus ticket to Dahod", "ready"),
              ("t2", "Linear algebra review", "ready")],
         )
-        # Small payload: only the three keys, nothing else from the store.
-        self.assertEqual(set(out["tasks"][0]), {"id", "title", "status"})
+        # Ranked gap #2: the row now carries the PROJECT and the estimate too,
+        # so "delete all the X tasks" can select on commitment_id instead of
+        # guessing at titles. Still a bounded payload, nothing else from the
+        # store.
+        self.assertEqual(
+            set(out["tasks"][0]),
+            {"id", "title", "status", "commitment_id", "commitment_title",
+             "estimate_minutes"},
+        )
 
     def test_finished_tasks_are_left_out(self):
         store = _seed()
@@ -257,6 +264,80 @@ class TestWiring(unittest.TestCase):
         self.assertIn(tools.list_tasks, tools.ALL_TOOLS)
         # A direct write by design: the structural gate keys off the name suffix.
         self.assertFalse(tools.rename_task.__name__.endswith("_confirmed"))
+
+
+# --- list_tasks carries the project, so a project delete is not a title guess -
+
+def _seed_projects():
+    """Two commitments whose task titles do NOT contain the project's name —
+    the exact case where matching on titles picks the wrong work."""
+    reg.stores.clear()
+    store = get_or_create_store(_WS)
+    store.add_commitment(Commitment(id="c_thesis", workspace_id=_WS,
+                                    title="Thesis", kind="course", stake=5))
+    store.add_commitment(Commitment(id="c_move", workspace_id=_WS,
+                                    title="Flat move", kind="personal", stake=3))
+    store.add_task(Task(id="t1", workspace_id=_WS, commitment_id="c_thesis",
+                        title="Read chapter 3", status="ready",
+                        estimate_minutes=90, order_index=0))
+    store.add_task(Task(id="t2", workspace_id=_WS, commitment_id="c_thesis",
+                        title="Draft the intro", status="scheduled",
+                        estimate_minutes=120, order_index=1))
+    store.add_task(Task(id="t3", workspace_id=_WS, commitment_id="c_move",
+                        title="Book a van", status="ready",
+                        estimate_minutes=30, order_index=2))
+    store.add_task(Task(id="t4", workspace_id=_WS, commitment_id="c_thesis",
+                        title="Fix the bibliography", status="done",
+                        estimate_minutes=45, order_index=3))
+    return store
+
+
+class TestListTasksCarriesTheProject(unittest.TestCase):
+    """Ranked gap #2. list_tasks returned {id, title, status} only, so "delete
+    all the thesis tasks" was a title-substring guess feeding a HARD delete —
+    and not one of the thesis tasks here has "thesis" in its title."""
+
+    def tearDown(self):
+        reg.stores.clear()
+
+    def test_every_row_names_its_project_and_estimate(self):
+        _seed_projects()
+        out = tools.list_tasks(_WS)
+        by_id = {t["id"]: t for t in out["tasks"]}
+        self.assertEqual(by_id["t1"]["commitment_id"], "c_thesis")
+        self.assertEqual(by_id["t1"]["commitment_title"], "Thesis")
+        self.assertEqual(by_id["t1"]["estimate_minutes"], 90)
+        self.assertEqual(by_id["t3"]["commitment_id"], "c_move")
+        self.assertEqual(by_id["t3"]["commitment_title"], "Flat move")
+
+    def test_the_projects_are_listed_so_a_loose_name_can_be_resolved(self):
+        _seed_projects()
+        out = tools.list_tasks(_WS)
+        by_id = {c["id"]: c for c in out["commitments"]}
+        self.assertEqual(by_id["c_thesis"]["title"], "Thesis")
+        self.assertEqual(by_id["c_thesis"]["task_count"], 2)   # open ones only
+        self.assertEqual(by_id["c_move"]["task_count"], 1)
+
+    def test_a_whole_project_is_selectable_without_guessing_at_titles(self):
+        store = _seed_projects()
+        listed = tools.list_tasks(_WS)
+        ids = [t["id"] for t in listed["tasks"] if t["commitment_id"] == "c_thesis"]
+        self.assertEqual(sorted(ids), ["t1", "t2"])
+        res = tools.delete_tasks(_WS, ids)
+        self.assertEqual(res["status"], "success", res)
+        self.assertEqual(res["deleted_count"], 2)
+        # The other project's work is untouched.
+        self.assertIn("t3", store.tasks)
+
+    def test_include_done_is_off_by_default_and_on_by_request(self):
+        _seed_projects()
+        self.assertNotIn("t4", [t["id"] for t in tools.list_tasks(_WS)["tasks"]])
+        out = tools.list_tasks(_WS, include_done=True)
+        self.assertTrue(out["include_done"])
+        by_id = {t["id"]: t for t in out["tasks"]}
+        self.assertIn("t4", by_id)
+        self.assertEqual(by_id["t4"]["status"], "done")
+        self.assertEqual(out["task_count"], 4)
 
 
 if __name__ == "__main__":

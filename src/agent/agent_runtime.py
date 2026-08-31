@@ -34,7 +34,7 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.agent import conversation, decision_log, llm, voice
+from src.agent import conversation, decision_log, llm, tools, voice
 from src.agent.agent import _ADK, root_agent
 from src.agent.workspace_registry import now_naive
 
@@ -151,8 +151,20 @@ def _build_context(workspace_id: str, context_note: Optional[str], now: datetime
     """The grounded facts the model reasons over, plus the day and the
     workspace_id it must pass to every tool. Reuses conversation._state_context
     so the agent and the chat fallback are grounded on the SAME truth."""
+    # The agent used to be given only the DATE, which is not enough to answer
+    # "what's next?": the session listings carry local wall-clock labels and the
+    # model had nothing to compare them against, so "next" was a guess. It now
+    # gets the user's real current local time and zone, resolved through
+    # tools.local_now_context — the SAME zone lookup and formatter every session
+    # listing uses, so the clock and the labels can never disagree.
+    clock = tools.local_now_context(workspace_id, now)
     parts = [
-        f"Today is {now:%A %d %B %Y}.",
+        f"It is now {clock['local_label']} where the user is "
+        f"({clock['timezone']}); today's local date is {clock['local_date']}. "
+        f"That is the user's own wall clock and calendar day: resolve \"Friday\" "
+        f"or \"tomorrow\" from that date, and compare the time against the local "
+        f"times in any session listing to work out what is past, what is next, "
+        f"and what is still to come. Never guess either.",
         f'For every tool call, use workspace_id="{workspace_id}".',
         conversation._state_context(workspace_id),
     ]

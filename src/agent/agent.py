@@ -40,6 +40,12 @@ def _block_unconfirmed_writes(
     the tool (ADK never invokes it) with an honest error, so no reasoning slip or
     prompt injection can make the model fabricate a "yes" and write in one turn.
     The instruction says the same thing; this is the belt to that suspenders.
+
+    R-3: the `*_confirmed` tools are no longer in ALL_TOOLS at all, so the model
+    cannot even name one — the confirm ENDPOINTS call them directly. This
+    callback therefore guards a door that should now be unreachable, and it stays
+    exactly as it is: a tool set can be re-widened by a future edit, and a
+    structural refusal costs nothing.
     """
     name = getattr(tool, "name", "") or ""
     if name.endswith("_confirmed"):
@@ -88,8 +94,9 @@ How you work:
   week could go, want me to put it in?"). Never say you scheduled, booked or
   planned anything off the back of it. If they say yes, book it for real with
   schedule_task_at, one call per task, and only then speak of it as booked.
-- Every tool that takes a time takes it as ISO 8601 in the user's OWN LOCAL wall
-  clock ("2026-09-03T14:00"). Never convert to UTC and never do offset
+- Every tool you have that takes a time takes it as ISO 8601 in the user's OWN
+  LOCAL wall clock ("2026-09-03T14:00"), with no exceptions — there is no tool
+  in your set that wants UTC. Never convert to UTC and never do offset
   arithmetic yourself — the tools convert. Likewise, when a listing gives you
   both a UTC instant and a local label, read and quote the LOCAL one; deciding
   what "this morning" or "the 3pm" means from a UTC time picks the wrong session.
@@ -128,6 +135,12 @@ How you work:
   still intend to do it, cancel_session or cancel_sessions, which keeps the task.
   Find ids first, from the right place: TASK ids come from list_tasks, SESSION
   ids from list_sessions (any day or range) or list_todays_sessions (today).
+  When the user names a PROJECT rather than a task — "delete all the thesis
+  tasks", "get rid of everything for the Dahod project" — select on list_tasks'
+  commitment_id, never on the project's name appearing in a task title. If their
+  words fit more than one project, or none of them cleanly, ask which one and
+  name the candidates; deleting is a hard delete and a wrong guess is not
+  recoverable.
   list_tasks carries no session ids at all. Report exactly what came back,
   including anything the batch reported as not found.
 - Never write a raw URL or link into a reply. Your words are read out loud as
@@ -139,11 +152,11 @@ How you work:
 Calendar writes are two-phase and gated. To add, move, edit, or delete a real
 calendar event, call the matching propose_ tool (propose_create_event,
 propose_edit_event, propose_delete_event). That returns a confirm question for
-the user; surface it and STOP. NEVER call a _confirmed tool in the same turn,
-and never before the user has said yes. Reading the calendar
-(list_calendar_events) never needs a confirm. Only report a calendar change as
-done when a _confirmed tool actually returned status success; if you only
-proposed it, say you are asking first, not that it is done.
+the user; surface it and STOP. The second phase is not yours: the write happens
+in a separate step after the user says yes, and you have no tool that performs
+it — so never say an event was added, moved or deleted on the strength of a
+propose_ call. Say you are asking first. Reading the calendar
+(list_calendar_events) never needs a confirm.
 
 Pass workspace_id to every tool call. The current workspace_id is given to you
 in the context block of each turn.

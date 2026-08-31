@@ -14,7 +14,7 @@ credentials in the environment, agent_runtime never even builds the real Runner.
 """
 import types as pytypes
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -511,6 +511,50 @@ class TestATurnAlwaysSpeaks(_AgentRuntimeBase):
         if body.get("type") == "message":
             self.assertTrue(str(body.get("text") or "").strip())
 
+
+# --- the agent's grounded context carries a real clock ----------------------
+
+class TestContextCarriesTheLocalClock(_AgentRuntimeBase):
+    """Audit §(c) #3 / row 39. The context block used to state only the DATE
+    ("Today is Monday 31 August 2026"), so "what's next?" had nothing to compare
+    the sessions' local labels against — the model had to guess what time it was.
+    It now gets the user's real current LOCAL time and zone, resolved through the
+    same helper every session listing uses (tools.local_now_context), so the
+    clock and the labels can never disagree."""
+
+    _ZONE = "Africa/Harare"  # UTC+2, no DST: every offset is unambiguous.
+
+    def test_context_states_the_users_local_time_and_zone(self):
+        self.store.update_profile(timezone=self._ZONE)
+        # 09:30 naive UTC is 11:30 AM in UTC+2 — the LOCAL time must be shown,
+        # not the stored UTC one.
+        now = datetime(2026, 9, 3, 9, 30)
+        ctx = agent_runtime._build_context(self.ws, None, now)
+        self.assertIn("11:30 AM", ctx)
+        self.assertIn(self._ZONE, ctx)
+        self.assertIn("Thursday 3 Sep", ctx)
+        # The DATE is still there, in full ISO form, so "Friday" is resolvable.
+        self.assertIn("2026-09-03", ctx)
+        # The stored UTC hour must not be the one the model reads.
+        self.assertNotIn("9:30 AM", ctx)
+
+    def test_the_clock_agrees_with_the_session_labels_the_model_reads(self):
+        """One conversion path, not two: the context clock is formatted by the
+        same helper as list_sessions' `starts_at_local`."""
+        self.store.update_profile(timezone=self._ZONE)
+        now = datetime(2026, 9, 3, 9, 30)
+        clock = tools.local_now_context(self.ws, now)
+        self.assertEqual(clock["local_label"], "Thursday 3 Sep, 11:30 AM")
+        self.assertEqual(clock["local_date"], "2026-09-03")
+        self.assertEqual(clock["timezone"], self._ZONE)
+        self.assertIn(clock["local_label"],
+                      agent_runtime._build_context(self.ws, None, now))
+
+    def test_an_unset_zone_degrades_to_utc_rather_than_guessing(self):
+        now = datetime(2026, 9, 3, 9, 30)
+        clock = tools.local_now_context(self.ws, now)
+        self.assertEqual(clock["timezone"], "UTC")
+        self.assertIn("9:30 AM", clock["local_label"])
 
 
 if __name__ == "__main__":
