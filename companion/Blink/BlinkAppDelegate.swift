@@ -99,6 +99,24 @@ final class BlinkAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
             CheckInLaunchRequest.request()
         }
 
+        // P18-05 — "Start timer" on a nudge, and a tap on the nudge's BODY,
+        // both mean "open that session". Neither can start a timer from the
+        // background (a timer nobody is looking at measures nothing), so the
+        // intent is stamped here and the Today screen opens the focus session
+        // when it has a payload that still holds the block. The context is read
+        // through `SignalContext`, which the local and remote schedulers write
+        // identically, so this works for both. No block id means no intent:
+        // the app opens on Today and claims nothing.
+        let isStartTimer = response.actionIdentifier == SignalActionID.startTimer
+        let isNudgeBodyTap = response.actionIdentifier == UNNotificationDefaultActionIdentifier
+            && response.notification.request.content.categoryIdentifier
+                == SignalKind.nudge.categoryIdentifier
+        if isStartTimer || isNudgeBodyTap,
+           let blockID = SignalContext.read(
+            from: response.notification.request.content.userInfo)?.blockID {
+            SignalLaunchRequest.requestFocus(blockID: blockID)
+        }
+
         await handler.handle(
             actionIdentifier: response.actionIdentifier,
             userInfo: response.notification.request.content.userInfo

@@ -78,7 +78,14 @@ public struct SignalActionHandler: @unchecked Sendable {
 
         switch actionIdentifier {
         case SignalActionID.startTimer, SignalActionID.open:
-            // Foreground actions. They open the app and claim nothing.
+            // Foreground actions. They write nothing here and claim nothing.
+            //
+            // WHERE "Start timer" ACTUALLY GOES (P18-05): the app delegate
+            // stamps `SignalLaunchRequest` with the block from this same
+            // `SignalContext` before forwarding here, and the Today screen
+            // opens the focus session for it once it holds a payload that
+            // still contains that block. It is not started in the background,
+            // because a timer nobody is looking at measures nothing.
             return
 
         case SignalActionID.done:

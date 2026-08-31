@@ -169,6 +169,10 @@ struct TodayScreen: View {
             }
             #endif
             await store.load(session: session)
+            // P18-05: only NOW can a tapped "Start timer" be honoured. The
+            // stamp names a block; whether that block is real is the payload's
+            // answer, and the payload has just landed.
+            honourFocusRequest()
         }
         // P15-08 — the face preference lives on the account. Wire the
         // write-through seam first, then adopt what the server holds: server
@@ -221,9 +225,14 @@ struct TodayScreen: View {
                 checkInLoop.stop()
                 return
             }
-            Task { await store.refresh() }
             // A notification tap can bring the app forward without a fresh
-            // `.task`; pick up the check-in intent here too.
+            // `.task`; pick up both intents here too. The focus one waits for
+            // the refresh it is riding on, because it needs a payload to match
+            // its block against and the tap may have changed the plan.
+            Task {
+                await store.refresh()
+                honourFocusRequest()
+            }
             if CheckInLaunchRequest.consume() { checkInLoop.start() }
         }
         // A background action wrote something. Re-read rather than assume:
@@ -320,6 +329,44 @@ struct TodayScreen: View {
         .onChange(of: composer.planLandings) { _, _ in
             retireGreeting()
             showingPlan = true
+        }
+    }
+
+    // MARK: The tapped nudge (P18-05)
+
+    /// Open the focus session a notification tap asked for, if the server still
+    /// holds it.
+    ///
+    /// THE ORDERING. The stamp is written by the app delegate, which can run at
+    /// cold launch before this screen exists, so this is called from the two
+    /// places a payload can have just arrived: the end of the initial
+    /// `store.load`, and after the refresh a foreground activation runs. Until
+    /// there IS a payload the stamp is left where it is, because consuming it
+    /// against nothing would silently throw the person's tap away; the
+    /// freshness window inside `SignalLaunchRequest` is what stops an intent
+    /// that never found a payload from surviving into some later day.
+    ///
+    /// THE HONESTY. The stamp carries an id, not a session. This opens a timer
+    /// ONLY for a block today's payload is currently offering to start, which
+    /// is the same `SessionCard` the Start button on the card would hand to
+    /// `FocusScreen`. A block that has been resolved, moved off today, or
+    /// replanned away is simply not there any more, and then this does nothing
+    /// at all rather than inventing a session to run. The stamp is consumed
+    /// either way, so a tap can never ambush a later launch.
+    private func honourFocusRequest() {
+        guard store.state != nil, focusTarget == nil else { return }
+        guard let request = SignalLaunchRequest.consumeFocus() else { return }
+        guard let session = startableSession(blockID: request.blockID) else { return }
+        focusTarget = session
+    }
+
+    /// The session Today is currently offering to start for this block, or nil.
+    private func startableSession(blockID: String) -> SessionCard? {
+        switch store.state?.card {
+        case .nextSession(let card), .sessionRunning(let card):
+            return card.blockID == blockID ? card : nil
+        default:
+            return nil
         }
     }
 
