@@ -148,6 +148,13 @@ Classify the user's message into exactly one of these intents.
   itself. When the message clearly names the calendar or an existing event to
   change, prefer calendar.
 
+A REACTION, correction, or aside about something that just happened is chat —
+never plan_goal and never concrete_tasks. A goal is something the user is
+ASKING YOU TO PLAN, not a passing remark that happens to contain wishful words.
+"I want to just rest today, I'll figure out the rest tomorrow", "no, I meant
+the other one", "ok cool", "thanks, I'll deal with the rest later" are all
+chat, even though they contain "I want to", "figure out" or "later".
+
 When unsure, choose chat. Only pick plan_goal for a clear aspirational goal,
 only pick concrete_tasks for clearly schedulable tasks or an imperative command,
 and only pick disruption when the message says today's time is lost or must be
@@ -279,6 +286,35 @@ _FOCUS = re.compile(
 )
 
 
+# Aspirational-goal guard for the OFFLINE heuristic (G3 / H1). `_ASPIRATIONAL`
+# was matched as a bare SUBSTRING over the whole message, which fired "learn"
+# inside "relearn" / "learning curve" / "what did you learn", and fired on any
+# passing remark containing a bare desire operator. Since `plan_goal` WRITES a
+# commitment to the store, forcing that route in on a weak signal costs the user
+# a junk goal in their horizon. Two narrowings, both in the "rule a route OUT"
+# direction:
+#   1. word boundaries, so "learn" no longer matches inside another word;
+#   2. only the terms that NAME an aspiration count. "i want to", "i'd like to",
+#      "someday", "eventually", "figure out" are desire/vagueness operators that
+#      say nothing about a long-horizon goal on their own ("I want to just rest
+#      today, I'll figure out the rest tomorrow"), so offline they no longer
+#      route by themselves. The LLM router still judges those.
+_ASPIRATIONAL_GOAL_TERMS = tuple(
+    kw for kw in _ASPIRATIONAL
+    if kw in {"become", "get into", "break into", "learn", "master",
+              "improve at", "get better at", "grow into"}
+)
+_ASPIRATIONAL_GOAL = re.compile(
+    r"\b(?:" + "|".join(re.escape(k) for k in _ASPIRATIONAL_GOAL_TERMS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_aspirational_goal(text: str) -> bool:
+    """True when the message NAMES an aspiration, on a whole-word match."""
+    return bool(_ASPIRATIONAL_GOAL.search(text or ""))
+
+
 def extract_whatif_hours(text: str) -> Optional[float]:
     """The what-if hours-per-week, extracted deterministically, or None.
 
@@ -374,9 +410,23 @@ def _classify_intent_heuristic(text: str) -> Intent:
             reason="A hypothetical weekly-hours pacing question with a number.",
         )
 
+    # Disruption guard (P9-01) precedes the command-verb check: "cancel my
+    # afternoon" starts with an imperative verb but is a replan, not new work.
+    # G2: it also outranks the TEACH guard now. `parse_taught_zone` uses
+    # `.search`, so a zone phrase anywhere in a longer message used to win —
+    # "I can't do today's sessions, I work 9 to 5 tomorrow" came back as a
+    # confirm question about standing work hours instead of clearing the day,
+    # and the disruption the user actually reported was lost.
+    if _DISRUPTION.search(stripped):
+        return Intent(
+            label="disruption",
+            reason="Today's time was lost or must be cleared, so rebalance.",
+        )
+
     # Teach guard (P9-08): a standing life fact whose window parses
     # DETERMINISTICALLY ("I work 9 to 5"). Runs after whatif (hypotheticals
-    # never parse anyway: the parser rejects questions and "what if").
+    # never parse anyway: the parser rejects questions and "what if") and after
+    # disruption (see above).
     if parse_taught_zone(stripped) is not None:
         return Intent(
             label="teach",
@@ -389,14 +439,6 @@ def _classify_intent_heuristic(text: str) -> Intent:
         return Intent(
             label="chat",
             reason="Viewing request about the existing plan, not new work.",
-        )
-
-    # Disruption guard (P9-01) also precedes the command-verb check: "cancel my
-    # afternoon" starts with an imperative verb but is a replan, not new work.
-    if _DISRUPTION.search(stripped):
-        return Intent(
-            label="disruption",
-            reason="Today's time was lost or must be cleared, so rebalance.",
         )
 
     # Explicit "don't schedule it" outranks every schedulable signal below: the
@@ -420,8 +462,7 @@ def _classify_intent_heuristic(text: str) -> Intent:
             reason="Task lines, a duration, an imperative command verb, or a dump.",
         )
 
-    is_aspirational = any(kw in lowered for kw in _ASPIRATIONAL)
-    if is_aspirational and not _is_question(stripped):
+    if _is_aspirational_goal(lowered) and not _is_question(stripped):
         return Intent(
             label="plan_goal",
             reason="First-person aspirational goal with no concrete tasks yet.",
@@ -472,6 +513,28 @@ def classify_intent(text: str, use_llm: bool = True) -> Intent:
             reason="A hypothetical weekly-hours pacing question with a number.",
         )
 
+    # The disruption guard is deterministic pre-LLM for the same reason: "my
+    # meeting ran over" must reliably trigger the rebalance (P9-01), demo
+    # included, regardless of the model's mood. The regex is conservative, so
+    # borderline phrasings still fall through to the LLM's judgment.
+    #
+    # G2: it runs BEFORE the teach guard. `parse_taught_zone` matches with
+    # `.search`, so a taught-zone phrase sitting anywhere inside a longer
+    # message used to outrank a stated disruption: "I can't do today's
+    # sessions, I work 9 to 5 tomorrow" returned a confirm question about
+    # standing work hours instead of clearing the day. Reordering (rather than
+    # anchoring the zone patterns) keeps the parser's contract intact — it is
+    # re-run verbatim by /turn's `teach` branch on an LLM-labeled teach, and
+    # anchoring would silently break that path plus legitimate mid-sentence
+    # teaches ("oh, and I work 9 to 5"). _DISRUPTION is a closed, explicit list
+    # of time-is-lost phrasings, so preferring it is the conservative choice,
+    # and nothing is lost: a message that is ONLY a teach still parses below.
+    if _DISRUPTION.search(text or ""):
+        return Intent(
+            label="disruption",
+            reason="Today's time was lost or must be cleared, so rebalance.",
+        )
+
     # The teach guard (P9-08) is deterministic pre-LLM: a zone becomes memory
     # only when its window parses in code, so routing must not depend on the
     # model either. The parser is conservative (questions and "what if" never
@@ -490,16 +553,6 @@ def classify_intent(text: str, use_llm: bool = True) -> Intent:
         return Intent(
             label="chat",
             reason="Viewing request about the existing plan, not new work.",
-        )
-
-    # The disruption guard is deterministic pre-LLM for the same reason: "my
-    # meeting ran over" must reliably trigger the rebalance (P9-01), demo
-    # included, regardless of the model's mood. The regex is conservative, so
-    # borderline phrasings still fall through to the LLM's judgment.
-    if _DISRUPTION.search(text or ""):
-        return Intent(
-            label="disruption",
-            reason="Today's time was lost or must be cleared, so rebalance.",
         )
 
     # The no-schedule guard is deterministic pre-LLM because it rules something

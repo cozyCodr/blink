@@ -1280,6 +1280,11 @@ def _synthesize_and_schedule(
     if not res.tasks:
         # Nothing to schedule: skip the scheduler pass (it would only reshuffle
         # unrelated tasks) and answer honestly instead of claiming a plan.
+        # Drop the commitment this planning turn created, exactly as the
+        # `concrete_tasks` branch in `_turn` already does on the sibling path.
+        # A planning attempt that synthesized nothing must not leave a live
+        # goal behind in the horizon for the user to go and delete.
+        store.commitments.pop(commitment_id, None)
         # This site is reached ONLY from inside a planning flow the user is
         # already in (the plan_goal fall-through, /elicit/answer, /elicit/
         # courses), so it must not offer to "plan it properly" — that is what
@@ -1537,7 +1542,11 @@ def _turn(workspace_id: str, payload: TurnRequest,
         # P9-07 focus sessions: "start" means run the timer against what's
         # planned now or next. Deterministic target selection; an empty plan
         # gets the honest reply, never a timer against nothing.
-        return _focus_turn_response(store, now)
+        # The block-found path stays fully deterministic (it starts a real
+        # measured timer); only the no-target branch consults the agent, which
+        # has the history this branch lacks. See `_focus_turn_response`.
+        return _focus_turn_response(store, now, workspace_id, message,
+                                    payload.history)
 
     if intent.label == "whatif":
         # P9-05 what-if pacing: the hours come ONLY from the deterministic
@@ -1572,14 +1581,20 @@ def _turn(workspace_id: str, payload: TurnRequest,
         # P17-01: `calendar` (add/move/edit/delete/read a real Google Calendar
         # event) shares the agent path with `chat`; the agent selects the tool.
         note = None
-        if _VIEWING.search(message or ""):
+        # The viewing note applies ONLY to `chat`. On a `calendar` intent the
+        # user is asking to CHANGE something ("how do I get the standup off my
+        # calendar?" matches the very broad _VIEWING shape), and telling the
+        # model they only want to look — plus "never claim you changed
+        # anything" — suppressed legitimate calendar writes.
+        # It also no longer claims the plan view is opening: nothing opens it.
+        # `openHorizon()` runs only from the handle, a wheel gesture, a drag, or
+        # an explicit `open_plan` action button — never from a server reply.
+        if intent.label == "chat" and _VIEWING.search(message or ""):
             note = (
-                "Right now: the user asked to SEE their schedule, and the plan "
-                "view is opening on their screen as you answer. Reply with one "
-                "short, natural line that points out the single most notable "
-                "thing in the real numbers above. The view shows the details, "
-                "so don't enumerate them, and never claim you scheduled or "
-                "changed anything."
+                "Right now: the user asked to SEE their schedule. Reply with "
+                "one short, natural line that points out the single most "
+                "notable thing in the real numbers above. Don't enumerate the "
+                "details, and never claim you scheduled or changed anything."
             )
         # P17-01: the general chat turn runs through the real ADK agent, so a
         # message that wants a tool the deterministic specialists do not own
@@ -1719,6 +1734,20 @@ _NO_TASKS_CONTEXT_NOTE = (
     "no concrete task in it should you ask what the work involves, and then "
     "in one short question. Never claim you scheduled, planned, cancelled or "
     "changed anything unless a tool returned that it happened."
+)
+
+
+_NO_FOCUS_TARGET_NOTE = (
+    "The user asked to start working right now, but there is NO planned focus "
+    "session covering this moment or later today, so no timer was started and "
+    "nothing was changed. Do NOT offer to fill the day as a reflex — if they "
+    "just asked you to clear or cancel it, that is what they wanted, and "
+    "offering to re-place work reads as forgetting the last thing you did. "
+    "Read the conversation above and answer THE MESSAGE THEY ACTUALLY SENT, in "
+    "context, using your tools to find out what is true before you speak. Say "
+    "plainly that there is nothing planned to time right now. Never claim you "
+    "started a session, scheduled, cancelled or changed anything unless a tool "
+    "returned that it happened."
 )
 
 
@@ -2078,12 +2107,29 @@ def _focus_target(store, now: datetime) -> Optional[Block]:
     return None
 
 
-def _focus_turn_response(store, now: datetime):
+def _focus_turn_response(store, now: datetime, workspace_id: Optional[str] = None,
+                         message: Optional[str] = None,
+                         history: Optional[List[Dict[str, Any]]] = None):
     """/turn `focus`: hand the frontend the block to time, or the honest
     nothing-scheduled reply. The block payload carries the REAL planned and
     estimated numbers so the client's emotion beats stay truthful."""
     target = _focus_target(store, now)
     if target is None:
+        # Audit gap (the same class already fixed for `checkin`, `disruption`
+        # and the empty `concrete_tasks` tail): with no target this branch knows
+        # the LEAST — it has no history and no tools, so its canned line could
+        # offer to re-fill a day the user had JUST asked it to clear ("clear my
+        # afternoon" -> cancelled -> "ok let's go" -> "Want me to place
+        # something first?"). Hand the turn to the agent, which has the history
+        # and the full tool set. The canned line stays as the OFFLINE fallback.
+        # ONLY this branch is gated: the block-found path below starts a REAL
+        # measured timer and must stay deterministic.
+        if agent_runtime.agent_available():
+            reply = agent_runtime.run_chat_turn(
+                workspace_id, message, history,
+                context_note=_NO_FOCUS_TARGET_NOTE)
+            reply.setdefault("type", "message")
+            return reply
         return {
             "type": "message",
             "text": "Nothing is on the plan right now. Want me to place something first?",

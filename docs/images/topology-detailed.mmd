@@ -1,0 +1,62 @@
+flowchart TB
+    subgraph Browser["Browser — the eyes presence"]
+        Eyes["Capsule eyes<br/>(12 emotions, blink math, caption-synced voice)"]
+        Kit["Response components<br/>(duration, dates, chips, confirm ...)"]
+        Horizon["Horizon: day/week/month/quarter/year<br/>(replan diff, streak, pacing)"]
+        Ingest["Photo drop / paste / attach"]
+    end
+
+    Phone["iOS companion (SwiftUI)<br/>same brain, same API"]
+
+    subgraph CloudRun["Google Cloud Run (keyless service account)"]
+        API["FastAPI server<br/>/turn /elicit/answer /ingest-image /details /checkin/* /calendar/* /tts"]
+        Router["Intent router (orchestration layer)<br/>chat · plan_goal · concrete_tasks · disruption · checkin<br/>(deterministic guards run BEFORE the LLM)"]
+
+        subgraph Specialists["LLM specialists (LLM-first, deterministic fallback)"]
+            Elicitor["elicitor<br/>(fish for context)"]
+            Extractor["extractor<br/>(text AND syllabus photos to tasks)"]
+            Synth["plan_synthesizer"]
+            Convo["conversation<br/>(natural replies; naturalize_outcome<br/>post-checks the real counts)"]
+        end
+
+        subgraph Core["Deterministic core (pure, 0 I/O)"]
+            Ledger["capacity_ledger"]
+            Scheduler["scheduler + rebalancer"]
+            Validator["validator"]
+            Progress["progress + streak + pacing<br/>(derived at read time)"]
+        end
+
+        Agent["ADK root_agent (src/agent/agent.py)<br/>28 typed tools · before_tool_callback confirm-gate<br/>(agent_runtime.run_chat_turn)"]
+        Mirror["calendar mirror<br/>after the commit, best-effort, never raises"]
+        LLM["src/agent/llm.py (the model)<br/>one Gemini gateway (text + vision)"]
+        Store["workspace store<br/>dirty-tracked sections, flushed off the request path"]
+        Insights["insight mining<br/>≥3 occurrences, consent-gated"]
+    end
+
+    Vertex["Vertex AI — Gemini 3.5 Flash"]
+    TTS["Cloud TTS — Chirp3-HD Charon"]
+    GCal["Google Calendar<br/>(OAuth; every write confirm-gated)"]
+    FS["Firestore (blink_workspaces)<br/>snapshot per workspace, hydrate on cold start"]
+
+    Eyes -->|"POST /turn, /elicit/answer"| API
+    Ingest -->|"POST /ingest-image"| API
+    Horizon -->|"GET /details"| API
+    Phone -->|"same REST API"| API
+    API --> Router
+    Router --> Agent
+    Router --> Elicitor & Extractor & Synth & Convo
+    Elicitor & Extractor & Synth & Convo --> LLM
+    Agent -->|"ADK Runner, keyless"| Vertex
+    Agent --> Core
+    Agent --> Mirror
+    Mirror --> GCal
+    LLM -->|"keyless"| Vertex
+    API -->|"/tts"| TTS
+    API --> GCal
+    Router --> Core
+    Extractor & Synth --> Core
+    Core --> Store
+    API --> Store
+    Store --> FS
+    Store --> Insights
+    Insights -->|"one at a time, on consent"| Eyes

@@ -1,0 +1,28 @@
+flowchart LR
+  U(["You<br/>web · phone · notifications"])
+
+  subgraph CR["Google Cloud Run"]
+    direction TB
+    AG["<b>Gemini 3.5 Flash + ADK</b><br/>28 typed tools<br/><i>decides what to do</i>"]
+    CORE["<b>Deterministic core</b><br/>capacity · scheduling · progress<br/><i>computes what is true</i>"]
+  end
+
+  GATE{"your yes"}
+  GC["<b>Google Calendar</b><br/>real events"]
+  FS[("<b>Firestore</b><br/>what survived,<br/>what did not")]
+
+  U --> AG
+  AG <--> CORE
+  AG --> GATE
+  GATE --> GC
+  CORE --> FS
+  FS -. "learns" .-> AG
+
+  classDef brain fill:#dfeee4,stroke:#4a7a5c,stroke-width:2px,color:#12271a
+  classDef core fill:#eaf0f6,stroke:#4a6a8a,stroke-width:2px,color:#12202e
+  classDef gate fill:#fbe9cf,stroke:#c08a2a,stroke-width:2px,color:#3a2708
+  classDef ext fill:#ffffff,stroke:#8a8a8a,stroke-width:1.5px,color:#222
+  class AG brain
+  class CORE core
+  class GATE gate
+  class U,GC,FS ext

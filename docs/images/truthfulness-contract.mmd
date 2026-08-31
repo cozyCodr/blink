@@ -1,0 +1,7 @@
+flowchart LR
+    Outcome["Deterministic outcome<br/>(tasks=4, blocks=4, unplaced=0)"] --> Template["Honest template text"]
+    Template --> Rephrase["Gemini rephrases<br/>for natural voice"]
+    Rephrase --> Check{"Every required token<br/>still present verbatim?<br/>(counts, 'scheduled')"}
+    Check -->|yes| Ship["Ship the natural phrasing"]
+    Check -->|no| Fallback["Ship the template instead"]
+    Offline["Gemini unavailable"] --> Fallback

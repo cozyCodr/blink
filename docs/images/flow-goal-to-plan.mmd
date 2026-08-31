@@ -1,0 +1,29 @@
+sequenceDiagram
+    participant U as User (eyes UI)
+    participant R as Turn router
+    participant H as goal_classifier (heuristic)
+    participant E as elicitor
+    participant P as plan_synthesizer
+    participant C as Deterministic core
+    participant G as Gemini (Vertex)
+
+    U->>R: "I want to become a data scientist"
+    R->>H: classify (no LLM call)
+    H-->>R: needs_elicitation
+    R->>E: next question (opening)
+    E->>G: warm the opening phrasing
+    G-->>E: "What platforms do you have?"
+    E-->>U: ClarifyQuestion (multi_select)
+
+    loop until profile is full (instant, no LLM)
+        U->>R: answer (platforms / level / hours / timeline)
+        R->>E: next question
+        E-->>U: ClarifyQuestion (deterministic)
+    end
+
+    U->>R: final answer
+    R->>P: synthesize plan
+    P->>G: courses -> sequenced tasks
+    G-->>P: typed task tree
+    P->>C: propose_schedule (never invents times)
+    C-->>U: plan placed in "Your week"
