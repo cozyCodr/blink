@@ -10,7 +10,7 @@ invent times. Import these both as ADK function tools and as orchestration helpe
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Dict, Any, List, Optional
 
 from src.agent.workspace_registry import get_or_create_store, now_naive, ledger_for
@@ -285,35 +285,76 @@ def delete_event_confirmed(workspace_id: str, event_id: str) -> Dict[str, Any]:
 # five-minute slivers the model would have to filter itself.
 _MIN_FREE_WINDOW_MINUTES = 15
 
+# P21-02: the reported windows are clipped to these LOCAL hours.
+#
+# STOPGAP, and worth knowing where the disease lives: build_capacity_ledger in
+# src/core/capacity/capacity_ledger.py runs its 07:00-22:00 waking window against
+# the stored NAIVE-UTC clock, not the user's zone. In Africa/Harare (UTC+2) that
+# makes a fully free day come out as 09:00 to 00:00 local, and a model reading
+# that will happily book the client project at 23:00. The cure is localizing that
+# window in the core, which changes what the scheduler PLACES into on every path;
+# this only changes what get_capacity REPORTS.
+#
+# Clipping only ever narrows. Every window it returns is a subset of one the
+# ledger really computed, so nothing is offered that placement would refuse. The
+# cost is that `available_hours` (raw, unclipped) and the windows can disagree,
+# and that disagreement is honest: capacity is what exists, windows are what is
+# bookable. The docstring tells the model to read them that way.
+_LOCAL_WAKING_START = time(7, 0)
+_LOCAL_WAKING_END = time(22, 0)
 
-def _local_clock(dt: datetime, tz) -> str:
-    """A naive-UTC instant as a 24-hour local wall clock, e.g. '09:00'.
 
-    Same conversion path as `_fmt_local_time` (store keeps naive UTC, the user
-    speaks local); the 24-hour shape is deliberate here because these strings
-    are meant to be composed straight back into an ISO local start
-    ("2026-09-03" + "T" + "09:00") when the model books the window.
+def _clip_to_local_waking(iv, tz) -> List[tuple]:
+    """One naive-UTC interval as the LOCAL pieces of it inside waking hours.
+
+    Returns aware local (start, end) pairs. Intersection only: every piece lies
+    inside `iv`, so this can shorten a window or delete it, never extend one.
+
+    A window can straddle local midnight (the ledger's day is a UTC day, and in a
+    far-from-UTC zone that lands on two local dates), so each local date the
+    interval touches is intersected with its own waking band. Each piece
+    therefore carries the local date it truly falls on rather than inheriting the
+    ledger's UTC-derived one.
     """
-    return dt.replace(tzinfo=timezone.utc).astimezone(tz).strftime("%H:%M")
+    start = iv.start.replace(tzinfo=timezone.utc).astimezone(tz)
+    end = iv.end.replace(tzinfo=timezone.utc).astimezone(tz)
+    pieces: List[tuple] = []
+    day = start.date()
+    # A ledger window lives inside one 15-hour UTC band, so it can touch at most
+    # two local dates. The bound is a guard, not arithmetic.
+    for _ in range(3):
+        if day > end.date():
+            break
+        lo = max(start, datetime.combine(day, _LOCAL_WAKING_START, tzinfo=tz))
+        hi = min(end, datetime.combine(day, _LOCAL_WAKING_END, tzinfo=tz))
+        if hi > lo:
+            pieces.append((lo, hi))
+        day += timedelta(days=1)
+    return pieces
 
 
 def _free_windows_local(day, tz) -> List[Dict[str, Any]]:
-    """One ledger day's real free windows as local wall-clock dicts.
+    """One ledger day's free windows as local wall-clock dicts, clipped to waking hours.
 
-    Reports only what the ledger actually computed: nothing is widened, nothing
-    is invented, and a window under _MIN_FREE_WINDOW_MINUTES is dropped rather
-    than offered as a slot no work fits in.
+    Reports only what the ledger actually computed, narrowed: nothing is widened
+    and nothing is invented. The minimum-length drop runs AFTER the clip, so a
+    sliver left over by the clip is never offered as a slot. A day whose windows
+    all fall outside local waking hours reports none, which is an answer.
     """
     out: List[Dict[str, Any]] = []
     for iv in getattr(day, "free_windows", None) or ():
-        minutes = int((iv.end - iv.start).total_seconds() // 60)
-        if minutes < _MIN_FREE_WINDOW_MINUTES:
-            continue
-        out.append({
-            "start": _local_clock(iv.start, tz),
-            "end": _local_clock(iv.end, tz),
-            "minutes": minutes,
-        })
+        for lo, hi in _clip_to_local_waking(iv, tz):
+            minutes = int((hi - lo).total_seconds() // 60)
+            if minutes < _MIN_FREE_WINDOW_MINUTES:
+                continue
+            out.append({
+                # The local date this piece really falls on, so "date + T +
+                # start" is always the instant the window names.
+                "date": lo.date().isoformat(),
+                "start": lo.strftime("%H:%M"),
+                "end": hi.strftime("%H:%M"),
+                "minutes": minutes,
+            })
     return out
 
 
@@ -324,15 +365,21 @@ def get_capacity(workspace_id: str, days: int = 7) -> Dict[str, Any]:
     reserve buffer. Use this before claiming the user has room for something.
 
     `by_day[].available_hours` is HOW MUCH. `by_day[].free_windows` is WHEN: the
-    real gaps on that day in the user's own wall clock, as
-    {"start": "09:00", "end": "11:30", "minutes": 150}. This is how you find a
-    time that is genuinely free before you offer it. Gaps under 15 minutes are
-    left out, so a day can show hours available and still list few windows.
+    real gaps in the user's own wall clock, as {"date": "2026-09-03",
+    "start": "09:00", "end": "11:30", "minutes": 150}. This is how you find a
+    time that is genuinely free before you offer it.
+
+    The windows are the BOOKABLE SUBSET of the hours: they are trimmed to waking
+    hours (07:00 to 22:00 local) and gaps under 15 minutes are dropped, so their
+    minutes will often add up to less than `available_hours`. That is expected.
+    Never treat the difference as extra time you can offer, and never reconcile
+    the two numbers out loud. A day can show hours available and list no windows
+    at all, and then the honest answer is that there is no usable slot that day.
 
     These windows are computed from real busy time, never guessed, so quote them
-    as they are. To then BOOK inside them, call schedule_task_at (one slot) or
-    schedule_task_sessions (the same task across several days) with the day plus
-    the window's start, e.g. "2026-09-03T09:00".
+    as they are. To then BOOK inside one, call schedule_task_at (one slot) or
+    schedule_task_sessions (the same task across several days) with the window's
+    OWN `date` plus its start, e.g. "2026-09-03T09:00".
 
     Args:
         workspace_id: The workspace to compute capacity for.
@@ -2588,9 +2635,10 @@ def schedule_task_sessions(workspace_id: str, task_id: str, starts: List[str],
     session, not five. Use propose_schedule_for_workspace instead when the user
     wants BLINK to pick the times.
 
-    Find the times first. get_capacity returns per-day `free_windows` in the
-    user's own wall clock, so you can put each session where the day is really
-    free instead of guessing an hour. If the user named a day but no time, ask,
+    Find the times first. get_capacity returns `free_windows` in the user's own
+    wall clock, each carrying its own `date`, so you can put each session where
+    the day is really free instead of guessing an hour. Build a start from the
+    window's own date and start time. If the user named a day but no time, ask,
     or offer a free window; never invent one.
 
     TIME CONVENTION (LOCAL): every entry in `starts` is ISO 8601 in the user's
