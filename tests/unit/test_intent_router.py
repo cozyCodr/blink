@@ -96,6 +96,98 @@ class TestIntentHeuristic(unittest.TestCase):
         self.assertEqual(res.label, "chat")
 
 
+class TestAddDoesNotForceScheduling(unittest.TestCase):
+    """Coverage audit item 7 (requests #5, #8, #15).
+
+    `concrete_tasks` decomposes AND commits sessions into free time. "add" used
+    to be an imperative command verb, so "add a task called X" came back
+    auto-scheduled and "add it but don't schedule it" was scheduled anyway.
+    Capture now falls through to the agent route (`chat`), where `create_task`
+    records work WITHOUT booking time — while a real multi-item dump still
+    routes deterministically to decomposition."""
+
+    def setUp(self):
+        llm.set_client(_RaisingClient())
+
+    def tearDown(self):
+        llm.set_client(None)
+
+    def test_single_add_is_not_auto_scheduled(self):
+        for msg in [
+            "add a task called renew my passport",
+            "add a task called call the plumber",
+            "capture a task for the visa paperwork",
+        ]:
+            self.assertNotEqual(classify_intent(msg).label, "concrete_tasks", msg)
+
+    def test_explicit_no_schedule_is_honoured(self):
+        for msg in [
+            "add this to my list but don't schedule it yet",
+            "put 'call the dentist' on my list, dont schedule it",
+            "add renew my passport, no need to schedule it",
+            "add: finish the essay, book the bus, email my supervisor - "
+            "don't schedule them yet",
+        ]:
+            self.assertEqual(classify_intent(msg).label, "chat", msg)
+
+    def test_multi_item_brain_dump_still_decomposes(self):
+        for msg in [
+            "add: finish the essay, book the bus, email my supervisor",
+            "add: buy milk, email John",
+            "add: finish report\nemail John\nbuy milk",
+        ]:
+            self.assertEqual(classify_intent(msg).label, "concrete_tasks", msg)
+
+    def test_llm_may_still_route_a_dump_to_concrete_tasks(self):
+        # The model owns the single-item case now; nothing deterministic
+        # overrides a concrete_tasks label it returns for a real dump.
+        llm.set_client(_CannedClient(
+            Intent(label="concrete_tasks", reason="a list of work to book")
+        ))
+        self.assertEqual(
+            classify_intent("add a task called renew my passport").label,
+            "concrete_tasks",
+        )
+
+    def test_no_schedule_guard_beats_the_llm(self):
+        # An explicit "don't schedule it" must never reach the committing
+        # route, even if the classifier would have said otherwise.
+        llm.set_client(_CannedClient(
+            Intent(label="concrete_tasks", reason="looks like tasks")
+        ))
+        self.assertEqual(
+            classify_intent("add this to my list but don't schedule it").label,
+            "chat",
+        )
+
+    def test_heuristic_is_sane_and_does_not_crash(self):
+        valid = {"chat", "plan_goal", "concrete_tasks", "disruption", "checkin",
+                 "whatif", "focus", "teach", "calendar", "reschedule"}
+        for msg in [
+            "add",
+            "add:",
+            "add ",
+            "add a task called renew my passport",
+            "add this but don't schedule it yet",
+            "add: finish the essay, book the bus, email my supervisor",
+            "don't schedule anything",
+        ]:
+            self.assertIn(classify_intent(msg).label, valid, msg)
+
+    def test_scheduling_imperatives_are_untouched(self):
+        # Removing `add` must not weaken the real scheduling commands.
+        for msg in ["schedule dentist Tuesday 3pm", "book the dentist Tuesday",
+                    "Write the intro (60 mins)"]:
+            self.assertEqual(classify_intent(msg).label, "concrete_tasks", msg)
+
+    def test_reschedule_phrasing_is_not_caught_by_the_no_schedule_guard(self):
+        # "reschedule" contains "schedule" but no negation of it.
+        self.assertNotEqual(
+            classify_intent("reschedule the 2 I didn't get to").reason,
+            "The user explicitly asked for this NOT to be scheduled.",
+        )
+
+
 class TestIntentLlmPath(unittest.TestCase):
     def tearDown(self):
         llm.set_client(None)

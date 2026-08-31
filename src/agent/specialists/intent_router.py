@@ -11,8 +11,10 @@ Three intents:
 - `plan_goal`       = a first-person aspirational goal that is too loose to
                       schedule yet ("I want to become a data scientist"), so the
                       agent fishes for context via elicitation.
-- `concrete_tasks`  = specific, schedulable work: a task list, a duration hint,
-                      or an imperative command ("schedule dentist Tuesday 3pm").
+- `concrete_tasks`  = work to plan AND commit into time: a task list, a duration
+                      hint, or an imperative ("schedule dentist Tuesday 3pm").
+                      Capturing one item ("add a task called X") or an explicit
+                      "don't schedule it" is NOT this route — it books time.
 - `disruption`      = life happened and TODAY's plan is impacted ("my meeting
                       ran over", "I'm sick today", "I lost my morning"), so the
                       agent should rebalance. Pure mood ("I'm tired") without a
@@ -62,7 +64,9 @@ class Intent(BaseModel):
         description=(
             "chat = general conversation, questions, greetings, off-domain, or "
             "anything ambiguous. plan_goal = a loose aspirational goal to plan. "
-            "concrete_tasks = specific schedulable tasks or an imperative command. "
+            "concrete_tasks = specific work to plan AND book into time now, or "
+            "an imperative scheduling command; capturing a single task, or work "
+            "the user says not to schedule, is chat instead. "
             "disruption = life happened and today's schedule is impacted. "
             "reschedule = the user wants to re-place today's already-missed or "
             "undone sessions into later free time. "
@@ -92,8 +96,15 @@ Classify the user's message into exactly one of these intents.
   and anything you are unsure about.
 - plan_goal: a first-person aspirational goal that is too loose to schedule yet.
   Examples: "I want to become a data scientist", "help me learn Spanish", "get fit".
-- concrete_tasks: specific, schedulable work or a direct command. Examples:
-  "schedule dentist Tuesday 3pm", "add: finish report, email John, buy milk".
+- concrete_tasks: specific work the user wants PLANNED AND BOOKED INTO TIME, or
+  a direct scheduling command. Examples: "schedule dentist Tuesday 3pm", "add:
+  finish report, email John, buy milk", "plan out this list for me". This route
+  decomposes the work and immediately commits focus sessions into the user's
+  free time, so only choose it when booking time is what they actually want.
+  NOT concrete_tasks: capturing ONE thing onto the list ("add a task called
+  renew my passport", "put 'call the dentist' on my list"), or anything that
+  says not to schedule it ("add this but don't schedule it yet") — those are
+  chat, where the agent can record the task without booking any time.
 - disruption: life happened and TODAY's schedule is impacted, so the plan needs
   rebalancing. Examples: "my meeting ran over", "I'm sick today", "I lost my
   whole morning", "cancel my afternoon, something came up", "I can't do today's
@@ -146,7 +157,41 @@ cleared.
 # Imperative command verbs that, at the START of a message, mark it as a direct
 # order to schedule/act. Superset of goal_classifier's _CONCRETE_VERBS plus a few
 # command words that are not schedulable "work verbs" on their own.
-_COMMAND_VERBS = set(_CONCRETE_VERBS) | {"add", "remind"}
+#
+# `add` is deliberately NOT here (coverage audit item 7). `concrete_tasks` runs
+# the planner AND commits the result into the next free slot, so any message
+# starting with "add" used to come back auto-scheduled — but "add a task called
+# renew my passport" asks for CAPTURE, not for a booking. Capture without
+# scheduling is a real capability now (`create_task`), and it lives on the agent
+# route, so a lone "add …" must be allowed to reach the model instead of being
+# forced past it. A genuine multi-item dump is still caught deterministically by
+# `_TASK_DUMP` below.
+_COMMAND_VERBS = set(_CONCRETE_VERBS) | {"remind"}
+
+# Brain-dump guard: "add: buy milk, email John" — a capture lead-in followed by
+# TWO OR MORE comma/semicolon-separated items. That shape is unambiguous work to
+# decompose, so it keeps the deterministic route to `concrete_tasks` even though
+# `add` is no longer a command verb. A single item after the lead-in ("add a
+# task called renew my passport") deliberately does NOT match.
+_TASK_DUMP = re.compile(
+    r"^\s*(?:add|capture|jot(?: down)?|note(?: down)?|tasks?)\b[:\-—,]?\s+(?P<items>.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Explicit "don't schedule this" negation. When the user says in so many words
+# that they do NOT want time booked, routing to `concrete_tasks` (which plans
+# and commits) is definitively wrong, so this is a safe thing for code to decide.
+# It routes to `chat` — the broad agent route, where the model still chooses what
+# to do (typically `create_task`, which creates work WITHOUT scheduling it).
+_NO_SCHEDULE = re.compile(
+    r"("
+    r"\b(?:do ?n['’]?t|do not|dont|no need to|not?)\s+(?:\w+\s+){0,2}"
+    r"(?:schedule|book|plan|slot|timebox|time-box)\b"
+    r"|\bwithout (?:scheduling|booking|planning)\b"
+    r"|\bdon['’]?t (?:put|block) (?:it|them|this) (?:in|on)\b"
+    r")",
+    re.IGNORECASE,
+)
 
 # Viewing-intent guard (P8-01b): "what does my week look like", "show me my
 # week", "how's my week looking", "what's on today" are requests to SEE the
@@ -267,6 +312,24 @@ def _starts_with_command(lowered: str) -> bool:
     return first in _COMMAND_VERBS
 
 
+def _looks_like_task_dump(text: str) -> bool:
+    """True for a genuine multi-item brain dump ("add: buy milk, email John").
+
+    Conservative on purpose: a capture lead-in ("add", "capture", "jot down",
+    "tasks:") followed by TWO OR MORE comma/semicolon/newline-separated items
+    that each read like a unit of work (two words or more). One item is not a
+    dump — "add a task called renew my passport" is a single capture, and the
+    model decides what to do with it."""
+    m = _TASK_DUMP.match((text or "").strip())
+    if not m:
+        return False
+    items = [
+        part.strip(" \t.-—•*")
+        for part in re.split(r"[,;\n]| and ", m.group("items"))
+    ]
+    return sum(1 for it in items if len(it.split()) >= 2) >= 2
+
+
 def _classify_intent_heuristic(text: str) -> Intent:
     """Deterministic fallback. CONSERVATIVE: defaults to `chat` when unsure.
 
@@ -336,15 +399,25 @@ def _classify_intent_heuristic(text: str) -> Intent:
             reason="Today's time was lost or must be cleared, so rebalance.",
         )
 
+    # Explicit "don't schedule it" outranks every schedulable signal below: the
+    # user said not to book time, and `concrete_tasks` books time. `chat` is the
+    # agent route, where capture-without-scheduling (`create_task`) lives.
+    if _NO_SCHEDULE.search(stripped):
+        return Intent(
+            label="chat",
+            reason="The user explicitly asked for this NOT to be scheduled.",
+        )
+
     lines = [ln for ln in stripped.splitlines() if ln.strip()]
     has_multiple_lines = len(lines) > 1
     has_duration = bool(_DURATION.search(lowered))
     starts_with_command = _starts_with_command(lowered)
+    is_task_dump = _looks_like_task_dump(stripped)
 
-    if has_multiple_lines or has_duration or starts_with_command:
+    if has_multiple_lines or has_duration or starts_with_command or is_task_dump:
         return Intent(
             label="concrete_tasks",
-            reason="Task lines, a duration, or an imperative command verb.",
+            reason="Task lines, a duration, an imperative command verb, or a dump.",
         )
 
     is_aspirational = any(kw in lowered for kw in _ASPIRATIONAL)
@@ -427,6 +500,19 @@ def classify_intent(text: str, use_llm: bool = True) -> Intent:
         return Intent(
             label="disruption",
             reason="Today's time was lost or must be cleared, so rebalance.",
+        )
+
+    # The no-schedule guard is deterministic pre-LLM because it rules something
+    # OUT rather than in: when the user says in so many words "don't schedule
+    # it", the one route that must not be taken is `concrete_tasks`, which plans
+    # and COMMITS sessions (server.py `_schedule_current`). It routes to `chat`,
+    # the full agent route, so the model still decides everything about what to
+    # do with the message — including whether to call `create_task`, which
+    # creates the work without booking any time for it.
+    if _NO_SCHEDULE.search(text or ""):
+        return Intent(
+            label="chat",
+            reason="The user explicitly asked for this NOT to be scheduled.",
         )
 
     if not use_llm:
