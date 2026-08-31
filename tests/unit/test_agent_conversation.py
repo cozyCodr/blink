@@ -98,7 +98,10 @@ class TestClarifyAndTools(unittest.TestCase):
         self.assertGreater(cap["total_available_hours"], 0)
 
         sched = propose_schedule_for_workspace(self.ws)
-        self.assertEqual(sched["status"], "success")
+        # "proposed", never "success": this tool commits nothing (audit TR-1).
+        self.assertEqual(sched["status"], "proposed")
+        self.assertIs(sched["committed"], False)
+        self.assertGreaterEqual(len(sched["proposed_blocks"]), 1)
         self.assertGreaterEqual(len(sched["blocks"]), 1)
 
         val = validate_plan(self.ws)

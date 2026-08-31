@@ -10,7 +10,7 @@ invent times. Import these both as ADK function tools and as orchestration helpe
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 
 from src.agent.workspace_registry import get_or_create_store, now_naive, ledger_for
@@ -46,34 +46,97 @@ def _confirm_question(question: str, why: str, field: str, config: Dict[str, Any
     }
 
 
+# ONE datetime convention across every model-facing tool (audit TR-5): ISO 8601
+# in the USER'S OWN LOCAL WALL CLOCK. move_session and schedule_task_at already
+# worked that way; the calendar propose_* tools took naive UTC, the exact
+# opposite, and a model mixing the two wrote a real Google event at the wrong
+# hour and reported the requested hour back. They now take local too, and
+# convert here. The *_confirmed tools and the confirm `config` stay naive UTC:
+# that is the confirm-ENDPOINT contract (server /calendar/events replays the
+# config verbatim, and gcal._event_body sends it as UTC), and it is not part of
+# the surface the model reasons over.
+def _local_window_for_confirm(workspace_id: str, start_iso: str, end_iso: str):
+    """Read a proposed event window given in LOCAL ISO and return
+    (naive_utc_start_iso, naive_utc_end_iso, human_local_label), or an error dict.
+
+    The single conversion point for the calendar propose tools. The confirm
+    ENDPOINT contract is unchanged: what goes into the confirm `config` (and so
+    what the frontend echoes back to `*_event_confirmed` and on to
+    `gcal._event_body`) is still naive UTC. Only the model-facing side is
+    localised, so the model uses one convention everywhere and the wire format
+    nobody else can see stays exactly as it was.
+    """
+    store = get_or_create_store(workspace_id)
+    tz = _workspace_zone(store)
+    start = _parse_local_to_naive_utc(start_iso, tz)
+    end = _parse_local_to_naive_utc(end_iso, tz)
+    if start is None or end is None:
+        bad = start_iso if start is None else end_iso
+        return {
+            "status": "error",
+            "error_message": f"I couldn't read {bad!r} as a time. {_LOCAL_FORMAT_HINT}",
+        }
+    if end <= start:
+        return {
+            "status": "error",
+            "error_message": "That event would end before it starts. Nothing proposed.",
+        }
+    label = f"{_fmt_local_day_time(start, tz)} to {_fmt_local_time(end, tz)}"
+    return start.isoformat(), end.isoformat(), label
+
+
 def propose_create_event(workspace_id: str, summary: str, start_iso: str, end_iso: str) -> Dict[str, Any]:
-    """Propose creating a calendar event WITHOUT creating it. Returns a confirm
-    question the user must approve; this never calls Google. Only after the user
-    says yes should you call create_event_confirmed with the same arguments.
+    """Propose creating a REAL Google Calendar event WITHOUT creating it. Returns
+    a confirm question the user must approve; this never calls Google. Only after
+    the user says yes does the confirm step write it. Never say the event exists
+    on the strength of this call — you asked, you did not add.
+
+    TIME CONVENTION — LOCAL, the same as move_session and schedule_task_at.
+    Pass `start_iso` / `end_iso` as ISO 8601 in the user's OWN LOCAL WALL CLOCK,
+    e.g. "2026-09-03T14:00" for Thursday 3 September at 2pm. Do NOT convert to
+    UTC and do NOT apply an offset yourself: this tool does the conversion from
+    the workspace's real timezone. Handing it a UTC time you converted by hand is
+    how an event lands on the user's calendar an hour or two off while you report
+    back the hour they asked for.
 
     Args:
         workspace_id: The workspace whose calendar to write to.
         summary: The event title to propose.
-        start_iso: Start time as naive-UTC ISO 8601.
-        end_iso: End time as naive-UTC ISO 8601.
+        start_iso: Start time, ISO 8601 in the user's LOCAL time, e.g.
+            "2026-09-03T14:00".
+        end_iso: End time, ISO 8601 in the user's LOCAL time.
     """
+    window = _local_window_for_confirm(workspace_id, start_iso, end_iso)
+    if isinstance(window, dict):
+        return window
+    start_utc, end_utc, label = window
     return _confirm_question(
-        question=f"Add \"{summary}\" to your calendar from {start_iso} to {end_iso}?",
+        question=f"Add \"{summary}\" to your calendar, {label}?",
         why="I never put anything on your real calendar without a yes first.",
         field="calendar_create",
-        config={"action": "create", "summary": summary, "start": start_iso, "end": end_iso},
+        # The config is the confirm-endpoint contract and stays naive UTC.
+        config={"action": "create", "summary": summary, "start": start_utc, "end": end_utc},
     )
 
 
 def create_event_confirmed(workspace_id: str, summary: str, start_iso: str, end_iso: str) -> Dict[str, Any]:
-    """Create the calendar event the user just confirmed. Call this ONLY after an
-    explicit yes to propose_create_event. Writes once to Google Calendar.
+    """Create the calendar event the user just confirmed. Writes once to Google.
+
+    NOT FOR YOU TO CALL. This is the confirm endpoint's half of the two-phase
+    write, replayed from the `config` propose_create_event handed back after an
+    explicit yes; calling it inside an agent turn is structurally blocked. Use
+    propose_create_event and stop.
+
+    WIRE CONVENTION, deliberately different from the propose tool: `start_iso` /
+    `end_iso` here are NAIVE UTC, because that is what the confirm `config`
+    carries and what Google is sent. propose_create_event already did the local
+    -> UTC conversion; do not convert again.
 
     Args:
         workspace_id: The workspace whose calendar to write to.
         summary: The event title.
-        start_iso: Start time as naive-UTC ISO 8601.
-        end_iso: End time as naive-UTC ISO 8601.
+        start_iso: Start time as naive-UTC ISO 8601 (from the confirm config).
+        end_iso: End time as naive-UTC ISO 8601 (from the confirm config).
     """
     try:
         store = get_or_create_store(workspace_id)
@@ -90,34 +153,72 @@ def create_event_confirmed(workspace_id: str, summary: str, start_iso: str, end_
 
 
 def propose_edit_event(workspace_id: str, event_id: str, summary: str = "", start_iso: str = "", end_iso: str = "") -> Dict[str, Any]:
-    """Propose editing a calendar event WITHOUT editing it. Returns a confirm
-    question; this never calls Google. After a yes, call edit_event_confirmed.
+    """Propose editing a REAL Google Calendar event WITHOUT editing it. Returns a
+    confirm question; this never calls Google. After a yes the confirm step
+    writes. Never report the change as done from this call alone.
+
+    TIME CONVENTION — LOCAL, the same as move_session and schedule_task_at.
+    `start_iso` / `end_iso` are ISO 8601 in the user's OWN LOCAL WALL CLOCK, e.g.
+    "2026-09-03T16:00" for 4pm on Thursday 3 September. Do NOT convert to UTC
+    yourself; this tool converts using the workspace's real timezone. Mixing a
+    hand-converted UTC time in here moves a real appointment to the wrong hour.
+
+    Get `event_id` from list_calendar_events; never guess one. Editing a Google
+    event is not the same as moving a Blink focus session — for a session use
+    move_session.
 
     Args:
         workspace_id: The workspace whose calendar to write to.
-        event_id: The Google event id to edit.
+        event_id: The Google event id to edit, from list_calendar_events.
         summary: New title, or empty to leave unchanged.
-        start_iso: New start (naive-UTC ISO), or empty to leave unchanged.
-        end_iso: New end (naive-UTC ISO), or empty to leave unchanged.
+        start_iso: New start, ISO 8601 in the user's LOCAL time, or empty to
+            leave unchanged.
+        end_iso: New end, ISO 8601 in the user's LOCAL time, or empty to leave
+            unchanged. Give both times or neither.
     """
+    start_raw = (start_iso or "").strip()
+    end_raw = (end_iso or "").strip()
+    label = ""
+    if start_raw or end_raw:
+        if not (start_raw and end_raw):
+            return {
+                "status": "error",
+                "error_message": ("To move an event I need both its new start and its new "
+                                  "end. Give both, or neither to leave the time alone."),
+            }
+        window = _local_window_for_confirm(workspace_id, start_raw, end_raw)
+        if isinstance(window, dict):
+            return window
+        start_raw, end_raw, label = window
     return _confirm_question(
-        question="Update that calendar event with the changes I described?",
+        question=(f"Move that calendar event to {label}?" if label
+                  else "Update that calendar event with the changes I described?"),
         why="Editing your real calendar needs a yes first.",
         field="calendar_edit",
-        config={"action": "edit", "event_id": event_id, "summary": summary, "start": start_iso, "end": end_iso},
+        # naive UTC on the wire: the confirm-endpoint contract is unchanged.
+        config={"action": "edit", "event_id": event_id, "summary": summary,
+                "start": start_raw, "end": end_raw},
     )
 
 
 def edit_event_confirmed(workspace_id: str, event_id: str, summary: str = "", start_iso: str = "", end_iso: str = "") -> Dict[str, Any]:
-    """Edit the calendar event the user just confirmed. Call ONLY after a yes to
-    propose_edit_event. Empty fields are left unchanged. Writes once to Google.
+    """Edit the calendar event the user just confirmed. Writes once to Google.
+
+    NOT FOR YOU TO CALL. The confirm endpoint replays this from the `config`
+    propose_edit_event returned, after an explicit yes; calling it inside an
+    agent turn is structurally blocked. Use propose_edit_event and stop.
+
+    WIRE CONVENTION, deliberately different from the propose tool: `start_iso` /
+    `end_iso` here are NAIVE UTC, already converted by propose_edit_event.
 
     Args:
         workspace_id: The workspace whose calendar to write to.
         event_id: The Google event id to edit.
         summary: New title, or empty to leave unchanged.
-        start_iso: New start (naive-UTC ISO), or empty to leave unchanged.
-        end_iso: New end (naive-UTC ISO), or empty to leave unchanged.
+        start_iso: New start as naive-UTC ISO (from the confirm config), or
+            empty to leave unchanged.
+        end_iso: New end as naive-UTC ISO (from the confirm config), or empty to
+            leave unchanged.
     """
     try:
         store = get_or_create_store(workspace_id)
@@ -205,30 +306,69 @@ def get_capacity(workspace_id: str, days: int = 7) -> Dict[str, Any]:
 
 
 def propose_schedule_for_workspace(workspace_id: str) -> Dict[str, Any]:
-    """Propose (do not commit) a schedule placing the user's ready tasks into free time.
+    """DRY RUN a schedule: work out where the user's ready tasks WOULD go. Saves nothing.
 
-    Returns the placed blocks, anything that could not be placed and why, and how full
-    the plan is. Never fabricates times: placement comes only from real free capacity.
+    NOTHING THIS RETURNS EXISTS YET. Not one block is written to the plan, and
+    nothing reaches Google Calendar. `status` comes back as "proposed" and
+    `committed` as false for exactly that reason. If you tell the user "I've
+    scheduled your week" off the back of this, you have told them something
+    untrue: they will reload and find an empty plan.
+
+    So report it as a SUGGESTION and say it is not saved yet — "here's how the
+    week could go… want me to book it?" — never as work that is booked.
+
+    When the user then says yes, commit it by placing the sessions for real:
+    schedule_task_at, one call per task, using `proposed_blocks[].starts_at_local`
+    as the time and the task id from `proposed_blocks[].task_id`. That tool
+    writes, mirrors to the calendar, and returns what really landed — only then
+    may you say a session is booked. This tool never writes anything itself.
+
+    Use it when the user wants BLINK to choose the times. When the USER names a
+    time, skip this and call move_session or schedule_task_at directly.
+
+    `proposed_blocks` carries each would-be placement with `starts_at_local` /
+    `ends_at_local` in the user's own wall clock (quote those, not the UTC
+    `starts_at`). `unplaced` is the work that did not fit and the real reason.
+    Times are never fabricated: placement comes only from real free capacity.
 
     Args:
-        workspace_id: The workspace to schedule.
+        workspace_id: The workspace to draft a schedule for.
     """
     try:
         store = get_or_create_store(workspace_id)
         now = now_naive()
+        tz = _workspace_zone(store)
         ledger = ledger_for(store, now)
         sched = propose_schedule(store.get_active_commitments(), store.get_ready_tasks(), ledger, now)
+        proposed = [
+            {
+                "task_id": b.task_id,
+                "title": _session_title(store, b),
+                "starts_at": b.starts_at.isoformat(),
+                "ends_at": b.ends_at.isoformat(),
+                "starts_at_local": _fmt_local_day_time(b.starts_at, tz),
+                "ends_at_local": _fmt_local_day_time(b.ends_at, tz),
+            }
+            for b in sched.blocks
+        ]
         return {
-            "status": "success",
+            # NOT "success": this tool commits nothing, and a "success" here is
+            # what invited "I've scheduled your week" for work that was never
+            # saved (audit TR-1).
+            "status": "proposed",
+            "committed": False,
+            "saved": False,
+            "note": (
+                "Nothing here is saved. These times are not booked: no session was "
+                "created and nothing was written to the calendar. Present them as a "
+                "suggestion and ask before booking; to actually book them, call "
+                "schedule_task_at per task with the local start times below."
+            ),
             "plan_id": sched.plan_id,
-            "blocks": [
-                {
-                    "task_id": b.task_id,
-                    "starts_at": b.starts_at.isoformat(),
-                    "ends_at": b.ends_at.isoformat(),
-                }
-                for b in sched.blocks
-            ],
+            "proposed_blocks": proposed,
+            # Kept under the old key too so nothing reading `blocks` breaks; the
+            # authoritative name is proposed_blocks.
+            "blocks": proposed,
             "unplaced": [{"title": u.title, "reason": u.reason} for u in sched.unplaced],
             "utilization_pct": sched.diagnostics.get("utilization_pct", 0.0),
         }
@@ -528,6 +668,16 @@ def list_todays_sessions(workspace_id: str) -> Dict[str, Any]:
     "Today" is the user's LOCAL calendar day, not UTC. An empty unresolved list
     means there is nothing to check off: say one plain line and stop.
 
+    TIMES: every session carries BOTH `start` (the stored naive-UTC instant, for
+    machines) and `start_local` / `end_local` (the user's own wall clock, e.g.
+    "Monday 31 Aug, 3:00 PM"). Reason about `*_local` and quote `*_local` — it is
+    the only one that answers "is this one of this morning's?". NEVER decide what
+    "morning", "afternoon" or "the 3pm" means from `start`; that is UTC and can
+    sit on a different day, let alone a different half of it.
+
+    This lists TODAY only. For any other day, a range, or "this week", call
+    list_sessions instead.
+
     Args:
         workspace_id: The workspace whose sessions to read.
     """
@@ -557,7 +707,12 @@ def list_todays_sessions(workspace_id: str) -> Dict[str, Any]:
                     "id": b.id,
                     "title": _session_title(store, b),
                     "planned_minutes": int((b.ends_at - b.starts_at).total_seconds() // 60),
+                    # `start` stays the stored naive-UTC instant (unchanged, for
+                    # compatibility); `*_local` is the same instant in the user's
+                    # own zone and is what "this morning" is decided against.
                     "start": b.starts_at.isoformat(),
+                    "start_local": _fmt_local_day_time(b.starts_at, tz),
+                    "end_local": _fmt_local_day_time(b.ends_at, tz),
                 }
                 for b in unresolved
             ],
@@ -567,9 +722,160 @@ def list_todays_sessions(workspace_id: str) -> Dict[str, Any]:
                     "title": _session_title(store, b),
                     "status": b.status,
                     "actual_minutes": b.actual_minutes,
+                    "start": b.starts_at.isoformat(),
+                    "start_local": _fmt_local_day_time(b.starts_at, tz),
+                    "end_local": _fmt_local_day_time(b.ends_at, tz),
                 }
                 for b in settled
             ],
+            "timezone": str(getattr(tz, "key", tz)),
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "error_message": str(e)}
+
+
+# --- The selection step for every bulk operation ------------------------------
+# The write tools (cancel_sessions, delete_tasks, move_session) take EXPLICIT
+# ids, and until this tool existed the only way to get a session id was
+# list_todays_sessions — today, planned-only. So "wipe this week", "unschedule
+# everything Friday", "clear tomorrow", "move Thursday's session" had no first
+# step at all: the batch tool was reachable and the selection was not. This is
+# that first step, and it is deliberately UNFILTERED — every session in the
+# window, whatever its status, each one labelled — because a bulk cancel that
+# silently skips half a day and then reports success is exactly the
+# degrade-never-fabricate failure the governance rules forbid.
+_MAX_LIST_SESSIONS_DAYS = 31
+
+
+def list_sessions(workspace_id: str, start_date: Optional[str] = None,
+                  days: int = 1) -> Dict[str, Any]:
+    """List EVERY focus session booked over a range of the user's local days.
+
+    THIS IS THE FIRST STEP OF ANY BULK CHANGE. The flow is always: list, then act
+    on the ids you actually meant. "Clear everything on for today", "wipe this
+    week", "unschedule everything Friday", "clear tomorrow", "move Thursday's
+    session to Friday", "push everything today back an hour" — all of them start
+    here, because cancel_sessions, delete_tasks, move_session and
+    schedule_task_at take explicit ids and NOTHING else produces them for a day
+    that is not today. Never guess an id, and never tell the user you cannot see
+    another day: call this.
+
+    Use it for any day or span. list_todays_sessions is the narrower check-in
+    view of today alone.
+
+    WHAT COMES BACK: `sessions`, sorted by time, one entry per session with
+      - `id`          the session id the write tools take (cancel_sessions,
+                      cancel_session, move_session)
+      - `task_id`     the task id delete_task / delete_tasks / schedule_task_at take
+      - `title`       the real session title
+      - `status`      planned / missed / done / partial / cancelled
+      - `starts_at`, `ends_at`         the stored naive-UTC instants
+      - `starts_at_local`, `ends_at_local`  the SAME instants in the user's own
+                      wall clock, e.g. "Thursday 3 Sep, 2:00 PM"
+      - `local_date`  the user's calendar date it falls on
+      - `planned_minutes`, `actual_minutes`, `actual_source`
+
+    ALWAYS reason and speak in the `*_local` fields. `starts_at` is UTC; deciding
+    what "the morning ones" or "the 3pm" means from it selects the wrong
+    sessions, and cancel_sessions is a hard delete.
+
+    EVERY session in the window is listed, whatever its status — nothing is
+    filtered out. That is on purpose: "clear today" means everything booked, and
+    a listing that quietly omitted some would let a bulk cancel half-clear a day
+    and report success. YOU do the filtering, out loud: if the user means only
+    the ones still standing, take the entries whose `status` is "planned"; a
+    "done" or "cancelled" one is history and cancelling it changes nothing.
+    `status_counts` and `planned_ids` are provided so you can say what you are
+    about to touch before you touch it.
+
+    Batches cap at 25 ids, so for a long week cancel in chunks and report the
+    real running total; never claim a sweep you only partly ran.
+
+    An empty `sessions` list means nothing is booked in that window. Say so
+    plainly and stop — do not invent a session to act on.
+
+    Args:
+        workspace_id: The workspace whose sessions to read.
+        start_date: The first day to include, as the user's LOCAL calendar date
+            in ISO form, e.g. "2026-09-03". You know today's date, so resolve
+            "Friday" or "tomorrow" yourself. Omit for today.
+        days: How many local days to include, starting at start_date. 1 is a
+            single day ("clear Friday"); 7 is a week ("wipe this week"). Clamped
+            to 1-31.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        now = now_naive()
+        tz = _workspace_zone(store)
+
+        raw = (start_date or "").strip()
+        if raw:
+            try:
+                first_day = date.fromisoformat(raw[:10])
+            except (ValueError, TypeError):
+                return {
+                    "status": "error",
+                    "error_message": (
+                        f"I couldn't read {start_date!r} as a date. Give the first day as "
+                        f"the user's local calendar date in ISO form, e.g. '2026-09-03'."
+                    ),
+                }
+        else:
+            first_day = localtime.local_today(now, tz)
+
+        try:
+            span = int(days)
+        except (TypeError, ValueError):
+            span = 1
+        span = max(1, min(_MAX_LIST_SESSIONS_DAYS, span))
+        last_day = first_day + timedelta(days=span - 1)
+
+        # Local-day bounds, not a 24h multiple: day_bounds_utc is computed from
+        # real local midnights, so a DST day is 23 or 25 hours and no session
+        # falls out of the window at a transition.
+        window_start, _ = localtime.day_bounds_utc(first_day, tz)
+        _, window_end = localtime.day_bounds_utc(last_day, tz)
+
+        rows = sorted(
+            (b for b in store.blocks.values()
+             if window_start <= b.starts_at < window_end),
+            key=lambda b: b.starts_at,
+        )
+
+        sessions = [
+            {
+                "id": b.id,
+                "task_id": b.task_id,
+                "title": _session_title(store, b),
+                "status": b.status,
+                "local_date": localtime.local_date(b.starts_at, tz).isoformat(),
+                "starts_at": b.starts_at.isoformat(),
+                "ends_at": b.ends_at.isoformat(),
+                "starts_at_local": _fmt_local_day_time(b.starts_at, tz),
+                "ends_at_local": _fmt_local_day_time(b.ends_at, tz),
+                "planned_minutes": int((b.ends_at - b.starts_at).total_seconds() // 60),
+                "actual_minutes": b.actual_minutes,
+                "actual_source": b.actual_source,
+            }
+            for b in rows
+        ]
+
+        counts: Dict[str, int] = {}
+        for s in sessions:
+            counts[s["status"]] = counts.get(s["status"], 0) + 1
+
+        return {
+            "status": "success",
+            "start_date": first_day.isoformat(),
+            "end_date": last_day.isoformat(),
+            "days": span,
+            "timezone": str(getattr(tz, "key", tz)),
+            "session_count": len(sessions),
+            "status_counts": counts,
+            # The subset a cancel or a move can actually act on; the rest is
+            # history. Handed over so the model never has to derive it wrong.
+            "planned_ids": [s["id"] for s in sessions if s["status"] == "planned"],
+            "sessions": sessions,
         }
     except Exception as e:  # pragma: no cover - defensive
         return {"status": "error", "error_message": str(e)}
@@ -1257,11 +1563,13 @@ def move_session(workspace_id: str, block_id: str, new_start: str,
 
     You resolve the words into a date and time: you know today's date, so
     "Thursday" or "tomorrow at 2" is yours to turn into a concrete local
-    datetime. Pass it as `new_start` in ISO 8601 LOCAL wall clock, e.g.
-    "2026-09-03T14:00". Never invent one you are unsure of — if the user said a
-    day but no time, ask which time rather than assuming. If you do not have the
-    session's id, call list_todays_sessions (today's) or list_tasks + the task's
-    sessions first; never guess an id.
+    datetime. TIME CONVENTION — LOCAL: pass `new_start` as ISO 8601 in the
+    user's OWN LOCAL WALL CLOCK, e.g. "2026-09-03T14:00" for Thursday 3
+    September at 2pm. Never convert to UTC and never apply an offset yourself;
+    this tool converts from the workspace's real zone. Never invent a time you
+    are unsure of — if the user said a day but no time, ask which time rather
+    than assuming. If you do not have the session's id, call list_sessions for
+    the day it is on (list_todays_sessions covers today); never guess an id.
 
     The session keeps its current length unless you pass `duration_minutes`, and
     keeps its identity, so its existing Google Calendar event is PATCHED to the
@@ -1344,7 +1652,9 @@ def schedule_task_at(workspace_id: str, task_id: str, start: str,
     and match on the title; never guess an id.
 
     You resolve the words into a date and time — you know today's date — and
-    pass it as `start` in ISO 8601 LOCAL wall clock, e.g. "2026-09-03T14:00".
+    TIME CONVENTION — LOCAL: pass `start` as ISO 8601 in the user's OWN LOCAL
+    WALL CLOCK, e.g. "2026-09-03T14:00". Never convert to UTC yourself; this
+    tool converts from the workspace's real zone.
     If the user named a day but no time, ask which time rather than assuming
     one. Length comes from the task's own estimate unless you pass
     `duration_minutes`; `duration_source` in the reply says which it used.
@@ -1795,8 +2105,9 @@ def cancel_session(workspace_id: str, block_id: str) -> Dict[str, Any]:
     back, cancel the session. If they want it at a different time instead of
     gone, use move_session — cancelling and re-booking loses the calendar event.
 
-    If you do not have the session's id, call list_todays_sessions (for today) or
-    read it off the plan; never guess an id.
+    If you do not have the session's id, call list_sessions for the day it is on
+    (or list_todays_sessions for today) and match on `starts_at_local` and title;
+    never guess an id.
 
     Returns the REAL session `title`, the `task_id` that survived, `task_kept`
     and its `task_status`, plus the separate `calendar_deleted` /
@@ -1826,6 +2137,15 @@ def cancel_sessions(workspace_id: str, block_ids: List[str]) -> Dict[str, Any]:
     the user means more than one session; use cancel_session for a single named
     one. The tasks all survive as unscheduled work — nothing here deletes work,
     so if they want the work itself gone use delete_tasks.
+
+    GET THE IDS FIRST, ALWAYS. Call list_sessions for the day or range in
+    question ("clear Friday" -> start_date Friday, days 1; "wipe this week" ->
+    days 7) and pass the ids of the sessions you actually mean — normally its
+    `planned_ids`, since a done or cancelled session is history. list_sessions
+    shows every session in the window with local times, so you can name what you
+    are about to cancel before you cancel it. This is a HARD delete of the
+    session: an id you guessed or matched off a UTC time is a wrong session
+    removed and reported as a success.
 
     Each session is handled independently and the batch never stops early. The
     reply carries a per-session `results` list saying which were really
@@ -1888,6 +2208,11 @@ ALL_TOOLS = [
     # timer-measured ones are never re-asked) and log each self-reported outcome.
     list_todays_sessions,
     log_session_outcome,
+    # The selection step the batch write tools stand on: every session in a
+    # local-day RANGE, every status, with local times. Without it "wipe this
+    # week" / "clear Friday" have no way to obtain an id and the good batch
+    # tools below are unreachable for any day but today.
+    list_sessions,
     # P19-03: reschedule today's missed / past-due sessions. Two-phase like the
     # calendar writes: propose_reschedule only asks (surfaced by _PROPOSE_TOOLS);
     # reschedule_confirmed executes and is structurally blocked inside an agent
