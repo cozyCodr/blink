@@ -222,6 +222,14 @@ _PLAN_WRITING_TOOLS = frozenset({
     "delete_tasks",
     "cancel_session",
     "cancel_sessions",
+    # A bulk shift moves real blocks, so Day and Week are stale the moment it
+    # returns; an undo puts deleted tasks and sessions BACK, which is the same
+    # problem in reverse. set_task_estimate changes a task field the plan views
+    # render, so it belongs here too. get_progress, get_active_session and
+    # check_slot are reads and deliberately are not listed.
+    "shift_sessions",
+    "set_task_estimate",
+    "undo_last_change",
 })
 
 

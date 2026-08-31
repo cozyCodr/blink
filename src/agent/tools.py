@@ -826,6 +826,14 @@ def list_sessions(workspace_id: str, start_date: Optional[str] = None,
     `status_counts` is provided alongside so you can say what you are about to
     touch, and how many of each kind, before you touch it.
 
+    THE MINUTES ARE ALREADY ADDED UP FOR YOU. `planned_minutes_total` is how
+    much time is booked across the window (cancelled sessions excluded);
+    `measured_minutes_total` is what the timer actually clocked, and
+    `reported_minutes_total` is what the user said at a check-in. Use those
+    numbers rather than summing the rows yourself. Keep the last two apart:
+    measured and reported are different kinds of fact and must never be added
+    into a single total.
+
     Batches cap at 25 ids, so for a long week cancel in chunks and report the
     real running total; never claim a sweep you only partly ran.
 
@@ -906,6 +914,23 @@ def list_sessions(workspace_id: str, start_date: Optional[str] = None,
         for s in sessions:
             counts[s["status"]] = counts.get(s["status"], 0) + 1
 
+        # Totals computed HERE so the model never adds minutes up itself (#42).
+        # Three separate numbers, never one: booked time, timer-clocked time and
+        # self-reported time are different kinds of fact, and a single "total"
+        # would quietly present a self-report as a measurement.
+        def _mins(b) -> int:
+            try:
+                return max(0, int(b or 0))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                return 0
+
+        planned_total = sum(s["planned_minutes"] for s in sessions
+                            if s["status"] != "cancelled")
+        measured_total = sum(_mins(s["actual_minutes"]) for s in sessions
+                             if s["actual_source"] == "timer")
+        reported_total = sum(_mins(s["actual_minutes"]) for s in sessions
+                             if s["actual_source"] == "reported")
+
         day_label = f"{span} local day" + ("" if span == 1 else "s")
         window = (
             f"{first_day.strftime('%A %-d %b %Y')} to "
@@ -928,6 +953,12 @@ def list_sessions(workspace_id: str, start_date: Optional[str] = None,
             "timezone": str(getattr(tz, "key", tz)),
             "session_count": len(sessions),
             "status_counts": counts,
+            # #42: the arithmetic is done here, not in the model's head.
+            # `planned_minutes_total` excludes cancelled sessions (they occupy
+            # no time). The two actuals stay SEPARATE and are never summed.
+            "planned_minutes_total": planned_total,
+            "measured_minutes_total": measured_total,
+            "reported_minutes_total": reported_total,
             # R-2: three honest id lists instead of one ambiguous one.
             # `actionable_ids` is everything still occupying calendar time —
             # planned AND missed — and is what a FULL clear must act on. A
@@ -996,6 +1027,148 @@ def log_session_outcome(workspace_id: str, block_id: str, status: str, minutes: 
             "recorded": st,
             "actual_minutes": b.actual_minutes,
             "source": b.actual_source,
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "error_message": str(e)}
+
+
+# --- history: the ONLY grounding the model has for "how am I doing" ----------
+# Without this tool, "how did last week go", "how many hours did I work last
+# month" and "what's my streak" have no source at all — the model has today's
+# plan in context and nothing else, so it can only estimate, which here means
+# invent. The window is generous because the questions are ("last month", "this
+# quarter"), and the streak walk already caps itself at a year.
+_MAX_PROGRESS_DAYS = 366
+_DEFAULT_PROGRESS_DAYS = 7
+
+
+def get_progress(workspace_id: str, days: int = 7) -> Dict[str, Any]:
+    """The user's REAL recent history: streak, outcome counts and minutes worked.
+
+    CALL THIS BEFORE ANSWERING ANYTHING ABOUT THE PAST. "How am I doing?", "how
+    was last week?", "did I keep my streak?", "how many hours did I put in last
+    month?", "am I getting better at this?" — you have no memory of the user's
+    history beyond what a tool returned in this conversation, so every one of
+    those numbers has to come from here. Never estimate one, never add up
+    sessions yourself, and never carry a number from an earlier turn as if it
+    were still current.
+
+    MEASURED AND REPORTED MINUTES COME BACK SEPARATELY AND MUST STAY SEPARATE.
+    `measured_minutes` is time the Now timer actually clocked; `reported_minutes`
+    is time the user told you about at a check-in. They are different kinds of
+    fact and adding them into one "total hours" would present a guess as a
+    measurement. Quote them as two numbers ("2 hours on the clock, plus another
+    hour you told me about"), or quote just the one the question is really
+    about. There is deliberately no combined total in this response.
+
+    WHAT COMES BACK:
+      - `streak_days` — consecutive days kept, over the user's whole history
+        (not just this window). A day counts when every session that ended that
+        day ended done or partial; a day with nothing planned is neutral and
+        does not break it.
+      - `counts` — done / partial / missed / unresolved / cancelled, over
+        sessions that ENDED inside the window. A still-running session is not
+        counted as anything yet.
+      - `measured_minutes`, `measured_sessions` — timer-clocked.
+      - `reported_minutes`, `reported_sessions` — self-reported.
+      - `planned_minutes` — how much time was booked in the window, which is
+        what the two actuals are worth comparing against.
+      - `sessions_ended`, `sessions_upcoming` — how much of the window is
+        history and how much is still ahead.
+      - `days`, `start_date`, `end_date`, `window`, `timezone` — the span really
+        covered. Say that span back; never describe a wider one.
+
+    An empty window is a real answer: zero sessions means there is nothing to
+    judge, so say that plainly rather than reaching for an encouraging number.
+
+    Args:
+        workspace_id: The workspace whose history to read.
+        days: How many of the user's local days back to look, ENDING today.
+            7 is the default week; 30 or 31 answers "last month"; 1 is today
+            alone. Clamped to 1-366, and the clamp is reported back.
+    """
+    try:
+        from src.core.progress import compute_streak
+
+        store = get_or_create_store(workspace_id)
+        now = now_naive()
+        tz = _workspace_zone(store)
+
+        try:
+            requested = int(days)
+        except (TypeError, ValueError):
+            requested = _DEFAULT_PROGRESS_DAYS
+        span = max(1, min(_MAX_PROGRESS_DAYS, requested))
+
+        today = localtime.local_today(now, tz)
+        first_day = today - timedelta(days=span - 1)
+        window_start, _ = localtime.day_bounds_utc(first_day, tz)
+        _, window_end = localtime.day_bounds_utc(today, tz)
+
+        rows = [b for b in store.blocks.values()
+                if window_start <= b.starts_at < window_end]
+        ended = [b for b in rows if b.ends_at <= now]
+        upcoming = [b for b in rows if b.ends_at > now]
+
+        counts = {"done": 0, "partial": 0, "missed": 0, "unresolved": 0, "cancelled": 0}
+        for b in ended:
+            if b.status in ("done", "partial", "missed", "cancelled"):
+                counts[b.status] += 1
+            else:
+                # Ended but never reconciled. Honest as its own bucket: it is
+                # neither a success nor a failure, it is a check-in that never
+                # happened.
+                counts["unresolved"] += 1
+
+        def _actual(b) -> int:
+            try:
+                return max(0, int(b.actual_minutes or 0))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                return 0
+
+        measured = [b for b in rows if b.actual_source == "timer" and _actual(b)]
+        reported = [b for b in rows if b.actual_source == "reported" and _actual(b)]
+
+        planned_minutes = sum(
+            max(0, int((b.ends_at - b.starts_at).total_seconds() // 60))
+            for b in rows if b.status != "cancelled"
+        )
+
+        day_label = f"{span} local day" + ("" if span == 1 else "s")
+        window = (
+            f"{first_day.strftime('%A %-d %b %Y')} to "
+            f"{today.strftime('%A %-d %b %Y')} ({day_label}, "
+            f"{str(getattr(tz, 'key', tz))})"
+        )
+
+        return {
+            "status": "success",
+            # The streak is a whole-history fact by definition, so it is
+            # computed over every block, not just the window. Same helper the
+            # /details and check-in endpoints use, so the number the agent says
+            # and the number on screen can never disagree.
+            "streak_days": compute_streak(list(store.blocks.values()), now, tz),
+            "counts": counts,
+            "sessions_in_window": len(rows),
+            "sessions_ended": len(ended),
+            "sessions_upcoming": len(upcoming),
+            "planned_minutes": planned_minutes,
+            # NEVER SUMMED. Two different kinds of fact; see the docstring.
+            "measured_minutes": sum(_actual(b) for b in measured),
+            "measured_sessions": len(measured),
+            "reported_minutes": sum(_actual(b) for b in reported),
+            "reported_sessions": len(reported),
+            "minutes_note": (
+                "measured_minutes is timer-clocked; reported_minutes is what the "
+                "user said. Quote them separately, never as one total."
+            ),
+            "start_date": first_day.isoformat(),
+            "end_date": today.isoformat(),
+            "days": span,
+            "days_requested": requested,
+            "window_clamped": span != requested,
+            "window": window,
+            "timezone": str(getattr(tz, "key", tz)),
         }
     except Exception as e:  # pragma: no cover - defensive
         return {"status": "error", "error_message": str(e)}
@@ -1445,6 +1618,169 @@ def rename_task(workspace_id: str, task_id: str, new_title: str) -> Dict[str, An
         return {"status": "error", "renamed": False, "error_message": str(e)}
 
 
+def set_task_estimate(workspace_id: str, task_id: str, minutes: int) -> Dict[str, Any]:
+    """Change how long a task is EXPECTED to take.
+
+    Call this when the user corrects an estimate: "that'll take two hours, not
+    one", "the essay is more like 90 minutes", "make it half an hour", "I was
+    way off on that one". If you do not have the task's id, call list_tasks and
+    match on the title; never guess an id.
+
+    IT CHANGES THE ESTIMATE, NOT THE PLAN. Nothing already booked moves or
+    resizes, and nothing reaches Google Calendar. The new estimate is what the
+    planner uses NEXT time it places this work. If the user meant "make my 3pm
+    two hours long", that is a booked SESSION and the tool is move_session with
+    the session's current start and the new `duration_minutes` — say which of
+    the two you did, because they are not the same thing.
+
+    Refuses, changing nothing, when the id is unknown or the length is outside
+    the same 5-to-720-minute bounds every session length obeys. Returns the REAL
+    `old_estimate_minutes` (null when it had none) and `new_estimate_minutes`,
+    so you can say what actually changed.
+
+    Args:
+        workspace_id: The workspace the task belongs to.
+        task_id: The task's id, from list_tasks.
+        minutes: The new estimate in minutes, as the user said it. 5 to 720.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        task = store.tasks.get(task_id)
+        if task is None:
+            return {
+                "status": "error",
+                "updated": False,
+                "error_message": f"No task with id {task_id!r} in this workspace.",
+            }
+        # The SAME bounds helper sessions use, so an estimate can never be a
+        # length the planner would then refuse to book.
+        problem = _duration_error(minutes)
+        if problem:
+            return {"status": "error", "updated": False, "error_message": problem}
+        old = getattr(task, "estimate_minutes", None)
+        task.estimate_minutes = int(minutes)
+        task.updated_at = datetime.now(timezone.utc)
+        return {
+            "status": "success",
+            "updated": True,
+            "task_id": task_id,
+            "title": task.title,
+            "old_estimate_minutes": old,
+            "new_estimate_minutes": int(minutes),
+            # Said plainly so the reply cannot drift into "I made your 3pm
+            # longer": the estimate is what the PLANNER uses next time.
+            "sessions_changed": 0,
+            "calendar_updated": 0,
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "updated": False, "error_message": str(e)}
+
+
+def get_active_session(workspace_id: str) -> Dict[str, Any]:
+    """Is a focus session running right now, and how much time is on the clock?
+
+    Call this for "am I still going?", "how long have I been at this?", "what am
+    I meant to be doing right now?", "is my timer running?". Without it you have
+    no way to know, and a guess here is a fabricated number.
+
+    WHAT THIS CANNOT DO: it cannot start, pause or stop the timer. The timer
+    lives in the app in front of the user, not here, and there is no tool in
+    your set that controls it. If they ask you to start or stop one, say plainly
+    that they tap it in the app and that you can see the result once it lands.
+    Never say you started, paused or stopped anything.
+
+    WHAT IT ACTUALLY KNOWS. `current_session` is the session whose planned
+    window contains the current moment and which is still unresolved — the one
+    they are supposed to be in. `measured_minutes` is what the timer has written
+    down so far, and `timer_seen` is true only when the timer really wrote it
+    (`actual_source` is "timer"). When `timer_seen` is false, no measured time
+    has reached us: the session may be running with nothing synced yet, so say
+    you cannot see any time on it rather than reporting zero minutes worked.
+    `elapsed_minutes_by_clock` is simply how far into the planned window we are;
+    it is wall-clock arithmetic, NOT measured work, so never quote it as time
+    they put in.
+
+    `current_session` is null when nothing is scheduled over right now, which is
+    a real answer: say they have nothing on. `next_session` is the next one
+    still ahead today, if any, so "nothing now, your next is at 4" comes from
+    real data. `recently_measured` lists today's sessions the timer already
+    clocked.
+
+    Args:
+        workspace_id: The workspace to read.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        now = now_naive()
+        tz = _workspace_zone(store)
+
+        def _row(b) -> Dict[str, Any]:
+            planned = max(0, int((b.ends_at - b.starts_at).total_seconds() // 60))
+            measured = b.actual_minutes if b.actual_source == "timer" else None
+            return {
+                "id": b.id,
+                "task_id": b.task_id,
+                "title": _session_title(store, b),
+                "status": b.status,
+                "planned_minutes": planned,
+                "starts_at": b.starts_at.isoformat(),
+                "ends_at": b.ends_at.isoformat(),
+                "start_local": _fmt_local_day_time(b.starts_at, tz),
+                "end_local": _fmt_local_day_time(b.ends_at, tz),
+                # Measured only. `actual_minutes` from a self-report is NOT
+                # timer time and does not belong in this field.
+                "measured_minutes": measured,
+                "timer_seen": b.actual_source == "timer",
+                "actual_source": b.actual_source,
+            }
+
+        current = None
+        for b in sorted(store.blocks.values(), key=lambda x: x.starts_at):
+            if b.status in _MOVABLE_BLOCK_STATUSES and b.starts_at <= now < b.ends_at:
+                current = b
+                break
+
+        upcoming = sorted(
+            (b for b in store.blocks.values()
+             if b.status == "planned" and b.starts_at > now
+             and localtime.same_local_day(b.starts_at, now, tz)),
+            key=lambda b: b.starts_at,
+        )
+        measured_today = sorted(
+            (b for b in store.blocks.values()
+             if b.actual_source == "timer"
+             and localtime.same_local_day(b.starts_at, now, tz)),
+            key=lambda b: b.starts_at,
+        )
+
+        row = _row(current) if current is not None else None
+        if row is not None:
+            elapsed = int((now - current.starts_at).total_seconds() // 60)
+            # Wall-clock position in the window, NOT work done. Named so it
+            # cannot be mistaken for measured time in a reply.
+            row["elapsed_minutes_by_clock"] = max(0, elapsed)
+            row["remaining_minutes_by_clock"] = max(
+                0, int((current.ends_at - now).total_seconds() // 60))
+
+        return {
+            "status": "success",
+            # The honest shape of the answer: a session is SCHEDULED over now.
+            # Whether the person actually pressed start is the app's fact, not
+            # ours, and `timer_seen` is the only evidence we have either way.
+            "session_in_progress": row is not None,
+            "current_session": row,
+            "next_session": _row(upcoming[0]) if upcoming else None,
+            "recently_measured": [_row(b) for b in measured_today],
+            "timer_control": (
+                "read-only: the timer is started and stopped in the app, never here"
+            ),
+            "now_local": _fmt_local_day_time(now, tz),
+            "timezone": str(getattr(tz, "key", tz)),
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "error_message": str(e)}
+
+
 # --- P20-02: putting a specific piece of work at a specific time -------------
 # Everything above places work by ARITHMETIC: the scheduler picks the first slot
 # that fits (propose_schedule_for_workspace), or re-places what was missed
@@ -1697,6 +2033,72 @@ def _place_block(store, workspace_id: str, block, start: datetime, minutes: int,
     }
 
 
+def check_slot(workspace_id: str, start: str, minutes: int) -> Dict[str, Any]:
+    """Is this exact time free? Check BEFORE you offer it, never after.
+
+    Read-only: it books nothing, moves nothing, and touches no calendar. It runs
+    the SAME collision check move_session and schedule_task_at run, so what it
+    says here is what those tools will do — which is the point. Proposing a time
+    and then being refused by the write is a worse conversation than checking
+    first and offering a time that works.
+
+    Use it for "can I do it at 4 on Thursday?", "is Friday morning free?", "would
+    2pm work for an hour?", and before you suggest a specific slot of your own.
+
+    TIME CONVENTION — LOCAL: pass `start` as ISO 8601 in the user's OWN LOCAL
+    WALL CLOCK, e.g. "2026-09-03T14:00". Never convert to UTC yourself.
+
+    Returns `free` (true when nothing hard collides), `clashes` (the real
+    sessions and calendar commitments in the way, each with its title and its
+    LOCAL times, so you can name what is blocking it) and `overlaps_soft`
+    (no-touch zones and soft commitments — not blockers, but worth mentioning).
+    `in_past` is true when the slot has already gone by, and a past slot is
+    never free.
+
+    Say what came back. If it clashes, name the thing it clashes with and offer
+    another time; do not describe a slot as free because it looks free to you.
+
+    Args:
+        workspace_id: The workspace to check against.
+        start: The slot's start, ISO 8601 in the user's LOCAL time.
+        minutes: How long the slot needs to be, in minutes.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        tz = _workspace_zone(store)
+        begins = _parse_local_to_naive_utc(start, tz)
+        if begins is None:
+            return {"status": "error", "free": False,
+                    "error_message": f"I couldn't read {start!r} as a time. {_LOCAL_FORMAT_HINT}"}
+        problem = _duration_error(minutes)
+        if problem:
+            return {"status": "error", "free": False, "error_message": problem}
+        length = int(minutes)
+        ends = begins + timedelta(minutes=length)
+        now = now_naive()
+        hard, soft = _clashes_for(store, tz, begins, ends, ())
+        in_past = begins < now
+        return {
+            "status": "success",
+            # A slot that has already gone by is not free, whatever else is true
+            # of it. Reporting it as free is how a "sure, 9am works" lands on a
+            # 9am that was this morning.
+            "free": (not hard) and not in_past,
+            "in_past": in_past,
+            "start": begins.isoformat(),
+            "end": ends.isoformat(),
+            "start_local": _fmt_local_day_time(begins, tz),
+            "end_local": _fmt_local_day_time(ends, tz),
+            "minutes": length,
+            "clashes": hard,
+            "clash_count": len(hard),
+            "overlaps_soft": soft,
+            "timezone": str(getattr(tz, "key", tz)),
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "free": False, "error_message": str(e)}
+
+
 def move_session(workspace_id: str, block_id: str, new_start: str,
                  duration_minutes: Optional[int] = None) -> Dict[str, Any]:
     """Move an ALREADY-SCHEDULED focus session to a specific time the user named.
@@ -1723,6 +2125,13 @@ def move_session(workspace_id: str, block_id: str, new_start: str,
     The session keeps its current length unless you pass `duration_minutes`, and
     keeps its identity, so its existing Google Calendar event is PATCHED to the
     new time rather than deleted and remade.
+
+    RESIZING IN PLACE IS THE SAME CALL. "Make that two hours", "cut my 3pm to
+    half an hour", "give the essay another 30 minutes" is this tool with the
+    session's CURRENT start (copy `starts_at_local` from list_sessions and pass
+    it back) and the new `duration_minutes`. Nothing moves, only the length
+    changes. To change how long a TASK is expected to take, rather than one
+    booked session, use set_task_estimate instead.
 
     Refuses, changing nothing, when: the id is unknown; `new_start` cannot be
     parsed exactly; the time is in the past; the session is already done or
@@ -1783,6 +2192,171 @@ def move_session(workspace_id: str, block_id: str, new_start: str,
         return _place_block(store, workspace_id, block, start, minutes, tz, {block.id})
     except Exception as e:  # pragma: no cover - defensive
         return {"status": "error", "moved": False, "error_message": str(e)}
+
+
+# A bulk shift is a nudge, not a replan: a day either side is the widest thing
+# "push it back" ever means, and anything larger is the user asking for a
+# different day, which is move_session per session.
+_MAX_SHIFT_MINUTES = 1440
+
+
+def shift_sessions(workspace_id: str, block_ids: List[str], minutes: int) -> Dict[str, Any]:
+    """Push SEVERAL booked sessions later (or pull them earlier) by the same amount.
+
+    This is the tool for "push everything back an hour", "move my afternoon 30
+    minutes later", "shift the rest of today forward by 15", "bring tomorrow's
+    sessions an hour earlier". Positive `minutes` moves LATER, negative moves
+    EARLIER. Each session keeps its length; only its start changes.
+
+    GET THE IDS FIRST from list_sessions (or list_todays_sessions for today) and
+    pass exactly the ones the user meant — "my afternoon" is the afternoon ids,
+    not the whole day. Never guess an id. Only planned and missed sessions can
+    shift; done, partial and cancelled ones are history and are refused
+    individually.
+
+    THE ORDER IS HANDLED FOR YOU. Shifting a run of sessions one at a time in
+    the wrong order makes each one land on the next one and refuse. This tool
+    moves them in a collision-safe order internally (latest first when moving
+    later, earliest first when moving earlier), so a whole afternoon shifts
+    cleanly in one call. Do not try to sequence them yourself with move_session.
+
+    IT REFUSES HONESTLY, PER SESSION, AND KEEPS GOING. A session whose new time
+    would land in the past, or would collide with another session or a real
+    calendar commitment, is left exactly where it is and reported as refused
+    with the reason (and the named `clashes` where there are any). The ones that
+    could move, moved. Report BOTH halves: `moved_count`, `refused_count`, and
+    the per-session `results` with real old and new local times. Never describe
+    a partial shift as if the whole thing moved.
+
+    `calendar_updated` / `calendar_failures` are the separate, real calendar
+    truth summed across the batch; if `calendar_updated` is 0 say nothing about
+    the calendar changing. More than 25 ids at once is refused whole.
+
+    Args:
+        workspace_id: The workspace the sessions belong to.
+        block_ids: The session ids to shift, from list_sessions.
+        minutes: How far to shift, in minutes. Positive is later ("push it back
+            an hour" is 60), negative is earlier ("half an hour sooner" is -30).
+            Zero changes nothing and is refused. At most 1440 either way.
+    """
+    try:
+        ids = _batch_ids(block_ids, "block_ids")
+        if isinstance(ids, dict):
+            ids["moved_count"] = 0
+            return ids
+        try:
+            delta = int(minutes)
+        except (TypeError, ValueError):
+            return {"status": "error", "moved_count": 0,
+                    "error_message": "That shift isn't a number of minutes."}
+        if delta == 0:
+            return {"status": "error", "moved_count": 0,
+                    "error_message": ("A shift of zero minutes changes nothing. Say how "
+                                      "far to move them, positive for later.")}
+        if abs(delta) > _MAX_SHIFT_MINUTES:
+            return {
+                "status": "error",
+                "moved_count": 0,
+                "error_message": (f"That's more than {_MAX_SHIFT_MINUTES} minutes; a bulk "
+                                  f"shift is a nudge. Nothing moved, move them to the day "
+                                  f"they belong on instead."),
+            }
+
+        store = get_or_create_store(workspace_id)
+        tz = _workspace_zone(store)
+        now = now_naive()
+
+        resolved = []
+        results: List[Dict[str, Any]] = []
+        for bid in ids:
+            block = store.blocks.get(bid)
+            if block is None:
+                results.append({"block_id": bid, "moved": False, "reason": "not_found",
+                                "error_message": f"No session with id {bid!r} in this workspace."})
+                continue
+            if block.status not in _MOVABLE_BLOCK_STATUSES:
+                results.append({
+                    "block_id": bid, "moved": False, "reason": "not_movable",
+                    "title": _session_title(store, block),
+                    "error_message": (f"That session is already {block.status}; it is "
+                                      f"history now, not plan."),
+                })
+                continue
+            resolved.append(block)
+
+        # COLLISION-SAFE ORDER. Moving later, the LAST session goes first so it
+        # vacates the room the one before it is about to need; moving earlier,
+        # the first goes first for the same reason in reverse. Doing it in the
+        # user's reading order is what makes a whole-afternoon shift refuse
+        # every session against its own neighbour.
+        resolved.sort(key=lambda b: b.starts_at, reverse=delta > 0)
+
+        pending = {b.id for b in resolved}
+        for block in resolved:
+            new_start = block.starts_at + timedelta(minutes=delta)
+            length = max(1, int((block.ends_at - block.starts_at).total_seconds() // 60))
+            title = _session_title(store, block)
+            old_start = block.starts_at
+            if new_start < now:
+                pending.discard(block.id)
+                results.append({
+                    "block_id": block.id, "moved": False, "reason": "in_past",
+                    "title": title,
+                    "old_start_local": _fmt_local_day_time(old_start, tz),
+                    "would_start_local": _fmt_local_day_time(new_start, tz),
+                    "error_message": (f"{_fmt_local_day_time(new_start, tz)} is already "
+                                      f"past, so that one stayed where it is."),
+                })
+                continue
+            # Everything still PENDING is about to vacate its current slot, so
+            # it is not an obstacle. Everything already moved sits at its NEW
+            # time and is a real obstacle — which is exactly what makes this
+            # safe rather than merely ordered.
+            outcome = _place_block(store, workspace_id, block, new_start, length, tz, set(pending))
+            pending.discard(block.id)
+            if outcome.get("moved"):
+                results.append({
+                    "block_id": block.id, "moved": True, "title": title,
+                    "task_id": outcome.get("task_id"),
+                    "old_start_local": outcome.get("old_start_local"),
+                    "new_start_local": outcome.get("new_start_local"),
+                    "new_start": outcome.get("new_start"),
+                    "duration_minutes": length,
+                    "calendar_updated": outcome.get("calendar_updated", 0),
+                    "calendar_failures": outcome.get("calendar_failures", 0),
+                    "overlaps_soft": outcome.get("overlaps_soft", []),
+                })
+            else:
+                results.append({
+                    "block_id": block.id, "moved": False, "reason": "clash",
+                    "title": title,
+                    "old_start_local": _fmt_local_day_time(old_start, tz),
+                    "would_start_local": _fmt_local_day_time(new_start, tz),
+                    "clashes": outcome.get("clashes", []),
+                    "error_message": outcome.get("error_message"),
+                })
+
+        moved = [r for r in results if r.get("moved")]
+        refused = [r for r in results if not r.get("moved")]
+        # Report in the user's reading order, not the order the moves ran in.
+        results.sort(key=lambda r: r.get("new_start") or r.get("block_id") or "")
+        direction = "later" if delta > 0 else "earlier"
+        return {
+            "status": "success",
+            "requested_count": len(ids),
+            "shift_minutes": delta,
+            "direction": direction,
+            "moved_count": len(moved),
+            "refused_count": len(refused),
+            "moved_titles": [r.get("title") for r in moved],
+            "refused_ids": [r.get("block_id") for r in refused],
+            "calendar_updated": sum(r.get("calendar_updated", 0) for r in moved),
+            "calendar_failures": sum(r.get("calendar_failures", 0) for r in moved),
+            "results": results,
+            "timezone": str(getattr(tz, "key", tz)),
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "moved_count": 0, "error_message": str(e)}
 
 
 def schedule_task_at(workspace_id: str, task_id: str, start: str,
@@ -1946,13 +2520,18 @@ def schedule_task_at(workspace_id: str, task_id: str, start: str,
 _MAX_BATCH_DELETE = 25
 
 
-def _delete_one_task(store, workspace_id: str, task_id: str) -> Dict[str, Any]:
+def _delete_one_task(store, workspace_id: str, task_id: str, sink=None) -> Dict[str, Any]:
     """Delete one task + its sessions + their calendar events; report real counts.
 
     The single unit shared by delete_task and delete_tasks, so the batch cannot
     drift from the singular. Never raises for an unknown id: it returns
     {"deleted": False, "reason": "not_found"} so a batch records that one item
     honestly and carries on with the rest.
+
+    `sink`, when given, is a list that collects the REAL removed objects (the
+    detached Task and its Blocks) for the undo stash. It is deliberately
+    separate from the returned dict, which goes to the model and must stay
+    JSON-shaped.
     """
     removed = store.delete_task(task_id)
     if removed is None:
@@ -1971,6 +2550,9 @@ def _delete_one_task(store, workspace_id: str, task_id: str) -> Dict[str, Any]:
     # truth: the detached Block objects still carry the ids WE stored, and
     # mirror_cancel only ever deletes those.
     mirror = mirror_cancel(store, workspace_id, removed["blocks"])
+    if sink is not None:
+        sink.append({"task": removed["task"], "blocks": list(removed["blocks"]),
+                     "title": removed["title"]})
     return {
         "task_id": task_id,
         "deleted": True,
@@ -1981,12 +2563,15 @@ def _delete_one_task(store, workspace_id: str, task_id: str) -> Dict[str, Any]:
     }
 
 
-def _cancel_one_session(store, workspace_id: str, block_id: str) -> Dict[str, Any]:
+def _cancel_one_session(store, workspace_id: str, block_id: str, sink=None) -> Dict[str, Any]:
     """Unschedule one session, keep its task, delete only THAT calendar event.
 
     The single unit shared by cancel_session and cancel_sessions. An unknown id
     comes back as {"cancelled": False, "reason": "not_found"} rather than an
     exception, so a batch reports it and keeps going.
+
+    `sink`, when given, collects the REAL removed Block for the undo stash,
+    separately from the JSON-shaped dict the model sees.
     """
     block = store.blocks.get(block_id)
     title = _session_title(store, block) if block is not None else None
@@ -2003,6 +2588,8 @@ def _cancel_one_session(store, workspace_id: str, block_id: str) -> Dict[str, An
     from src.api.calendar_mirror import mirror_cancel
 
     mirror = mirror_cancel(store, workspace_id, [removed])
+    if sink is not None:
+        sink.append({"task": None, "blocks": [removed], "title": title})
     task = store.tasks.get(task_id) if task_id else None
     return {
         "block_id": block_id,
@@ -2016,6 +2603,36 @@ def _cancel_one_session(store, workspace_id: str, block_id: str) -> Dict[str, An
         "calendar_deleted": mirror.deleted,
         "calendar_failures": len(mirror.failures),
     }
+
+
+# --- the undo stash: one destructive change, held briefly -------------------
+# A hard delete is the one thing in this tool set that cannot be talked back
+# out of, and "no, put that back" is the most human sentence there is. The
+# stash holds the REAL removed records (not ids: the objects, so a restore
+# brings back the title, the estimate, the status and the exact times) for long
+# enough to change your mind and no longer. Short by design: an undo offered an
+# hour later restores a decision the user has already built on top of.
+_UNDO_TTL_MINUTES = 30
+
+
+def _stash_removal(store, kind: str, what: str, removed) -> None:
+    """Hold what a destructive call just removed, for one undo.
+
+    `removed` is the sink the `_delete_one_task` / `_cancel_one_session` units
+    filled with the real detached objects. An empty sink stashes NOTHING and
+    clears no previous stash decision of its own — a call that removed nothing
+    is not a change to undo.
+    """
+    entries = [e for e in (removed or []) if e.get("task") is not None or e.get("blocks")]
+    if not entries:
+        return
+    store.stash_undo({
+        "kind": kind,
+        "what": what,
+        "entries": entries,
+        "stashed_at": now_naive(),
+        "expires_at": now_naive() + timedelta(minutes=_UNDO_TTL_MINUTES),
+    })
 
 
 def _batch_ids(raw, field: str) -> Any:
@@ -2182,10 +2799,12 @@ def delete_task(workspace_id: str, task_id: str) -> Dict[str, Any]:
     """
     try:
         store = get_or_create_store(workspace_id)
-        result = _delete_one_task(store, workspace_id, task_id)
+        removed: List[Dict[str, Any]] = []
+        result = _delete_one_task(store, workspace_id, task_id, sink=removed)
         if not result.get("deleted"):
             return {"status": "error", **result}
-        return {"status": "success", **result}
+        _stash_removal(store, "delete_task", result.get("title") or "that task", removed)
+        return {"status": "success", "undoable": True, **result}
     except Exception as e:  # pragma: no cover - defensive
         return {"status": "error", "deleted": False, "error_message": str(e)}
 
@@ -2222,11 +2841,17 @@ def delete_tasks(workspace_id: str, task_ids: List[str]) -> Dict[str, Any]:
             ids["deleted_count"] = 0
             return ids
         store = get_or_create_store(workspace_id)
-        results = [_delete_one_task(store, workspace_id, tid) for tid in ids]
+        removed: List[Dict[str, Any]] = []
+        results = [_delete_one_task(store, workspace_id, tid, sink=removed) for tid in ids]
         deleted = [r for r in results if r.get("deleted")]
         missing = [r for r in results if not r.get("deleted")]
+        _stash_removal(
+            store, "delete_tasks",
+            _join_times(r["title"] for r in deleted) or "those tasks", removed,
+        )
         return {
             "status": "success",
+            "undoable": bool(deleted),
             "requested_count": len(ids),
             "deleted_count": len(deleted),
             "not_found_count": len(missing),
@@ -2270,10 +2895,12 @@ def cancel_session(workspace_id: str, block_id: str) -> Dict[str, Any]:
     """
     try:
         store = get_or_create_store(workspace_id)
-        result = _cancel_one_session(store, workspace_id, block_id)
+        removed: List[Dict[str, Any]] = []
+        result = _cancel_one_session(store, workspace_id, block_id, sink=removed)
         if not result.get("cancelled"):
             return {"status": "error", **result}
-        return {"status": "success", **result}
+        _stash_removal(store, "cancel_session", result.get("title") or "that session", removed)
+        return {"status": "success", "undoable": True, **result}
     except Exception as e:  # pragma: no cover - defensive
         return {"status": "error", "cancelled": False, "error_message": str(e)}
 
@@ -2326,11 +2953,18 @@ def cancel_sessions(workspace_id: str, block_ids: List[str]) -> Dict[str, Any]:
             ids["cancelled_count"] = 0
             return ids
         store = get_or_create_store(workspace_id)
-        results = [_cancel_one_session(store, workspace_id, bid) for bid in ids]
+        removed: List[Dict[str, Any]] = []
+        results = [_cancel_one_session(store, workspace_id, bid, sink=removed) for bid in ids]
         done = [r for r in results if r.get("cancelled")]
         missing = [r for r in results if not r.get("cancelled")]
+        _stash_removal(
+            store, "cancel_sessions",
+            _join_times(r.get("title") or "a session" for r in done) or "those sessions",
+            removed,
+        )
         return {
             "status": "success",
+            "undoable": bool(done),
             "requested_count": len(ids),
             "cancelled_count": len(done),
             "not_found_count": len(missing),
@@ -2343,6 +2977,110 @@ def cancel_sessions(workspace_id: str, block_ids: List[str]) -> Dict[str, Any]:
         }
     except Exception as e:  # pragma: no cover - defensive
         return {"status": "error", "cancelled_count": 0, "error_message": str(e)}
+
+
+def undo_last_change(workspace_id: str) -> Dict[str, Any]:
+    """Put back what the LAST destructive call just removed. Single use.
+
+    This is the tool for "no, undo that", "put it back", "I didn't mean to
+    delete those", "wait, bring my afternoon back". It restores the tasks and
+    sessions removed by the most recent delete_task / delete_tasks /
+    cancel_session / cancel_sessions, with their real titles, estimates and
+    exact original times.
+
+    IT ONLY EVER REACHES BACK ONE STEP, AND NOT FAR IN TIME. There is one slot,
+    the newest removal fills it, and taking the undo empties it — so a second
+    "undo that" in a row has nothing to restore and will say so. The stash also
+    goes stale after about half an hour. When there is nothing to undo the reply
+    says exactly that (`restored` false, `reason` "nothing_to_undo" or
+    "expired"); tell the user plainly instead of implying something came back.
+    An undo cannot be undone either: if they change their mind again, delete or
+    cancel it properly.
+
+    THE CALENDAR IS THE PART TO BE CAREFUL ABOUT. A Google Calendar event we
+    deleted is gone at Google and cannot be un-deleted. So the plan is restored
+    first and always, and then, best-effort, a NEW event is created for each
+    restored session. `calendar_events_recreated` counts those new events and
+    `calendar_not_restored` counts the sessions that got none. Say it the way it
+    happened: "put the sessions back, and made fresh calendar entries for them"
+    — never "restored your calendar events", because the originals are not
+    coming back and any reminders or guests on them are gone with them. If
+    `calendar_events_recreated` is 0, say the plan is back and the calendar is
+    not.
+
+    Returns the REAL `restored_tasks` / `restored_sessions` counts and the real
+    `titles`. A record whose id has since been re-used, or a session whose task
+    was deleted separately afterwards, is skipped rather than clobbering
+    something newer, and `skipped_count` says how many — report that too rather
+    than claiming a clean restore.
+
+    Args:
+        workspace_id: The workspace to undo the last removal in.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        now = now_naive()
+        batch = store.take_undo(now)
+        if not batch:
+            return {
+                "status": "success",
+                "restored": False,
+                "reason": "nothing_to_undo",
+                "restored_tasks": 0,
+                "restored_sessions": 0,
+                "message": ("There's nothing to put back. I only hold the last "
+                            "delete or cancel, and only for about half an hour."),
+            }
+
+        entries = batch.get("entries") or []
+        tasks = [e["task"] for e in entries if e.get("task") is not None]
+        blocks = [b for e in entries for b in (e.get("blocks") or [])]
+        expected = len(tasks) + len(blocks)
+
+        counts = store.restore_records(tasks, blocks)
+        restored_blocks = [b for b in blocks if store.blocks.get(b.id) is b]
+
+        # The Google event we deleted is GONE at Google. Clearing the dead id is
+        # what makes the mirror create a fresh event instead of trying to patch
+        # a deleted one; the reply says "new", never "restored".
+        recreate = []
+        for b in restored_blocks:
+            if b.status == "planned":
+                b.gcal_event_id = None
+                recreate.append(b)
+
+        created = 0
+        failures = 0
+        if recreate:
+            from src.api.calendar_mirror import mirror_commit
+
+            mirror = mirror_commit(store, workspace_id, recreate)
+            created = mirror.created
+            failures = len(mirror.failures)
+
+        titles = [e.get("title") for e in entries if e.get("title")]
+        return {
+            "status": "success",
+            "restored": bool(counts["tasks"] or counts["blocks"]),
+            "undone": batch.get("kind"),
+            "what": batch.get("what"),
+            "titles": titles,
+            "restored_tasks": counts["tasks"],
+            "restored_sessions": counts["blocks"],
+            "skipped_count": max(0, expected - counts["tasks"] - counts["blocks"]),
+            # Separate, honest calendar truth. These are NEW events standing in
+            # for deleted ones, which is not the same as a restore, and the
+            # docstring tells the model to say so.
+            "calendar_events_recreated": created,
+            "calendar_not_restored": max(0, len(restored_blocks) - created),
+            "calendar_failures": failures,
+            "calendar_note": (
+                "Deleted Google Calendar events cannot be un-deleted. Any events "
+                "counted here are NEW ones created to stand in for them."
+            ),
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "restored": False, "error_message": str(e)}
 
 
 # The tool set exposed to the agent. Keep small (ADK guidance: ~10-20 max).
@@ -2377,6 +3115,15 @@ ALL_TOOLS = [
     # timer-measured ones are never re-asked) and log each self-reported outcome.
     list_todays_sessions,
     log_session_outcome,
+    # History. The ONLY grounding for "how am I doing" / "how was last week" /
+    # "how many hours did I work last month" — without it those numbers can
+    # only be invented. Read-only, and it keeps measured and reported minutes
+    # apart on purpose.
+    get_progress,
+    # Timer VISIBILITY, not timer control. The Now timer is the client's; this
+    # only reads what it wrote, so "am I still going?" has an answer and
+    # "start my timer" gets an honest "you tap that in the app".
+    get_active_session,
     # The selection step the batch write tools stand on: every session in a
     # local-day RANGE, every status, with local times. Without it "wipe this
     # week" / "clear Friday" have no way to obtain an id and the good batch
@@ -2395,6 +3142,9 @@ ALL_TOOLS = [
     # separate, real calendar-update count.
     list_tasks,
     rename_task,
+    # Same shape as rename_task: a direct, low-risk edit of one field the user
+    # just corrected out loud. Changes the ESTIMATE, never the plan.
+    set_task_estimate,
     # P20-02: explicit placement — the user names the time, so the intent is
     # unambiguous and these are DIRECT writes like rename_task (no confirm dance,
     # not "*_confirmed", so the confirm-gate leaves them alone). They are what
@@ -2404,6 +3154,14 @@ ALL_TOOLS = [
     # calendar counts.
     move_session,
     schedule_task_at,
+    # Read-only clash check, so a time can be TESTED before it is offered. Same
+    # collision logic the two writes above run, which is what makes it worth
+    # anything: what it says here is what they will do.
+    check_slot,
+    # "Push everything back an hour". The collision-safe ordering lives inside
+    # the tool because sequencing it from the outside is how a whole afternoon
+    # refuses itself one session at a time.
+    shift_sessions,
     # P20-03: the create and delete halves of CRUD, singular AND batch, so the
     # agent never has to say "I don't have a tool to delete tasks". DIRECT
     # writes for the same reason as the two above: a user naming what they want
@@ -2415,4 +3173,8 @@ ALL_TOOLS = [
     delete_tasks,
     cancel_session,
     cancel_sessions,
+    # The safety net under the four tools above: one step back, briefly. A hard
+    # delete is the only thing here that cannot be talked back out of, and "no,
+    # put that back" needed a real answer rather than an apology.
+    undo_last_change,
 ]

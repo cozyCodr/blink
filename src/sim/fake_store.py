@@ -80,6 +80,13 @@ class FakeStore:
         # rides the Firestore snapshot or the event stream (same discipline as
         # google_tokens: the confirm gate, not the store, is the source of truth).
         self.pending_reschedule: Dict[str, Dict[str, Any]] = {}
+        # The ONE most recent destructive change, held just long enough for the
+        # user to say "actually, put that back". Same discipline as
+        # pending_reschedule: transient, single-use, NOT snapshotted, no event
+        # published — a stash is a per-conversation safety net, not durable
+        # state. One slot on purpose: "undo" in speech means the last thing,
+        # and a stack the user cannot see is a stack they cannot reason about.
+        self.pending_undo: Optional[Dict[str, Any]] = None
         self._listeners: List[asyncio.Queue] = []
 
     def subscribe(self) -> asyncio.Queue:
@@ -358,6 +365,88 @@ class FakeStore:
         turns that None into an honest 'expired' error rather than a fabricated
         move."""
         return self.pending_reschedule.pop((token or "").strip(), None)
+
+    # --- single-use undo stash (the destructive-change safety net) -----------
+
+    def stash_undo(self, batch: Dict[str, Any]) -> None:
+        """Hold the records a destructive call just removed, so they can go back.
+
+        Mirrors `stash_reschedule`: transient, single-use, unpublished. `batch`
+        is whatever the tool removed, verbatim — the DETACHED Task and Block
+        objects themselves, not copies of their ids, because only the real
+        objects can be put back with their titles, estimates, statuses and times
+        intact. It must carry `expires_at` (a naive-UTC instant); `take_undo`
+        refuses anything past it rather than resurrecting a change the user has
+        long since moved on from.
+
+        Overwrites whatever was stashed before. That is the point: "undo" means
+        the LAST change, and holding a queue the user cannot see would let a
+        second "undo" restore something they never asked about.
+        """
+        self.pending_undo = dict(batch)
+
+    def peek_undo(self, now: datetime) -> Optional[Dict[str, Any]]:
+        """The stashed batch if one is live at `now`, else None. Does not consume.
+
+        Expiry is checked here so a stale stash reads as "nothing to undo"
+        everywhere, rather than as an undo that quietly does nothing.
+        """
+        batch = self.pending_undo
+        if not batch:
+            return None
+        expires = batch.get("expires_at")
+        if isinstance(expires, datetime) and now >= expires:
+            self.pending_undo = None
+            return None
+        return batch
+
+    def take_undo(self, now: datetime) -> Optional[Dict[str, Any]]:
+        """Pop the live undo batch, or None if there is none / it expired.
+
+        Single-use by construction, exactly like `take_reschedule`: the slot is
+        cleared on the way out, so a second "undo that" can only get None and
+        the tool says so honestly instead of claiming a second restore.
+        """
+        batch = self.peek_undo(now)
+        self.pending_undo = None
+        return batch
+
+    def restore_records(self, tasks, blocks) -> Dict[str, int]:
+        """Put previously removed tasks and blocks back into the store.
+
+        The inverse of `delete_task` / `delete_block`, and deliberately narrow:
+        it re-inserts the SAME objects under the SAME ids, so a restored session
+        keeps its original identity everywhere the plan payload is read. An id
+        that has since been re-used is left alone rather than overwritten —
+        clobbering a newer record to undo an older change would be a second
+        destructive act dressed up as a repair.
+
+        Returns the real counts actually re-inserted, so the caller reports what
+        happened rather than what it asked for. Publishes `records_restored` so
+        the change rides the same event stream as every other mutation.
+        """
+        restored_tasks = 0
+        for t in tasks or []:
+            if t.id in self.tasks:
+                continue
+            self.tasks[t.id] = t
+            restored_tasks += 1
+        restored_blocks = 0
+        for b in blocks or []:
+            if b.id in self.blocks:
+                continue
+            if b.task_id not in self.tasks:
+                # The work itself is gone for good (deleted separately, and not
+                # part of this batch). A session with no task is an orphan on
+                # the plan; skip it and let the caller report the shortfall.
+                continue
+            self.blocks[b.id] = b
+            restored_blocks += 1
+        if restored_tasks or restored_blocks:
+            self._publish_event("records_restored", {
+                "tasks": restored_tasks, "blocks": restored_blocks,
+            })
+        return {"tasks": restored_tasks, "blocks": restored_blocks}
 
     def log_outcome(self, block_id: str, status: BlockStatus,
                     actual_minutes: Optional[int] = None,
