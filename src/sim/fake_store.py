@@ -139,6 +139,28 @@ class FakeStore:
         self.tasks[t.id] = t
         self._publish_event("task_added", {"task_id": t.id, "title": t.title})
 
+    def rename_task(self, task_id: str, new_title: str) -> Optional[str]:
+        """Change a task's title in place; return the OLD title, or None if the
+        task does not exist here.
+
+        The caller owns validation (a blank title never reaches this); this only
+        stores the fact, stamps updated_at and publishes `task_renamed` so the
+        change rides the same event stream as every other mutation. Returning the
+        real old title is what lets a reply say what actually changed instead of
+        what was intended.
+        """
+        t = self.tasks.get(task_id)
+        if t is None:
+            return None
+        old_title = t.title
+        t.title = new_title
+        t.updated_at = datetime.now(timezone.utc)
+        self._publish_event(
+            "task_renamed",
+            {"task_id": t.id, "old_title": old_title, "title": new_title},
+        )
+        return old_title
+
     def add_constraint(self, c: Constraint):
         self.constraints[c.id] = c
         self._publish_event("constraint_added", {"constraint_id": c.id, "title": c.title})

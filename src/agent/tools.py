@@ -876,6 +876,119 @@ def reschedule_confirmed(workspace_id: str, token: str) -> Dict[str, Any]:
         return {"status": "error", "error_message": str(e)}
 
 
+# --- P20-xx: task-level CRUD the user can ask for in plain words -------------
+# Before this, the agent could create plans, reschedule, and do full calendar
+# CRUD, but it could not fix a task's NAME — a task captured wrong stayed wrong.
+# A rename is low-risk and trivially reversed, so it is a DIRECT write (not the
+# two-phase confirm dance the destructive calendar writes use). It stays
+# truthful the hard way instead: it reports the REAL old and new titles, and the
+# calendar mirror is a SECOND, separately-reported truth that never fabricates.
+
+# The statuses a task can be in while it is still live work worth renaming.
+# "done"/"dropped" tasks are history; keeping them out keeps the listing small.
+_OPEN_TASK_STATUSES = ("draft", "ready", "scheduled", "in_progress")
+
+
+def list_tasks(workspace_id: str) -> Dict[str, Any]:
+    """List the user's open tasks with their ids, so you can act on the one they mean.
+
+    Call this whenever the user refers to a piece of work by NAME rather than by
+    id — "rename my bus ticket task", "that Dahod thing is called the wrong
+    thing", "change the name of the linear algebra one". Match their words to a
+    title here, then use that task's id.
+
+    Returns only the tasks that are still live (draft, ready, scheduled, or in
+    progress), each as {id, title, status}. Finished and dropped work is left
+    out. If two titles could plausibly be what they meant, ask which one instead
+    of guessing; if the list is empty, say so plainly rather than inventing a task.
+
+    Args:
+        workspace_id: The workspace whose tasks to read.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        tasks = [t for t in store.tasks.values() if t.status in _OPEN_TASK_STATUSES]
+        tasks.sort(key=lambda t: (t.order_index, t.title or ""))
+        return {
+            "status": "success",
+            "tasks": [
+                {"id": t.id, "title": t.title, "status": t.status}
+                for t in tasks
+            ],
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "error_message": str(e)}
+
+
+def rename_task(workspace_id: str, task_id: str, new_title: str) -> Dict[str, Any]:
+    """Rename a task the user says was captured wrong, and fix its calendar events.
+
+    Call this when the user wants a piece of work to be CALLED something else:
+    "rename that task", "that's called the wrong thing", "change the name of my
+    3pm to X", "it should say Ahmedabad, not Dahod". It changes only the title —
+    never the times, never the plan. If you do not already have the task's id,
+    call list_tasks first and match on the title; never guess an id.
+
+    This is a direct, low-risk write, so it needs no confirm step. Anything the
+    task already has on Google Calendar is then patched to the new name
+    best-effort: that runs after the rename and can never undo it.
+
+    Returns the REAL `old_title` and `new_title`, plus a SEPARATE calendar truth:
+    `calendar_updated` is how many calendar events actually got the new name and
+    `calendar_failures` how many did not. State those as two separate facts
+    ("renamed it, and updated N on your calendar"); if calendar_updated is 0, do
+    NOT say the calendar changed. An unknown task id or an empty/blank new title
+    returns an honest error and renames nothing.
+
+    Args:
+        workspace_id: The workspace the task belongs to.
+        task_id: The task's id, from list_tasks.
+        new_title: The new title, exactly as the user wants it read.
+    """
+    try:
+        title = (new_title or "").strip()
+        if not title:
+            return {
+                "status": "error",
+                "renamed": False,
+                "error_message": "A task needs a name; tell me what to call it instead.",
+            }
+        store = get_or_create_store(workspace_id)
+        task = store.tasks.get(task_id)
+        if task is None:
+            return {
+                "status": "error",
+                "renamed": False,
+                "error_message": f"No task with id {task_id!r} in this workspace.",
+            }
+        old_title = task.title
+        # The internal rename is the load-bearing truth and happens FIRST,
+        # unconditionally. Everything below is a second, best-effort truth.
+        store.rename_task(task_id, title)
+
+        # Local import avoids a module-load cycle: calendar_mirror imports
+        # _session_title from this module.
+        from src.api.calendar_mirror import mirror_rename
+
+        # Only this task's own blocks, and only the ones we actually mirrored
+        # (mirror_rename itself skips any block without a gcal_event_id).
+        blocks = [b for b in store.blocks.values() if b.task_id == task_id]
+        mirror = mirror_rename(store, workspace_id, blocks, title)
+        return {
+            "status": "success",
+            "renamed": True,
+            "task_id": task_id,
+            "old_title": old_title,
+            "new_title": title,
+            # Real counts from the mirror, never intent: a failed patch reports
+            # 0 updated and leaves the rename standing.
+            "calendar_updated": mirror.updated,
+            "calendar_failures": len(mirror.failures),
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "renamed": False, "error_message": str(e)}
+
+
 # The tool set exposed to the agent. Keep small (ADK guidance: ~10-20 max).
 # Calendar writes are two-phase: the propose_* tools only ask; the *_confirmed
 # tools execute and must never be called before the user answers yes. The read
@@ -907,4 +1020,11 @@ ALL_TOOLS = [
     # no Google Calendar interaction here.
     propose_reschedule,
     reschedule_confirmed,
+    # Task-level CRUD. list_tasks is a read (ids for a title the user said);
+    # rename_task is a DIRECT low-risk write — deliberately not two-phase and
+    # deliberately not named "*_confirmed", so the confirm-gate leaves it alone.
+    # Its truthfulness comes from returning the real old/new titles and a
+    # separate, real calendar-update count.
+    list_tasks,
+    rename_task,
 ]
