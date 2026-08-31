@@ -194,6 +194,14 @@ struct TodayScreen: View {
             if let serverFace = identity.face {
                 faces.adopt(serverFace: serverFace)
             }
+            // P15-00 on the phone — tell the server which day this person is
+            // living in. Every time it prints (and the boundary behind
+            // "today") is resolved in the profile's zone, which defaults to
+            // UTC; a workspace only ever used from here therefore showed the
+            // session two hours early for a GMT+2 user. Silent, deduped
+            // against the last confirmed value, and never surfaced: a failure
+            // leaves the server exactly as it was and the next launch retries.
+            await TimezoneSyncClient().report(session: blink)
         }
         // The permission ask waits for a payload on purpose. Asking on launch
         // means asking before the app has anything to offer; asking once
@@ -242,6 +250,11 @@ struct TodayScreen: View {
                 await store.refresh()
                 honourFocusRequest()
             }
+            // Travel, or a zone changed in Settings, while the app was away.
+            // The de-dupe makes the ordinary foreground free: it reads one
+            // string and returns.
+            let blink = session
+            Task { await TimezoneSyncClient().report(session: blink) }
             if CheckInLaunchRequest.consume() { voiceLoop.start() }
         }
         // A background action wrote something. Re-read rather than assume:
