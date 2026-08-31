@@ -218,6 +218,39 @@ class FakeStore:
                 self.tasks[b.task_id].status = "scheduled"
         self._publish_event("blocks_committed", {"count": len(new_blocks)})
 
+    def move_block(self, block_id: str, starts_at: datetime, ends_at: datetime) -> Optional[Dict[str, Any]]:
+        """Move ONE existing block to new naive-UTC times; return the REAL old
+        times, or None if the block does not exist here.
+
+        The user-directed counterpart to `commit_blocks` (P20-02): the scheduler
+        picks times when it plans, but when the user names a time themselves the
+        block moves in place, keeping its id, its task, its history and its
+        `gcal_event_id` so the calendar event that already exists can simply be
+        patched instead of deleted and re-made.
+
+        The caller owns ALL validation (parse, past-check, clash-check); this
+        only stores the fact and publishes `block_moved` so the change rides the
+        same event stream as every other mutation. Returning the real old start
+        and end is what lets a reply say what actually changed rather than what
+        was intended.
+        """
+        b = self.blocks.get(block_id)
+        if b is None:
+            return None
+        old = {"starts_at": b.starts_at, "ends_at": b.ends_at}
+        b.starts_at = starts_at
+        b.ends_at = ends_at
+        if b.task_id in self.tasks:
+            self.tasks[b.task_id].updated_at = datetime.now(timezone.utc)
+        self._publish_event("block_moved", {
+            "block_id": b.id,
+            "task_id": b.task_id,
+            "old_starts_at": old["starts_at"].isoformat(),
+            "starts_at": starts_at.isoformat(),
+            "ends_at": ends_at.isoformat(),
+        })
+        return old
+
     def cancel_blocks(self, block_ids) -> int:
         """Mark the given blocks 'cancelled', preserving them as history.
 

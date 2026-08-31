@@ -9,8 +9,9 @@ invent times. Import these both as ADK function tools and as orchestration helpe
 """
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 from src.agent.workspace_registry import get_or_create_store, now_naive, ledger_for
 from src.agent import google_calendar as gcal
@@ -22,7 +23,7 @@ from src.core.scoring.priority_score import calculate_priority_score
 from src.core.capacity.capacity_ledger import build_capacity_ledger
 from src.core.calendar.calendar_sync import constraints_to_intervals
 from src.core.zones import zones_to_intervals
-from src.core.utils.date_utils import TimeInterval
+from src.core.utils.date_utils import TimeInterval, intervals_overlap
 from src.types.entities import Block
 
 
@@ -989,6 +990,450 @@ def rename_task(workspace_id: str, task_id: str, new_title: str) -> Dict[str, An
         return {"status": "error", "renamed": False, "error_message": str(e)}
 
 
+# --- P20-02: putting a specific piece of work at a specific time -------------
+# Everything above places work by ARITHMETIC: the scheduler picks the first slot
+# that fits (propose_schedule_for_workspace), or re-places what was missed
+# (propose_reschedule). Neither can honour "move that to Thursday at 2" — the
+# one thing a person asks a planner for most. These two tools close that gap.
+#
+# The division of labour is the house rule, unchanged: the MODEL resolves the
+# words ("Thursday", "tomorrow afternoon") into a concrete local datetime — it
+# has today's date in its context and that is a judgement. The CODE below
+# parses that datetime strictly, converts it, checks it against real busy time,
+# and stores it. Nothing here guesses a time: an unparseable value moves
+# nothing, and every datetime returned is either parsed from the input or
+# computed from stored data.
+
+# The local wall-clock format the tools accept, quoted in every error we return
+# so a failed parse teaches the model the shape instead of inviting a retry-guess.
+_LOCAL_FORMAT_HINT = (
+    "Give the time as ISO 8601 in the user's own local wall clock, "
+    "e.g. '2026-09-03T14:00' for Thursday 3 September at 2pm. "
+    "A date with no time of day is not enough."
+)
+
+# A focus session shorter than this is not a session, and longer than this is a
+# day, not a block. Bounds are refusals, never silent clamps.
+_MIN_DURATION_MINUTES = 5
+_MAX_DURATION_MINUTES = 720
+
+# Block statuses that can still be moved. 'done' / 'partial' are measured
+# history and 'cancelled' is a decision already taken; moving any of them would
+# rewrite the record rather than the plan.
+_MOVABLE_BLOCK_STATUSES = ("planned", "missed")
+
+
+def _workspace_zone(store):
+    """The workspace's IANA zone as a tzinfo, degrading to UTC when unknown.
+
+    The single conversion authority for these tools, identical to what the API
+    does (`resolve_zone(store.get_profile().timezone)`): the store keeps naive
+    UTC, the user speaks local, and this is the only bridge between them.
+    """
+    return localtime.resolve_zone(getattr(store.get_profile(), "timezone", None))
+
+
+def _parse_local_to_naive_utc(value: str, tz) -> Optional[datetime]:
+    """A user-local ISO 8601 datetime string to the naive-UTC instant it names.
+
+    STRICT by design: returns None on anything it cannot read exactly, and the
+    caller turns that None into an honest error. It never falls back to "now",
+    never assumes a time of day for a bare date, and never re-interprets a bad
+    string — a guessed datetime is the exact failure mode the governance rules
+    forbid.
+
+    A value carrying its own offset ('...+02:00', '...Z') is honoured as the
+    instant it states. A naive value is read as the user's LOCAL wall clock and
+    converted through `tz`, the same `datetime -> astimezone(UTC) ->
+    replace(tzinfo=None)` path `localtime.day_bounds_utc` uses, so DST is handled
+    by the zone database rather than by an assumed fixed offset.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    text = raw.replace(" ", "T", 1) if ("T" not in raw and " " in raw) else raw
+    if "T" not in text:
+        # A bare date names a day, not an instant. Refuse rather than invent a
+        # time of day the user never said.
+        return None
+    if text[-1] in ("Z", "z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed.replace(tzinfo=tz).astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _labelled_busy(store, now: datetime, horizon_days: int, exclude_block_ids) -> tuple:
+    """Real busy time over the horizon, split HARD vs SOFT and carrying labels.
+
+    Reuses the same expansion the capacity ledger is built from — one
+    `constraints_to_intervals` / `zones_to_intervals` call PER item, so each
+    resulting interval keeps the title it came from and a clash can be NAMED
+    instead of reported as an anonymous overlap.
+
+    Hard: still-standing focus sessions (excluding `exclude_block_ids`, i.e. the
+    one being moved) and hard constraints, which is what synced Google Calendar
+    events arrive as. Soft: no-touch zones and soft constraints — real, worth
+    telling the user about, but not the user's own explicit appointment.
+
+    Returns (hard, soft), each a list of (label, TimeInterval).
+    """
+    excluded = set(exclude_block_ids or ())
+    days = max(1, min(370, horizon_days))
+    hard: List[tuple] = []
+    soft: List[tuple] = []
+
+    for b in store.blocks.values():
+        # Only sessions still STANDING are busy time. A missed or cancelled one
+        # is not occupying the calendar, so moving work on top of it is fine.
+        if b.id in excluded or b.status != "planned":
+            continue
+        hard.append((_session_title(store, b), TimeInterval(start=b.starts_at, end=b.ends_at)))
+
+    for c in store.constraints.values():
+        bucket = soft if getattr(c, "hardness", "hard") == "soft" else hard
+        for iv in constraints_to_intervals([c], start_date=now, days=days):
+            bucket.append((c.title or "a calendar event", iv))
+
+    for z in store.zones.values():
+        for iv in zones_to_intervals([z], start_date=now, days=days):
+            soft.append((getattr(z, "label", None) or "a no-touch zone", iv))
+
+    return hard, soft
+
+
+def _clashes_for(store, tz, start: datetime, end: datetime, exclude_block_ids) -> tuple:
+    """What the proposed [start, end) window actually collides with.
+
+    Overlap is decided by `intervals_overlap` from the core date utils — the
+    same predicate the capacity ledger subtracts with — never by hand-rolled
+    comparisons here.
+
+    Returns (hard_clashes, soft_clashes) as JSON-ready dicts carrying the real
+    title and real local times of each colliding item, so the reply can name the
+    clash ("that runs into your 2pm dentist") and offer another time.
+    """
+    horizon_days = max(1, (end.date() - now_naive().date()).days + 2)
+    hard, soft = _labelled_busy(store, now_naive(), horizon_days, exclude_block_ids)
+    window = TimeInterval(start=start, end=end)
+
+    def _hits(items):
+        out = []
+        for label, iv in items:
+            if intervals_overlap(window, iv):
+                out.append({
+                    "title": label,
+                    "starts_at": iv.start.isoformat(),
+                    "ends_at": iv.end.isoformat(),
+                    "start_local": _fmt_local_time(iv.start, tz),
+                    "end_local": _fmt_local_time(iv.end, tz),
+                })
+        out.sort(key=lambda d: d["starts_at"])
+        return out
+
+    return _hits(hard), _hits(soft)
+
+
+def _fmt_local_day_time(dt: datetime, tz) -> str:
+    """A naive-UTC instant as a full local label, e.g. 'Thursday 3 Sep, 2:00 PM'.
+
+    Purely for the reply: every value in it is computed from the stored instant,
+    so the model can quote it back without doing date arithmetic of its own.
+    """
+    local = dt.replace(tzinfo=timezone.utc).astimezone(tz)
+    return f"{local.strftime('%A %-d %b')}, {_fmt_local_time(dt, tz)}"
+
+
+def _duration_error(duration_minutes) -> Optional[str]:
+    """The honest complaint about an out-of-range duration, or None if it's fine."""
+    try:
+        minutes = int(duration_minutes)
+    except (TypeError, ValueError):
+        return "That duration isn't a number of minutes."
+    if minutes < _MIN_DURATION_MINUTES or minutes > _MAX_DURATION_MINUTES:
+        return (f"A session has to be between {_MIN_DURATION_MINUTES} and "
+                f"{_MAX_DURATION_MINUTES} minutes long.")
+    return None
+
+
+def _place_block(store, workspace_id: str, block, start: datetime, minutes: int,
+                 tz, exclude_ids) -> Dict[str, Any]:
+    """Validate-then-move one EXISTING block, mirror it, and report both truths.
+
+    Shared by move_session and by schedule_task_at when the task already has a
+    session standing (moving that one is the honest answer to "put it at 2pm" —
+    creating a second session for the same work would double-book the user with
+    themselves).
+    """
+    end = start + timedelta(minutes=minutes)
+    hard, soft = _clashes_for(store, tz, start, end, exclude_ids)
+    if hard:
+        names = _join_times(c["title"] for c in hard)
+        return {
+            "status": "error",
+            "moved": False,
+            "error_message": (f"That time runs into {names}. Nothing moved — "
+                              f"pick another time or clear that first."),
+            "clashes": hard,
+        }
+
+    old = store.move_block(block.id, start, end)
+    if old is None:  # pragma: no cover - caller already resolved the block
+        return {"status": "error", "moved": False,
+                "error_message": f"No session with id {block.id!r} in this workspace."}
+
+    # Local import avoids a module-load cycle: calendar_mirror imports
+    # _session_title from this module.
+    from src.api.calendar_mirror import mirror_move
+
+    mirror = mirror_move(store, workspace_id, [block])
+    return {
+        "status": "success",
+        "moved": True,
+        "block_id": block.id,
+        "task_id": block.task_id,
+        "title": _session_title(store, block),
+        "old_start": old["starts_at"].isoformat(),
+        "old_start_local": _fmt_local_day_time(old["starts_at"], tz),
+        "new_start": block.starts_at.isoformat(),
+        "new_end": block.ends_at.isoformat(),
+        "new_start_local": _fmt_local_day_time(block.starts_at, tz),
+        "duration_minutes": minutes,
+        # Real mirror counts, never intent: a failed patch reports 0 updated and
+        # leaves the move standing.
+        "calendar_updated": mirror.updated,
+        "calendar_failures": len(mirror.failures),
+        # Not a refusal: real but softer overlaps (no-touch zones, soft
+        # constraints) the user should hear about after the fact.
+        "overlaps_soft": soft,
+    }
+
+
+def move_session(workspace_id: str, block_id: str, new_start: str,
+                 duration_minutes: Optional[int] = None) -> Dict[str, Any]:
+    """Move an ALREADY-SCHEDULED focus session to a specific time the user named.
+
+    This is the tool for "move that to Thursday", "push my 3pm to 5", "shift the
+    bus-ticket session to tomorrow morning", "can that be Friday at 2 instead".
+    Do NOT tell the user their session can only go in the next free slot — it
+    can go where they say. propose_schedule_for_workspace is for letting the
+    planner choose; this is for when the USER chooses.
+
+    You resolve the words into a date and time: you know today's date, so
+    "Thursday" or "tomorrow at 2" is yours to turn into a concrete local
+    datetime. Pass it as `new_start` in ISO 8601 LOCAL wall clock, e.g.
+    "2026-09-03T14:00". Never invent one you are unsure of — if the user said a
+    day but no time, ask which time rather than assuming. If you do not have the
+    session's id, call list_todays_sessions (today's) or list_tasks + the task's
+    sessions first; never guess an id.
+
+    The session keeps its current length unless you pass `duration_minutes`, and
+    keeps its identity, so its existing Google Calendar event is PATCHED to the
+    new time rather than deleted and remade.
+
+    Refuses, changing nothing, when: the id is unknown; `new_start` cannot be
+    parsed exactly; the time is in the past; the session is already done or
+    cancelled; or the new time collides with another session or a real calendar
+    commitment — that refusal comes back with `clashes` naming what is in the
+    way, so offer the user another time instead of double-booking them.
+
+    On success it returns the REAL `old_start_local` and `new_start_local`, plus
+    a SEPARATE calendar truth: `calendar_updated` is how many calendar events
+    actually got the new time, `calendar_failures` how many did not. State those
+    as two facts ("moved it to Thursday 2pm, and updated your calendar"); if
+    calendar_updated is 0, say nothing about the calendar changing. Any
+    `overlaps_soft` entries are softer collisions (a no-touch zone, a soft
+    commitment) worth mentioning plainly.
+
+    Args:
+        workspace_id: The workspace the session belongs to.
+        block_id: The session's id, from list_todays_sessions or the plan.
+        new_start: The new start, ISO 8601 in the user's LOCAL time, e.g.
+            "2026-09-03T14:00".
+        duration_minutes: Optional new length. Omit to keep the session's
+            current length exactly as it is.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        block = store.blocks.get(block_id)
+        if block is None:
+            return {"status": "error", "moved": False,
+                    "error_message": f"No session with id {block_id!r} in this workspace."}
+        if block.status not in _MOVABLE_BLOCK_STATUSES:
+            return {
+                "status": "error",
+                "moved": False,
+                "error_message": (f"That session is already {block.status}; it is history "
+                                  f"now, not plan. Schedule a new one instead."),
+            }
+        tz = _workspace_zone(store)
+        start = _parse_local_to_naive_utc(new_start, tz)
+        if start is None:
+            return {"status": "error", "moved": False,
+                    "error_message": f"I couldn't read {new_start!r} as a time. {_LOCAL_FORMAT_HINT}"}
+        now = now_naive()
+        if start < now:
+            return {
+                "status": "error",
+                "moved": False,
+                "error_message": (f"{_fmt_local_day_time(start, tz)} is already past. "
+                                  f"Pick a time still ahead of us."),
+            }
+        if duration_minutes is None:
+            # Keep the session's REAL current length; never silently resize it.
+            minutes = max(1, int((block.ends_at - block.starts_at).total_seconds() // 60))
+        else:
+            problem = _duration_error(duration_minutes)
+            if problem:
+                return {"status": "error", "moved": False, "error_message": problem}
+            minutes = int(duration_minutes)
+        return _place_block(store, workspace_id, block, start, minutes, tz, {block.id})
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "moved": False, "error_message": str(e)}
+
+
+def schedule_task_at(workspace_id: str, task_id: str, start: str,
+                     duration_minutes: Optional[int] = None) -> Dict[str, Any]:
+    """Schedule a task at a specific time the user named, instead of letting the planner choose.
+
+    This is the tool for "schedule the bus ticket for Thursday afternoon", "put
+    the essay at 2pm tomorrow", "book an hour for the gym on Saturday morning",
+    "do the linear algebra review Friday at 9". Use it whenever the user names
+    WHEN; use propose_schedule_for_workspace only when they want Blink to pick.
+
+    Works for a task with no session yet AND for one already on the plan: if the
+    task already has a session standing, that session is MOVED to the new time
+    (keeping its calendar event), so the user never ends up double-booked
+    against their own work. If you do not have the task's id, call list_tasks
+    and match on the title; never guess an id.
+
+    You resolve the words into a date and time — you know today's date — and
+    pass it as `start` in ISO 8601 LOCAL wall clock, e.g. "2026-09-03T14:00".
+    If the user named a day but no time, ask which time rather than assuming
+    one. Length comes from the task's own estimate unless you pass
+    `duration_minutes`; `duration_source` in the reply says which it used.
+
+    Refuses, changing nothing, when: the task id is unknown; `start` cannot be
+    parsed exactly; the time is in the past; or the slot collides with another
+    session or a real calendar commitment — that refusal names the clash in
+    `clashes`, so offer another time rather than double-booking.
+
+    On success `scheduled` is true and `moved_existing` says whether this moved
+    a session that already existed (true) or created a new one (false). The
+    calendar is a SEPARATE truth: `calendar_created` / `calendar_updated` are
+    what really landed on Google and `calendar_failures` what did not — if both
+    are 0, do not claim the calendar changed.
+
+    Args:
+        workspace_id: The workspace the task belongs to.
+        task_id: The task's id, from list_tasks.
+        start: The start time, ISO 8601 in the user's LOCAL time, e.g.
+            "2026-09-03T14:00".
+        duration_minutes: Optional length in minutes. Omit to use the task's own
+            planned estimate.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        task = store.tasks.get(task_id)
+        if task is None:
+            return {"status": "error", "scheduled": False,
+                    "error_message": f"No task with id {task_id!r} in this workspace."}
+        tz = _workspace_zone(store)
+        begin = _parse_local_to_naive_utc(start, tz)
+        if begin is None:
+            return {"status": "error", "scheduled": False,
+                    "error_message": f"I couldn't read {start!r} as a time. {_LOCAL_FORMAT_HINT}"}
+        now = now_naive()
+        if begin < now:
+            return {
+                "status": "error",
+                "scheduled": False,
+                "error_message": (f"{_fmt_local_day_time(begin, tz)} is already past. "
+                                  f"Pick a time still ahead of us."),
+            }
+
+        # Length: the task's own estimate is the default, so an explicit
+        # placement never silently resizes the work. min_block_minutes is the
+        # stored fallback when no estimate was ever captured.
+        if duration_minutes is None:
+            minutes = int(task.estimate_minutes or task.min_block_minutes or 30)
+            duration_source = "task_estimate" if task.estimate_minutes else "task_min_block"
+        else:
+            problem = _duration_error(duration_minutes)
+            if problem:
+                return {"status": "error", "scheduled": False, "error_message": problem}
+            minutes = int(duration_minutes)
+            duration_source = "requested"
+
+        # An existing session for this task is moved, not duplicated.
+        existing = sorted(
+            (b for b in store.blocks.values()
+             if b.task_id == task_id and b.status in _MOVABLE_BLOCK_STATUSES),
+            key=lambda b: b.starts_at,
+        )
+        if existing:
+            block = existing[0]
+            result = _place_block(store, workspace_id, block, begin, minutes, tz,
+                                  {b.id for b in existing})
+            if result.get("status") != "success":
+                result["scheduled"] = False
+                return result
+            result["scheduled"] = True
+            result["moved_existing"] = True
+            result["duration_source"] = duration_source
+            result["calendar_created"] = 0
+            return result
+
+        end = begin + timedelta(minutes=minutes)
+        hard, soft = _clashes_for(store, tz, begin, end, ())
+        if hard:
+            names = _join_times(c["title"] for c in hard)
+            return {
+                "status": "error",
+                "scheduled": False,
+                "error_message": (f"That time runs into {names}. Nothing scheduled — "
+                                  f"pick another time or clear that first."),
+                "clashes": hard,
+            }
+
+        block = Block(
+            id=f"blk_{uuid.uuid4().hex[:12]}",
+            workspace_id=workspace_id,
+            task_id=task_id,
+            starts_at=begin,
+            ends_at=end,
+            # gcal_event_id stays None until the mirror below really creates one.
+        )
+        store.commit_blocks([block])
+
+        from src.api.calendar_mirror import mirror_commit
+
+        mirror = mirror_commit(store, workspace_id, [block])
+        return {
+            "status": "success",
+            "scheduled": True,
+            "moved_existing": False,
+            "block_id": block.id,
+            "task_id": task_id,
+            "title": task.title,
+            "new_start": block.starts_at.isoformat(),
+            "new_end": block.ends_at.isoformat(),
+            "new_start_local": _fmt_local_day_time(block.starts_at, tz),
+            "duration_minutes": minutes,
+            "duration_source": duration_source,
+            "calendar_created": mirror.created,
+            "calendar_updated": 0,
+            "calendar_failures": len(mirror.failures),
+            "overlaps_soft": soft,
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "scheduled": False, "error_message": str(e)}
+
+
 # The tool set exposed to the agent. Keep small (ADK guidance: ~10-20 max).
 # Calendar writes are two-phase: the propose_* tools only ask; the *_confirmed
 # tools execute and must never be called before the user answers yes. The read
@@ -1027,4 +1472,13 @@ ALL_TOOLS = [
     # separate, real calendar-update count.
     list_tasks,
     rename_task,
+    # P20-02: explicit placement — the user names the time, so the intent is
+    # unambiguous and these are DIRECT writes like rename_task (no confirm dance,
+    # not "*_confirmed", so the confirm-gate leaves them alone). They are what
+    # stands between "move that to Thursday" and telling the user their planner
+    # can only ever use the next free slot. Truthfulness comes from returning the
+    # real old/new times, a real clash list on refusal, and separate real
+    # calendar counts.
+    move_session,
+    schedule_task_at,
 ]

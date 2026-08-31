@@ -194,6 +194,65 @@ def mirror_rename(store, workspace_id: str, blocks_or_ids, new_title: str) -> Mi
     return result
 
 
+def mirror_move(store, workspace_id: str, blocks_or_ids) -> MirrorResult:
+    """Patch the start/end of the Google Calendar events for blocks that MOVED.
+
+    Runs strictly AFTER the internal move, which already stands unconditionally.
+    For each block that HAS a `gcal_event_id` (an id WE stored), patch that
+    event's `start`/`end` to the block's CURRENT `starts_at`/`ends_at` — read
+    off the block itself, never from a caller-supplied time, so the calendar can
+    only ever be told what the store already believes. Patch rather than
+    delete+recreate: the event keeps its identity, its invitees and its place in
+    the user's calendar history.
+
+    Blocks with no id are skipped: an event we never created is never touched.
+    Best-effort exactly like the other mirrors — a CalendarUnavailable is caught,
+    logged and swallowed, so a calendar failure NEVER undoes or blocks the move;
+    the block keeps its id and the patch stays retryable.
+
+    Args:
+        store: The workspace store (tokens + block lookup).
+        workspace_id: The workspace whose calendar to write to.
+        blocks_or_ids: Block objects, or block-id strings, that just moved.
+
+    Returns:
+        A MirrorResult whose `updated` is the count of events that truly got the
+        new times, plus any failure reasons — so the caller states two separate
+        truths and never claims a calendar change that did not happen.
+    """
+    result = MirrorResult()
+    blocks = _resolve_blocks(store, blocks_or_ids)
+    to_patch = [b for b in blocks if getattr(b, "gcal_event_id", None)]
+    if not to_patch:
+        return result
+
+    tokens = store.get_google_tokens()
+    if not gcal.has_calendar_scope(tokens):
+        # Not connected: nothing on Google to move. The internal move stands.
+        return result
+
+    for b in to_patch:
+        event_id = b.gcal_event_id
+        try:
+            _event, tokens = gcal.patch_event(
+                tokens,
+                event_id=event_id,
+                start_iso=b.starts_at.isoformat(),
+                end_iso=b.ends_at.isoformat(),
+            )
+            # Persist any refreshed access token immediately (same discipline as
+            # mirror_commit) so a refresh mid-batch is not lost.
+            store.set_google_tokens(tokens)
+            result.updated += 1
+        except gcal.CalendarUnavailable as e:
+            logger.warning("calendar mirror: move failed for event %s: %s", event_id, e)
+            result.failures.append(str(e))
+        except Exception as e:  # pragma: no cover - defensive, never break the move
+            logger.warning("calendar mirror: move error for event %s: %s", event_id, e)
+            result.failures.append(str(e))
+    return result
+
+
 def mirror_cancel(store, workspace_id: str, blocks_or_ids) -> MirrorResult:
     """Delete the Google Calendar events for blocks being dropped/cancelled.
 
