@@ -67,6 +67,18 @@ struct FocusScreen: View {
         .onChange(of: controller.needsSignIn) { _, dead in
             if dead { onSignedOut() }
         }
+        // A finish with nothing to celebrate has no way out: the celebration
+        // cover is this screen's only dismisser, and `.finished` renders no
+        // controls. Done after a few seconds measures zero whole minutes, the
+        // server resolves no completion, `recordedOutcome` stays nil, and the
+        // screen froze right here (user report, 2026-09-01). Close instead;
+        // Today re-reads and tells the truth about what was (not) recorded.
+        // Celebration stays earned: this fires only when there is none.
+        .onChange(of: controller.stage) { _, stage in
+            if stage == .finished, controller.recordedOutcome == nil {
+                onClose()
+            }
+        }
         .fullScreenCover(item: Binding(
             get: { controller.recordedOutcome },
             set: { if $0 == nil { controller.dismissOutcome() } }

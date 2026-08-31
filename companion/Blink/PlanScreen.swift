@@ -323,14 +323,19 @@ struct PlanDayTimeline: View {
                         .accessibilityHidden(true)
                 }
 
-                // placed sessions
-                ForEach(day.blocks) { block in
-                    let top = yFor(block.startMinute)
-                    let h = max(44, yFor(block.endMinute) - top)
-                    PlanBlockChip(block: block, clock: clock)
-                        .frame(width: laneW, height: h)
-                        .position(x: laneX + laneW / 2, y: top + h / 2)
-                        .id(block.id)
+                // placed sessions. Chips carry a 44pt legibility floor, so two
+                // short back-to-back sessions inflated to that floor can cover
+                // the same pixels even though their times never overlap (the
+                // 07:00 pile-up, user screenshot 2026-09-01). `chipFrames`
+                // resolves the collision: each chip starts at its honest time
+                // position unless the previous chip's inflated bottom is lower,
+                // in which case it slides just below. Times on the chip stay
+                // the truth; only the pixels yield.
+                ForEach(chipFrames(), id: \.block.id) { placed in
+                    PlanBlockChip(block: placed.block, clock: clock)
+                        .frame(width: laneW, height: placed.height)
+                        .position(x: laneX + laneW / 2, y: placed.top + placed.height / 2)
+                        .id(placed.block.id)
                 }
 
                 // the now-line, only when now is genuinely inside this day
@@ -381,6 +386,24 @@ struct PlanDayTimeline: View {
 
     private func yFor(_ minute: Int) -> CGFloat {
         CGFloat(minute - day.window.startMinute) / CGFloat(day.window.span) * totalHeight
+    }
+
+    /// The chips' resolved frames: honest time position, 44pt legibility floor,
+    /// and no two chips ever covering the same pixels. Sorted by start; a chip
+    /// whose natural top sits above the previous chip's inflated bottom is
+    /// nudged down below it (4pt breath), so short adjacent sessions stack
+    /// instead of piling onto each other.
+    private func chipFrames() -> [(block: PlanBlock, top: CGFloat, height: CGFloat)] {
+        var frames: [(block: PlanBlock, top: CGFloat, height: CGFloat)] = []
+        var lastBottom: CGFloat = -.greatestFiniteMagnitude
+        for block in day.blocks.sorted(by: { $0.startMinute < $1.startMinute }) {
+            let natural = yFor(block.startMinute)
+            let height = max(44, yFor(block.endMinute) - natural)
+            let top = max(natural, lastBottom + 4)
+            frames.append((block, top, height))
+            lastBottom = top + height
+        }
+        return frames
     }
 
     private func hourLabel(_ hour: Int) -> String {
