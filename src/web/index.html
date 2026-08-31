@@ -218,6 +218,21 @@
         <p class="said" id="p-said" aria-live="polite"></p>
         <p class="why" id="p-why"></p>
         <div id="p-extra"></div>
+        <!-- Replay (2026-09-01): plays the last audio Blink produced, again,
+             from the audio already fetched — never a second TTS request.
+             Present ONLY while there is something to replay; app.js
+             (createReplay) toggles [hidden] from createVoice's state. Styles
+             live in conversation.css beside the surface it belongs to. -->
+        <div class="replay-row" id="replay-row" hidden>
+          <button class="dock-btn replay-btn" id="replay" type="button"
+                  aria-label="Play that again" title="Play that again">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="3 4 3 10 9 10"></polyline>
+              <path d="M4.6 15a8.5 8.5 0 1 0 1.8-8.9L3 10"></path>
+            </svg>
+          </button>
+        </div>
       </div>
 
       <!-- Sign-in wall (auth gate): shown only when data-auth="out". The eyes

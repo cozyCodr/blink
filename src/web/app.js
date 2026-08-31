@@ -379,6 +379,9 @@
     function clearTimers() {
       timers.forEach(clearTimeout); timers = []; activeType = null;
       pExtra.classList.remove("veil");   // never strand a hidden control
+      // …nor a waiting caret: every mode entry passes through here, and the
+      // synced path re-arms it for its own reply (see speakSyncedNow).
+      pSaid.classList.remove("awaiting");
     }
     function later(fn, ms) { var t = setTimeout(fn, ms); timers.push(t); return t; }
 
@@ -898,15 +901,33 @@
       try {
         var u = new URL(String(url));
         if (u.protocol !== "https:" && u.protocol !== "http:") return null;
-        return { href: u.href, domain: u.hostname.replace(/^www\./, "") };
+        return {
+          href: u.href,
+          domain: u.hostname.replace(/^www\./, ""),
+          redirect: REDIRECT_HOST.test(u.hostname) ||
+                    u.pathname.indexOf("/grounding-api-redirect/") === 0,
+        };
       } catch (_) { return null; }
+    }
+    /* Grounding URLs are REDIRECTS: their host is the search service, not the
+       source, so labelling a chip with it says "vertexaisearch.cloud.google.com"
+       for every result and names nothing. The source's own `title` is the
+       label; the host is the fallback only when the host is really the
+       source's. When neither is available the chip says the one true thing
+       left — "Source" — rather than inventing a name for it. */
+    var REDIRECT_HOST = /(^|\.)vertexaisearch\.cloud\.google\.com$/i;
+    function sourceLabel(s, d) {
+      var title = (s && typeof s.title === "string") ? s.title.trim() : "";
+      if (title) return title;
+      if (d.domain && !d.redirect) return d.domain;
+      return "Source";
     }
     function applySearch(sources, query) {
       var cited = [];
       (Array.isArray(sources) ? sources : []).forEach(function (s) {
         if (!s || typeof s !== "object" || !s.url) return;
         var d = artDomain(s.url);
-        if (d) cited.push(d);
+        if (d) cited.push({ href: d.href, label: sourceLabel(s, d) });
       });
       if (!cited.length) return;
       var wrap = mk("div", "search-art");
@@ -918,8 +939,12 @@
       }
       var row = mk("div", "source-chips");
       cited.forEach(function (c) {
-        var chip = mk("a", "source-chip", c.domain);
-        chip.href = c.href;
+        var chip = mk("a", "source-chip");
+        // The label rides its own span so CSS can ellipsis a long title;
+        // the string itself is never cut (artifacts.css owns the truncation).
+        chip.appendChild(mk("span", "source-chip-label", c.label));
+        chip.href = c.href;                 // validated http/https, above
+        chip.title = c.label;
         chip.target = "_blank";
         chip.rel = "noopener noreferrer";
         row.appendChild(chip);
@@ -1038,6 +1063,14 @@
       show();
 
       var spans = buildWordSpans(text);
+      /* A voiced reply's words start INVISIBLE and are revealed by the voice.
+         Until the first word lands there is nothing on screen but whatever
+         artifacts came with it — which is exactly the "one trace line and
+         nothing else, looks broken" the user reported (2026-09-01). The
+         caret says the reply is still coming, and leaves the instant the
+         first word does. conversation.css owns the mark. */
+      pSaid.classList.add("awaiting");
+      function unwait() { pSaid.classList.remove("awaiting"); }
       // P11-08: decorate BEFORE the reveal starts. Wrapping runs of `.w` spans
       // leaves the leaves (and their classes) alone, so revealUpTo below is
       // completely unaffected; a missing/empty `refs` is simply a no-op.
@@ -1054,7 +1087,7 @@
           shown++;
           lastReveal = performance.now();
         }
-        if (shown !== before) keepLatestVisible();
+        if (shown !== before) { unwait(); keepLatestVisible(); }
       }
 
       var run = {
@@ -1063,9 +1096,12 @@
         revealAll: function () { revealUpTo(wordCount); },
       };
 
+      var startWatch = null;
       function finish() {
         if (finished) return;
         finished = true;
+        if (startWatch) { clearTimeout(startWatch); startWatch = null; }
+        unwait();
         if (sync === run) stopSynced(); else run.revealAll();
         // the prominent action lands once the words have, never over them
         try { applyActions(decor && decor.actions); } catch (_) {}
@@ -1104,7 +1140,58 @@
       // Hidden tab: rAF never fires there, so don't strand a frozen reveal —
       // land the full text now and let the audio keep playing.
       if (document.visibilityState === "hidden") { finish(); return; }
+      /* The voice never actually started (a stream that stalled before its
+         first sample, a blocked context). The reveal is driven by
+         currentTime, so it would sit at zero words forever and the reply
+         would read as a broken turn. After a short grace the words land on
+         their own: this only ever fires when there is NO voice, so it can
+         never show words ahead of one. */
+      startWatch = setTimeout(function () {
+        startWatch = null;
+        if (finished || sync !== run) return;
+        if (audio.currentTime > 0) return;   // the voice is moving; leave it alone
+        try { console.debug("[surface] audio never started — landing the words"); } catch (_) {}
+        finish();
+      }, 2600);
       run.raf = requestAnimationFrame(frame);
+    }
+
+    /* --- speakOver (2026-09-01): the voice catching up to words already on
+       screen. When TTS takes longer than deliverReply's budget the fallback
+       types the reply, and the audio that lands a moment later used to be
+       THROWN AWAY — which is what "voice only speaks the first reply" looked
+       like from the outside. It is played instead. No reveal to drive (every
+       word is already shown, and it is the same string the voice speaks), so
+       this owns only the playback and the eyes' talk amplitude. */
+    function speakOver(audio, token) {
+      var seq = gate(token, "speakOver");
+      if (seq === null) { dropAudio(audio); return; }
+      var raf = null;
+      function stopAmp() {
+        if (raf) { cancelAnimationFrame(raf); raf = null; }
+        if (eyesEl) {
+          eyesEl.classList.remove("talking-live");
+          eyesEl.style.setProperty("--talk-amp", "0");
+        }
+      }
+      audio.addEventListener("ended", stopAmp);
+      if (eyesEl && !reduce) eyesEl.classList.add("talking-live");
+      function frame() {
+        // The turn moved on: the voice goes with it, exactly as it does in
+        // the synced path — the room never hears a reply the screen dropped.
+        if (!holdsRender(seq)) { dropAudio(audio); stopAmp(); return; }
+        if (audio.ended) { stopAmp(); return; }
+        if (eyesEl && !reduce) {
+          var amp = 0.06 + 0.05 * Math.abs(Math.sin(audio.currentTime * 7.3));
+          eyesEl.style.setProperty("--talk-amp", amp.toFixed(3));
+        }
+        raf = requestAnimationFrame(frame);
+      }
+      try {
+        var p = audio.play();
+        if (p && p.catch) p.catch(function () { stopAmp(); });
+      } catch (_) { stopAmp(); return; }
+      if (document.visibilityState !== "hidden") raf = requestAnimationFrame(frame);
     }
 
     // Tab hidden mid-reveal (P7-01 fix): rAF + timers freeze in hidden tabs
@@ -1254,7 +1341,8 @@
 
     return {
       compose: compose, live: live, setLiveText: setLiveText,
-      speak: speak, speakSynced: speakSynced, stopSynced: stopSynced,
+      speak: speak, speakSynced: speakSynced, speakOver: speakOver,
+      stopSynced: stopSynced,
       abort: abort,              // interrupt: kill this turn's words with its voice
       claim: claimRender,        // the ONE way to get a paint claim: start a turn
       holds: holdsRender,        // …and a painter must still hold it to paint
@@ -1294,6 +1382,34 @@
       });
     }
     return { keys: keys, attach: attach };
+  }
+
+  /* =====================================================================
+     Replay (2026-09-01) — one quiet circle under the reply that plays the
+     last audio Blink produced, again. It re-uses the audio already in hand
+     (createVoice owns that; see replay()), so it never costs a second TTS
+     request and never re-synthesizes a different take of the same words.
+
+     It is PRESENT only while there is something to replay: createVoice
+     publishes that state, and it goes the moment a new turn cuts the voice.
+     It never takes focus on its own, and it blurs after a press so the ring
+     doesn't sit on the reply. Its click is stopped short of the surface's
+     click-to-dismiss, which would otherwise throw the reply away.
+     Maps to <ReplayButton visible={...} onReplay={...} /> in React.
+     ===================================================================== */
+  function createReplay(onReplay) {
+    var row = document.getElementById("replay-row");
+    var btn = document.getElementById("replay");
+    if (!row || !btn) return { set: function () {} };
+    btn.addEventListener("click", function (e) {
+      e.preventDefault();
+      e.stopPropagation();          // a replay is not a dismiss
+      try { btn.blur(); } catch (_) {}
+      if (onReplay) onReplay();
+    });
+    return {
+      set: function (on) { row.hidden = !on; },
+    };
   }
 
   /* =====================================================================
@@ -1379,7 +1495,15 @@
                                        : "Type your message · Enter to send");
       stickyHint = null;
       setHint(h);
-      surface.compose(onCommit, text || "", claim);
+      // NEVER RENDER THE RAW TRANSCRIPT (user rule, already law on iOS). The
+      // field is where a released transcript is reviewed; what the controller
+      // needs to know is whether what got sent is still the RECOGNIZER's
+      // words. Sent unchanged, it is spoken and must not echo; edited (or
+      // typed into an empty field), it is theirs and echoes like any typing.
+      var prefill = (text || "").trim();
+      surface.compose(function (out) {
+        onCommit(out, { spoken: !!prefill && String(out).trim() === prefill });
+      }, text || "", claim);
     }
 
     // Released -> either commit the transcript now (auto-send on, non-empty)
@@ -1387,7 +1511,9 @@
     // the double-submit guard and the startTurn interrupt all apply.
     function commitOrEdit(text) {
       var v = (text || "").trim();
-      if (v && autoSendOn()) { onCommit(v); return; }
+      // Auto-send: these are the recognizer's words, unseen and unreviewed,
+      // so the turn is marked SPOKEN and the echo never shows them.
+      if (v && autoSendOn()) { onCommit(v, { spoken: true }); return; }
       toEditable(v);
     }
 
@@ -5134,6 +5260,7 @@
     try { ctx = new AC(); } catch (_) { return null; }
 
     var pending = [];        // AudioBuffers waiting for play()
+    var kept = [];           // EVERY decoded buffer, in order, for replay()
     var sources = [];        // scheduled nodes, so pause() can cut them
     var startedAt = null;    // ctx time the first buffer was scheduled for
     var nextAt = 0;          // ctx time the next buffer goes at
@@ -5198,6 +5325,9 @@
       for (var i = 0; i < n; i++) ch[i] = dv.getInt16(i * 2, true) / 32768;
       bufferedSec += buf.duration;
       pending.push(buf);
+      // Replay (2026-09-01) keeps the decoded audio, never a second /tts call.
+      // pending is drained by pump(); kept is the whole reply, in order.
+      kept.push(buf);
       pump();
     }
 
@@ -5244,6 +5374,10 @@
       markComplete: markComplete,
       onPause: function (fn) { onPause = fn; },
       hasAudio: function () { return bufferedSec > 0; },
+      // The audio this player received, for replaying it later. Read at
+      // REPLAY time, never at adopt time: this player is handed over on its
+      // first chunk, so the rest of the reply is still arriving behind it.
+      snapshot: function () { return { rate: sampleRate, buffers: kept.slice() }; },
       addEventListener: function (name, fn) { if (name === "ended" && fn) endedFns.push(fn); },
       removeEventListener: function () {},
     };
@@ -5271,9 +5405,92 @@
     return api;
   }
 
+  /* --- createBufferPlayer (replay, 2026-09-01) --------------------------
+     Plays a list of already-decoded PCM buffers straight through. This is
+     what the replay control uses: the audio Blink already produced, played
+     again, with no second trip to /tts. It is deliberately NOT a full
+     <audio> stand-in — nothing reveals words against a replay, so it needs
+     only play/pause. Its context closes itself when the audio runs out, so
+     a replayed reply never leaves one open behind it. */
+  function createBufferPlayer(rate, buffers) {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC || !buffers || !buffers.length) return null;
+    var ctx;
+    try { ctx = new AC(); } catch (_) { return null; }
+    var nodes = [];
+    var stopped = false;
+    var timer = null;
+
+    function shut() {
+      if (stopped) return;
+      stopped = true;
+      if (timer) { clearTimeout(timer); timer = null; }
+      nodes.forEach(function (n) { try { n.stop(); } catch (_) {} });
+      nodes = [];
+      try { if (ctx.close) ctx.close(); } catch (_) {}
+    }
+    function begin() {
+      if (stopped) return;
+      var at = ctx.currentTime + 0.05;
+      buffers.forEach(function (b) {
+        if (!b) return;
+        var src = ctx.createBufferSource();
+        src.buffer = b;                       // buffers are context-independent
+        src.connect(ctx.destination);
+        try { src.start(at); } catch (_) { return; }
+        at += b.duration;
+        nodes.push(src);
+      });
+      timer = setTimeout(shut, Math.max(0, (at - ctx.currentTime) * 1000) + 150);
+    }
+    function play() {
+      if (stopped) return Promise.reject(new Error("stopped"));
+      var p = null;
+      try { p = ctx.resume ? ctx.resume() : null; } catch (_) { p = null; }
+      if (p && p.then) return p.then(begin);
+      begin();
+      return Promise.resolve();
+    }
+    return { play: play, pause: shut };
+  }
+
   function createVoice() {
     var currentAudio = null;   // so a new reply / interrupt cuts off the previous one
     var token = 0;             // bumped by stop(); stale prepares resolve null
+
+    /* --- Replay (2026-09-01) --------------------------------------------
+       "There is audio to replay" is a piece of state the controller can ask
+       about and subscribe to, so the control can be present ONLY while it is
+       true. It becomes true when a reply's audio is adopted (i.e. actually
+       played), and false the moment a new turn cuts the voice — replaying a
+       reply the user has already moved past would be replaying the past. */
+    var replayable = null;     // { make(): player } or null
+    var onReplayable = null;   // controller subscriber
+    function notifyReplayable() {
+      if (!onReplayable) return;
+      try { onReplayable(!!replayable); } catch (_) {}
+    }
+    function setReplayable(audio) {
+      var next = null;
+      if (audio && typeof audio.snapshot === "function") {
+        // Streamed PCM: snapshot at replay time, so a reply adopted on its
+        // first chunk replays in full rather than replaying its first breath.
+        next = { make: function () {
+          var snap = null;
+          try { snap = audio.snapshot(); } catch (_) { snap = null; }
+          if (!snap || !snap.buffers || !snap.buffers.length) return null;
+          return createBufferPlayer(snap.rate, snap.buffers);
+        } };
+      } else if (audio && typeof audio.play === "function" && "src" in audio) {
+        // Whole-file <audio>: rewind the element we already loaded.
+        next = { make: function () {
+          try { audio.pause(); audio.currentTime = 0; } catch (_) {}
+          return audio;
+        } };
+      }
+      replayable = next;
+      notifyReplayable();
+    }
 
     function stop() {
       token++;
@@ -5281,10 +5498,31 @@
         try { currentAudio.pause(); } catch (_) {}
         currentAudio = null;
       }
+      if (replayable) { replayable = null; notifyReplayable(); }
     }
 
     // Register the audio the controller decided to play, so stop() owns it.
-    function adopt(audio) { currentAudio = audio; }
+    function adopt(audio) {
+      currentAudio = audio;
+      setReplayable(audio);
+    }
+
+    // Play the last audio Blink produced, again. Never re-requests TTS.
+    function replay() {
+      if (!replayable) return false;
+      var player = null;
+      try { player = replayable.make(); } catch (_) { player = null; }
+      if (!player) return false;
+      if (currentAudio && currentAudio !== player) {
+        try { currentAudio.pause(); } catch (_) {}
+      }
+      currentAudio = player;
+      try {
+        var p = player.play();
+        if (p && p.catch) p.catch(function () { /* blocked — the words stay */ });
+      } catch (_) { return false; }
+      return true;
+    }
 
     function voiceOn() {
       return !!(window.FocusSettings && window.FocusSettings.get("voiceEnabled"));
@@ -5377,13 +5615,25 @@
         // Setting may have been switched off during the request; respect it.
         if (!window.FocusSettings || !window.FocusSettings.get("voiceEnabled")) return null;
         return new Promise(function (resolve) {
+          var done = false;
+          function settle(v) { if (!done) { done = true; resolve(v); } }
           try {
             var audio = new Audio("data:audio/mpeg;base64," + res.audio_base64);
-            audio.addEventListener("loadedmetadata", function () {
-              resolve(tok === token ? { audio: audio, duration: audio.duration } : null);
-            });
-            audio.addEventListener("error", function () { resolve(null); });
-          } catch (_) { resolve(null); /* no Audio support — text only */ }
+            // preload="auto" plus a second readiness event: a data: URL that
+            // never fires loadedmetadata used to leave this promise hanging
+            // forever, and a hanging prepare is a permanently silent reply.
+            try { audio.preload = "auto"; } catch (_) {}
+            function ready() {
+              settle(tok === token ? { audio: audio, duration: audio.duration } : null);
+            }
+            audio.addEventListener("loadedmetadata", ready);
+            audio.addEventListener("canplaythrough", ready);
+            audio.addEventListener("error", function () { settle(null); });
+            // Last resort: the bytes are in hand, so play them even if the
+            // element never announced itself. Silence is the worse failure.
+            setTimeout(ready, 6000);
+            try { audio.load(); } catch (_) {}
+          } catch (_) { settle(null); /* no Audio support — text only */ }
         });
       }).catch(function (e) {
         console.debug("[voice] /tts request failed — reply stays text-only", e);
@@ -5391,7 +5641,12 @@
       });
     }
 
-    return { prepare: prepare, stop: stop, adopt: adopt };
+    return {
+      prepare: prepare, stop: stop, adopt: adopt,
+      replay: replay,
+      canReplay: function () { return !!replayable; },
+      onReplayable: function (fn) { onReplayable = fn; notifyReplayable(); },
+    };
   }
 
   /* =====================================================================
@@ -5923,6 +6178,11 @@
       } catch (_) { /* history unavailable — leave the URL as-is */ }
     })();
     var voice = createVoice();
+    // The replay circle appears with the audio and leaves with it. Both
+    // directions come from createVoice, so the control can never offer a
+    // replay of something that is no longer there to replay.
+    var replayCtl = createReplay(function () { voice.replay(); });
+    voice.onReplayable(function (on) { replayCtl.set(on); });
     sleepCtl = createSleep(appEl, agent, eyes);
 
     function setHint(t) { hint.set(t); }
@@ -6148,7 +6408,20 @@
       voice.prepare(text).then(function (res) {
         clearTimeout(timer);
         if (tok !== replyToken) { discard(res); try { console.debug("[reply]", tok, "superseded, dropped"); } catch (_) {} return; }
-        if (settled) { discard(res); return; }  // fallback already typing — don't play
+        if (settled) {
+          /* The fallback already typed this reply, and audio arrived after
+             it. This used to DISCARD the audio, so any reply whose TTS took
+             longer than the budget came back silent while the toggle
+             promised a voice — the "only the first reply speaks" report
+             (2026-09-01). The voice speaks it instead: same string, already
+             on screen, so nothing is revealed ahead of the words. */
+          if (!res || !res.audio) return;
+          if (!surface.holds(rseq)) { discard(res); return; }
+          try { console.debug("[reply]", tok, "audio late -> speaking over the words"); } catch (_) {}
+          voice.adopt(res.audio);              // stop() (and replay) own it now
+          surface.speakOver(res.audio, rseq);
+          return;
+        }
         if (!res || !res.audio) { fallback(); return; }
         if (!surface.holds(rseq)) {            // a newer turn owns the surface
           settled = true;
@@ -6209,10 +6482,46 @@
       };
     }
 
+    /* --- stripSourceFooter (2026-09-01) ---------------------------------
+       Sources are CHIPS, never prose. The server no longer appends a URL
+       footer to the reply, but an older deployment or a model that wrote one
+       anyway would otherwise put hundreds of characters of redirect URL on
+       screen (and, in the fallback type-on, type them out one at a time).
+       So the displayed text loses an obvious trailing "Sources:" block, and
+       any trailing bare-URL lines under it.
+
+       Conservative on purpose: it only cuts a tail that actually contains a
+       URL, and never returns an empty reply — a defence that could delete a
+       real sentence would be worse than the blob it removes. */
+    function stripSourceFooter(text) {
+      if (typeof text !== "string" || !text) return text;
+      var out = text;
+      var m = out.match(/\n[ \t]*(?:[*_#>\-\s]*)sources?[ \t]*:?[*_]*[ \t]*\n?[\s\S]*$/i);
+      if (m && /https?:\/\//i.test(m[0])) out = out.slice(0, m.index);
+      // Then any trailing lines that are nothing but a URL (optionally
+      // bulleted or numbered). Bounded loop: one pass per trailing line.
+      var lines = out.split("\n");
+      while (lines.length > 1) {
+        var last = lines[lines.length - 1];
+        if (!/^[ \t]*(?:[-*•]\s*|\[\d+\]\s*|\d+[.)]\s*)?<?https?:\/\/\S+>?[ \t]*$/i.test(last)) break;
+        lines.pop();
+      }
+      // …and the bare "Sources:" heading those lines hung under.
+      if (lines.length > 1 &&
+          /^[ \t]*(?:[*_#>\-\s]*)sources?[ \t]*:?[*_]*[ \t]*$/i.test(lines[lines.length - 1])) {
+        lines.pop();
+      }
+      out = lines.join("\n").replace(/\s+$/, "");
+      return out ? out : text;
+    }
+
     function dispatch(res) {
       endRequest();
       dimEcho();                        // the reply is rendering: recede
       if (!res || !res.type) return fail();
+      // One place, before any branch reads it: the same string is spoken,
+      // shown, and pushed to history, so it is cleaned exactly once.
+      if (typeof res.text === "string") res.text = stripSourceFooter(res.text);
 
       // A direct write tool (move_session, schedule_task_at, rename_task)
       // answers as a plain `message`, so the plan can change with no
@@ -6784,12 +7093,18 @@
       }).catch(function () { /* quiet; the interview can wait for a reload */ });
     }
 
-    function sendMessage(text) {
+    function sendMessage(text, opts) {
       if (busy) { hint.pulse("One at a time, still thinking…"); return; }
       abandonOnboarding();              // talking over the interview ends it
       startTurn();                      // a new turn always cuts off the old reply
       stage.noteIntent(text);           // "show my week"? arm the reveal (P7-05)
-      showEcho(text);
+      /* THE ECHO IS FOR TYPING ONLY (user rule, 2026-09-01; already law on
+         iOS). A typed line echoes because the user wrote it. A SPOKEN one
+         must not, because the echo would be the recognizer's guess at their
+         sentence, and every mis-hear would be published back at them. The
+         turn still happens on the words the recognizer heard; it is the
+         RENDERING of them that is wrong. */
+      if (opts && opts.spoken) clearEcho(); else showEcho(text);
       history.push({ role: "user", content: text });
       agent.set("thinking");
       surface.pending(turn);

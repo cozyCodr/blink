@@ -60,8 +60,13 @@
 
 /* ---- (d) Search artifact: the query line + source chips -------------------
    The query renders ONLY when the reply data carries it (app.js gates it);
-   the chips carry a favicon-stand-in dot and the bare domain, each a real
-   link opening in a new tab. */
+   the chips carry a favicon-stand-in dot and the source's own NAME (its
+   title, falling back to its host — never the grounding redirect's host,
+   which names nothing), each a real link opening in a new tab.
+
+   A title can be a full headline, so the chip caps its width and ELLIPSES.
+   The string itself is never cut: the whole title stays in the DOM and in
+   the tooltip, and the row keeps its shape. */
 .search-art { display: flex; flex-direction: column; gap: 8px; }
 .search-query {
   display: inline-flex; align-items: center; gap: 8px;
@@ -82,7 +87,12 @@
   text-decoration: none;
   background: var(--control); border: 1px solid var(--line);
   border-radius: 999px; padding: 3px 10px;
+  max-width: 100%; min-width: 0;
   transition: border-color 0.2s ease, color 0.2s ease;
+}
+.source-chip-label {
+  max-width: 18em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .source-chip::before {
   content: ""; width: 6px; height: 6px; border-radius: 50%; flex: none;
