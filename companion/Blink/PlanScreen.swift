@@ -334,6 +334,12 @@ struct PlanDayTimeline: View {
                 ForEach(chipFrames(), id: \.block.id) { placed in
                     PlanBlockChip(block: placed.block, clock: clock)
                         .frame(width: laneW, height: placed.height)
+                        // Belt and braces: content taller than its frame bleeds
+                        // out of it in SwiftUI, which is what drew one chip's
+                        // text over its neighbour. `chipFrames` sizes the floor
+                        // to the content, and this guarantees the pixels can
+                        // never leave the box even if that estimate is off.
+                        .clipped()
                         .position(x: laneX + laneW / 2, y: placed.top + placed.height / 2)
                         .id(placed.block.id)
                 }
@@ -388,18 +394,32 @@ struct PlanDayTimeline: View {
         CGFloat(minute - day.window.startMinute) / CGFloat(day.window.span) * totalHeight
     }
 
-    /// The chips' resolved frames: honest time position, 44pt legibility floor,
-    /// and no two chips ever covering the same pixels. Sorted by start; a chip
-    /// whose natural top sits above the previous chip's inflated bottom is
-    /// nudged down below it (4pt breath), so short adjacent sessions stack
-    /// instead of piling onto each other.
+    /// The chips' resolved frames: honest time position, a legibility floor
+    /// sized to what the chip actually has to say, and no two chips ever
+    /// covering the same pixels.
+    ///
+    /// THE FLOOR IS CONTENT-SIZED, not a flat 44. A chip carries a title line,
+    /// a time line, and (when the session was missed or partly done) a status
+    /// line, inside 8pt of vertical padding. At 58pt to the hour a 10-minute
+    /// session is under 10pt tall, so every short chip hits this floor — and a
+    /// floor SHORTER than the content is what let one chip's text spill over
+    /// its neighbour (user screenshots, 2026-09-01). Sized here, clipped at the
+    /// call site.
+    ///
+    /// Then the collision pass: sorted by start, a chip whose natural top sits
+    /// above the previous chip's bottom slides just below it, with real breath
+    /// between. The TIMES PRINTED ON THE CHIP STAY THE TRUTH; only the pixels
+    /// yield, which is the honest trade — a 10-minute session cannot be drawn
+    /// to scale and still be read.
     private func chipFrames() -> [(block: PlanBlock, top: CGFloat, height: CGFloat)] {
         var frames: [(block: PlanBlock, top: CGFloat, height: CGFloat)] = []
         var lastBottom: CGFloat = -.greatestFiniteMagnitude
         for block in day.blocks.sorted(by: { $0.startMinute < $1.startMinute }) {
             let natural = yFor(block.startMinute)
-            let height = max(44, yFor(block.endMinute) - natural)
-            let top = max(natural, lastBottom + 4)
+            let hasStatusLine = block.status == .missed || block.status == .partial
+            let floor: CGFloat = hasStatusLine ? 72 : 54
+            let height = max(floor, yFor(block.endMinute) - natural)
+            let top = max(natural, lastBottom + 6)
             frames.append((block, top, height))
             lastBottom = top + height
         }
