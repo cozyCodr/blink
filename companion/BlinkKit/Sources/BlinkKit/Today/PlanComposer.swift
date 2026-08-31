@@ -396,6 +396,17 @@ public final class PlanComposer {
 
     /// One response type, one branch — the phone's copy of the web's dispatch.
     private func dispatch(_ res: TurnResponse) async {
+        // A direct write tool (a move, a placement, a rename) answers as a plain
+        // `message`, so the plan can change without a `planned`/`replanned`
+        // reply to announce it — which is exactly why Day and Week kept showing
+        // the old picture after a session was moved by asking. The server says
+        // so from the tools that actually ran; re-read on its word, whatever the
+        // reply type, and never infer it from the sentence.
+        defer {
+            if res.planChanged == true {
+                Task { await onPlanChanged?() }
+            }
+        }
         switch res.type {
         case "message":
             if let text = res.text {

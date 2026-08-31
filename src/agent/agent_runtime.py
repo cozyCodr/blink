@@ -195,6 +195,32 @@ def _text_of_event(event: Any) -> str:
     return "\n".join(out)
 
 
+#: The direct-write tools that can leave the plan different from how the
+#: clients last read it. Kept beside the trace because that is the only
+#: evidence we accept that a tool actually ran.
+_PLAN_WRITING_TOOLS = frozenset({
+    "move_session",
+    "schedule_task_at",
+    "rename_task",
+})
+
+
+def _mutated_plan(trace: List[Dict[str, str]]) -> bool:
+    """True when this turn ran a tool that can have CHANGED the plan.
+
+    Read off the trace, which is built from function_responses — evidence a
+    tool genuinely ran, never the model's sentence about it. Membership is by
+    name, and the list is deliberately explicit rather than a prefix rule: a
+    read that happens to be named like a write must not force a re-read, and a
+    new write must be added here consciously.
+
+    `*_confirmed` writes ride their own endpoints (`/calendar/events`,
+    `/reschedule`), whose replies already tell the clients to re-read, so they
+    are not needed here.
+    """
+    return any(e.get("tool") in _PLAN_WRITING_TOOLS for e in trace)
+
+
 def _summarize_tool_response(name: str, resp: Any) -> str:
     """A short, DETERMINISTIC summary line for one tool response (P20-01).
 
@@ -338,6 +364,8 @@ def run_chat_turn(
     confirm, tool_log, final_text, trace = _extract_from_events(events)
 
     if confirm is not None:
+        # A confirm PROPOSES; nothing has been written yet, so the plan cannot
+        # have changed and the clients must not re-read on it.
         decision_log.decision(
             "agent", workspace_id,
             f"tools=[{', '.join(tool_log)}] -> confirm ({confirm.get('field', '')})",
@@ -363,4 +391,13 @@ def run_chat_turn(
     # tool calls carries no `trace` key at all.
     if trace:
         out["trace"] = trace
+    # The plan may have MOVED under a plain message reply. A direct write tool
+    # (move_session, schedule_task_at, rename_task) answers as `type: "message"`,
+    # and the clients only re-read the plan on `planned`/`replanned` — so a
+    # session moved by asking left Day and Week showing yesterday's picture
+    # (user, 2026-09-01: "the app itself on day and week did not show the updated
+    # movement"). Say so here, from the trace, which is evidence a tool actually
+    # RAN: this is never guessed from the sentence.
+    if _mutated_plan(trace):
+        out["plan_changed"] = True
     return out

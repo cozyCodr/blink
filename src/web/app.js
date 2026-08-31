@@ -6214,6 +6214,14 @@
       dimEcho();                        // the reply is rendering: recede
       if (!res || !res.type) return fail();
 
+      // A direct write tool (move_session, schedule_task_at, rename_task)
+      // answers as a plain `message`, so the plan can change with no
+      // `planned`/`replanned` reply to announce it, and the horizon would keep
+      // drawing the old picture. The server sets plan_changed from the tools
+      // that GENUINELY ran, so re-read on its word rather than reading the
+      // sentence.
+      if (res.plan_changed && window.FocusRefresh) window.FocusRefresh();
+
       if (res.type === "message") {
         var reply = res.text || "…";
         history.push({ role: "assistant", content: reply });

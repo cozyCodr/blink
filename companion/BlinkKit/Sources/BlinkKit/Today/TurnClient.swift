@@ -237,10 +237,17 @@ public struct TurnResponse: Decodable, Sendable, Equatable {
     /// The moves, flattened; empty when the reply carried none.
     public var moveArtifacts: [TurnMoveArtifact] { moves ?? [] }
 
+    /// The server saw a direct write tool actually run this turn, so the plan
+    /// may differ from what this app last read. A plain `message` reply can
+    /// carry it (a moved or renamed session answers as one), which is why Day
+    /// and Week went stale after a move until this existed.
+    public let planChanged: Bool?
+
     enum CodingKeys: String, CodingKey {
         case type, text, question, session, artifacts, moves
         case blocksScheduled = "blocks_scheduled"
         case calendarNote = "calendar_note"
+        case planChanged = "plan_changed"
     }
 
     public init(from decoder: Decoder) throws {
@@ -256,6 +263,7 @@ public struct TurnResponse: Decodable, Sendable, Equatable {
         artifacts = (try? c.decodeIfPresent(TurnArtifacts.self, forKey: .artifacts)) ?? nil
         moves = (try? c.decodeIfPresent([TurnMoveArtifact].self, forKey: .moves)) ?? nil
         calendarNote = try c.decodeIfPresent(String.self, forKey: .calendarNote)
+        planChanged = try c.decodeIfPresent(Bool.self, forKey: .planChanged)
     }
 }
 
