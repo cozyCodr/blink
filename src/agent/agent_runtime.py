@@ -202,6 +202,14 @@ _PLAN_WRITING_TOOLS = frozenset({
     "move_session",
     "schedule_task_at",
     "rename_task",
+    # P20-03: create/delete. A deleted task or cancelled session is gone from
+    # the store immediately; without these the Day and Week views would keep
+    # rendering work that no longer exists anywhere else.
+    "create_task",
+    "delete_task",
+    "delete_tasks",
+    "cancel_session",
+    "cancel_sessions",
 })
 
 

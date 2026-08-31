@@ -161,6 +161,74 @@ class FakeStore:
         )
         return old_title
 
+    def delete_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Remove a task AND every block it owns; return what was really removed.
+
+        The counterpart to `add_task` (P20-03). A HARD removal, not a status
+        change: the plan payload publishes `store.tasks` and `store.blocks`
+        wholesale, so a task parked in the terminal `dropped` status would keep
+        showing up on Day and Week and would not read as deleted to the person
+        who asked for it to go. Deleting the record is the only thing that makes
+        the whole footprint disappear everywhere at once.
+
+        The caller owns validation and owns the Google Calendar side: the
+        removed Block objects come back (detached from the store but still
+        carrying their `gcal_event_id`) precisely so the caller can hand them to
+        `mirror_cancel` and delete the events we created.
+
+        Returns None when the id is unknown — the caller turns that into an
+        honest error rather than a fabricated success. On success returns
+        {"title", "task", "blocks"} with the REAL removed title and the REAL
+        removed blocks, so a reply states what happened, not what was intended.
+        """
+        t = self.tasks.pop(task_id, None)
+        if t is None:
+            return None
+        removed = [b for b in self.blocks.values() if b.task_id == task_id]
+        for b in removed:
+            self.blocks.pop(b.id, None)
+        self._publish_event(
+            "task_deleted",
+            {"task_id": task_id, "title": t.title, "blocks_removed": len(removed)},
+        )
+        return {"title": t.title, "task": t, "blocks": removed}
+
+    def delete_block(self, block_id: str) -> Optional[Block]:
+        """Remove ONE block, leaving its task alive as unscheduled work.
+
+        "Take it off my calendar but keep the task" (P20-03). Like
+        `delete_task` this is a hard removal rather than a status flip: a block
+        left as `cancelled` still rides the plan payload, so the session would
+        appear to survive its own cancellation.
+
+        When the owning task no longer has any session still standing (planned
+        or missed), its status falls back from `scheduled` to `ready` — real
+        unscheduled work again, exactly what `log_outcome` does when a session
+        ends without finishing the task. A task in any other status is left
+        alone; nothing is invented.
+
+        Returns the removed Block (still carrying its `gcal_event_id`, so the
+        caller can delete the calendar event we created), or None when the id is
+        unknown.
+        """
+        b = self.blocks.pop(block_id, None)
+        if b is None:
+            return None
+        t = self.tasks.get(b.task_id)
+        if t is not None:
+            still_standing = any(
+                o.task_id == b.task_id and o.status in ("planned", "missed")
+                for o in self.blocks.values()
+            )
+            if t.status == "scheduled" and not still_standing:
+                t.status = "ready"
+            t.updated_at = datetime.now(timezone.utc)
+        self._publish_event(
+            "block_deleted",
+            {"block_id": block_id, "task_id": b.task_id},
+        )
+        return b
+
     def add_constraint(self, c: Constraint):
         self.constraints[c.id] = c
         self._publish_event("constraint_added", {"constraint_id": c.id, "title": c.title})

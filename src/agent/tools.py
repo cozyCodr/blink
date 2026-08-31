@@ -1466,6 +1466,404 @@ def schedule_task_at(workspace_id: str, task_id: str, start: str,
         return {"status": "error", "scheduled": False, "error_message": str(e)}
 
 
+# --- P20-03: the rest of CRUD — create and delete -----------------------------
+# The agent could list, rename, place and move work, but it could not ADD a task
+# or REMOVE one, and had to tell the user so ("I don't have a tool to delete
+# tasks directly"). These tools close that hole. Like rename_task and
+# move_session they are DIRECT writes: a user naming the thing they want gone is
+# not ambiguous, and a confirm dance for "delete that" is friction, not safety.
+# Safety comes from precision instead — every return carries the REAL title(s)
+# removed, the REAL number of sessions cancelled and a SEPARATE real calendar
+# count, so the reply can always say exactly what just happened.
+#
+# Delete is a HARD removal, not a status flip. Task has a terminal `dropped`
+# status and Block has `cancelled`, but the plan payload publishes every task
+# and every block unfiltered, so a status change alone would leave the "deleted"
+# task sitting on Day and Week. Only removing the records makes it read as
+# deleted everywhere at once.
+
+# One call must not be able to empty a workspace by accident. A batch over this
+# is refused whole, with the limit named, rather than silently truncated.
+_MAX_BATCH_DELETE = 25
+
+
+def _delete_one_task(store, workspace_id: str, task_id: str) -> Dict[str, Any]:
+    """Delete one task + its sessions + their calendar events; report real counts.
+
+    The single unit shared by delete_task and delete_tasks, so the batch cannot
+    drift from the singular. Never raises for an unknown id: it returns
+    {"deleted": False, "reason": "not_found"} so a batch records that one item
+    honestly and carries on with the rest.
+    """
+    removed = store.delete_task(task_id)
+    if removed is None:
+        return {
+            "task_id": task_id,
+            "deleted": False,
+            "reason": "not_found",
+            "error_message": f"No task with id {task_id!r} in this workspace.",
+        }
+
+    # Local import avoids a module-load cycle: calendar_mirror imports
+    # _session_title from this module.
+    from src.api.calendar_mirror import mirror_cancel
+
+    # The internal removal above already stands. This is the SECOND, best-effort
+    # truth: the detached Block objects still carry the ids WE stored, and
+    # mirror_cancel only ever deletes those.
+    mirror = mirror_cancel(store, workspace_id, removed["blocks"])
+    return {
+        "task_id": task_id,
+        "deleted": True,
+        "title": removed["title"],
+        "sessions_cancelled": len(removed["blocks"]),
+        "calendar_deleted": mirror.deleted,
+        "calendar_failures": len(mirror.failures),
+    }
+
+
+def _cancel_one_session(store, workspace_id: str, block_id: str) -> Dict[str, Any]:
+    """Unschedule one session, keep its task, delete only THAT calendar event.
+
+    The single unit shared by cancel_session and cancel_sessions. An unknown id
+    comes back as {"cancelled": False, "reason": "not_found"} rather than an
+    exception, so a batch reports it and keeps going.
+    """
+    block = store.blocks.get(block_id)
+    title = _session_title(store, block) if block is not None else None
+    task_id = block.task_id if block is not None else None
+    removed = store.delete_block(block_id)
+    if removed is None:
+        return {
+            "block_id": block_id,
+            "cancelled": False,
+            "reason": "not_found",
+            "error_message": f"No session with id {block_id!r} in this workspace.",
+        }
+
+    from src.api.calendar_mirror import mirror_cancel
+
+    mirror = mirror_cancel(store, workspace_id, [removed])
+    task = store.tasks.get(task_id) if task_id else None
+    return {
+        "block_id": block_id,
+        "cancelled": True,
+        "title": title,
+        "task_id": task_id,
+        # The task itself is untouched and still listable; say so from the real
+        # record, not from assumption.
+        "task_kept": task is not None,
+        "task_status": task.status if task is not None else None,
+        "calendar_deleted": mirror.deleted,
+        "calendar_failures": len(mirror.failures),
+    }
+
+
+def _batch_ids(raw, field: str) -> Any:
+    """Clean a batch id list, or return an error dict describing what's wrong.
+
+    Duplicates collapse (order preserved) so an id repeated by the model is
+    deleted once and counted once. A list longer than _MAX_BATCH_DELETE is
+    refused whole, naming the limit, rather than partly applied.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        return {"status": "error",
+                "error_message": f"{field} has to be a list of ids."}
+    seen = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        ident = item.strip()
+        if ident not in seen:
+            seen.append(ident)
+    if len(seen) > _MAX_BATCH_DELETE:
+        return {
+            "status": "error",
+            "error_message": (f"That's {len(seen)} at once; I'll do at most "
+                              f"{_MAX_BATCH_DELETE} in one go. Nothing was removed — "
+                              f"send them in smaller sets."),
+        }
+    return seen
+
+
+def create_task(workspace_id: str, title: str, estimate_minutes: Optional[int] = None,
+                commitment_id: Optional[str] = None) -> Dict[str, Any]:
+    """Add ONE new task to the user's list, without scheduling it.
+
+    This is the tool for "add a task called X", "put 'renew my passport' on my
+    list", "remember I need to email the landlord", "add finish the slides, about
+    an hour". It creates the work as UNSCHEDULED: nothing goes on the calendar
+    and no time is chosen here. If the user also said WHEN, call schedule_task_at
+    afterwards with the `task_id` this returns; if they didn't, leave it
+    unscheduled and say so plainly rather than inventing a time.
+
+    Use the user's own words for `title`. Pass `estimate_minutes` only if they
+    actually said how long it takes — never guess a length. `commitment_id` is
+    optional: leave it off and the task joins the user's current active goal, or
+    a plain new one named after the task if they have none. The reply reports
+    which commitment it really landed under.
+
+    A blank or missing title is refused, and nothing is created; ask what the
+    task should be called instead.
+
+    Args:
+        workspace_id: The workspace to add the task to.
+        title: The task's name, exactly as the user said it.
+        estimate_minutes: How long they said it takes, in minutes. Omit if they
+            didn't say.
+        commitment_id: Optional goal to file it under. Omit unless the user
+            named one you already have an id for.
+    """
+    try:
+        clean = (title or "").strip()
+        if not clean:
+            return {
+                "status": "error",
+                "created": False,
+                "error_message": "A task needs a name; tell me what to call it.",
+            }
+        store = get_or_create_store(workspace_id)
+
+        commitment = store.commitments.get(commitment_id) if commitment_id else None
+        commitment_created = False
+        if commitment is None:
+            active = sorted(
+                store.get_active_commitments(),
+                key=lambda c: c.updated_at,
+                reverse=True,
+            )
+            if active:
+                commitment = active[0]
+            else:
+                # No goal to file under yet. Make a plain one named after the
+                # task rather than refusing to capture what the user just said.
+                from src.types.entities import Commitment
+
+                commitment = Commitment(
+                    id=f"c_{uuid.uuid4().hex[:8]}",
+                    workspace_id=workspace_id,
+                    title=clean,
+                    kind="personal",  # type: ignore[arg-type]
+                    stake=3,  # type: ignore[arg-type]
+                    open_ended=True,
+                )
+                store.add_commitment(commitment)
+                commitment_created = True
+
+        minutes: Optional[int] = None
+        if estimate_minutes is not None:
+            problem = _duration_error(estimate_minutes)
+            if problem:
+                return {"status": "error", "created": False, "error_message": problem}
+            minutes = int(estimate_minutes)
+
+        from src.types.entities import Task
+
+        order = max((t.order_index for t in store.tasks.values()), default=-1) + 1
+        task = Task(
+            id=f"t_{uuid.uuid4().hex[:12]}",
+            workspace_id=workspace_id,
+            commitment_id=commitment.id,
+            title=clean,
+            estimate_minutes=minutes,
+            # "ready" is the honest status for work that exists and can be
+            # scheduled but has no session yet. "draft" would hide it from the
+            # scheduler; "scheduled" would be a lie.
+            status="ready",  # type: ignore[arg-type]
+            order_index=order,
+        )
+        store.add_task(task)
+        return {
+            "status": "success",
+            "created": True,
+            "task_id": task.id,
+            "title": task.title,
+            "task_status": task.status,
+            "scheduled": False,
+            "estimate_minutes": minutes,
+            "commitment_id": commitment.id,
+            "commitment_title": commitment.title,
+            "commitment_created": commitment_created,
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "created": False, "error_message": str(e)}
+
+
+def delete_task(workspace_id: str, task_id: str) -> Dict[str, Any]:
+    """Delete ONE task the user wants gone, along with every session it has booked.
+
+    This is the tool for "delete that task", "remove X from my list", "get rid of
+    it", "I'm not doing that anymore, take it off", "scratch the passport one".
+    Use it when the user names a SINGLE piece of work; use delete_tasks when they
+    mean several or a whole set. If you do not have the id, call list_tasks and
+    match on the title; never guess an id, and if two titles could be what they
+    meant, ask which one first.
+
+    The whole footprint goes: the task stops appearing in the list and on the
+    plan, its scheduled sessions are cancelled, and the Google Calendar events we
+    created for those sessions are deleted best-effort. This is a real deletion,
+    not a draft-and-forget — do not tell the user to just leave something in
+    draft.
+
+    It removes the record, so it cannot be undone from here; if the user only
+    wants the time back and still intends to do the work, use cancel_session
+    instead, which unschedules a session and KEEPS the task.
+
+    Returns three separate truths: the REAL `title` removed, `sessions_cancelled`
+    (how many booked sessions went with it), and `calendar_deleted` /
+    `calendar_failures` (what really happened on Google). State them separately;
+    if calendar_deleted is 0, do NOT say the calendar changed — the task is still
+    genuinely gone. An unknown id deletes nothing and says so.
+
+    Args:
+        workspace_id: The workspace the task belongs to.
+        task_id: The task's id, from list_tasks.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        result = _delete_one_task(store, workspace_id, task_id)
+        if not result.get("deleted"):
+            return {"status": "error", **result}
+        return {"status": "success", **result}
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "deleted": False, "error_message": str(e)}
+
+
+def delete_tasks(workspace_id: str, task_ids: List[str]) -> Dict[str, Any]:
+    """Delete SEVERAL tasks in one go, with each one's sessions and calendar events.
+
+    This is the tool for "delete those three", "clear my list", "get rid of
+    everything for that project", "drop the two Dahod ones". Use it whenever the
+    user means more than one piece of work; use delete_task for a single named
+    one. Get the ids from list_tasks and pass exactly the ones they meant — never
+    pad the list with tasks they did not name.
+
+    Each task is handled independently and the batch never stops early: one bad
+    id does not block the rest. The reply carries a per-task `results` list
+    saying which ones were really deleted (with their REAL titles) and which came
+    back not-found, plus `deleted_count`, `not_found_count`,
+    `sessions_cancelled` and the separate `calendar_deleted` /
+    `calendar_failures` totals summed from what actually happened.
+
+    Report it exactly as it comes back. If some failed, say which — never call a
+    partial sweep a clean one, and never claim more calendar deletions than
+    `calendar_deleted`. An empty list is a clean no-op: nothing was deleted and
+    nothing is claimed. More than 25 ids at once is refused whole, changing
+    nothing, so send them in smaller sets.
+
+    Args:
+        workspace_id: The workspace the tasks belong to.
+        task_ids: The ids of the tasks to delete, from list_tasks.
+    """
+    try:
+        ids = _batch_ids(task_ids, "task_ids")
+        if isinstance(ids, dict):
+            ids["deleted_count"] = 0
+            return ids
+        store = get_or_create_store(workspace_id)
+        results = [_delete_one_task(store, workspace_id, tid) for tid in ids]
+        deleted = [r for r in results if r.get("deleted")]
+        missing = [r for r in results if not r.get("deleted")]
+        return {
+            "status": "success",
+            "requested_count": len(ids),
+            "deleted_count": len(deleted),
+            "not_found_count": len(missing),
+            "deleted_titles": [r["title"] for r in deleted],
+            "not_found_ids": [r["task_id"] for r in missing],
+            "sessions_cancelled": sum(r.get("sessions_cancelled", 0) for r in deleted),
+            "calendar_deleted": sum(r.get("calendar_deleted", 0) for r in deleted),
+            "calendar_failures": sum(r.get("calendar_failures", 0) for r in deleted),
+            "results": results,
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "deleted_count": 0, "error_message": str(e)}
+
+
+def cancel_session(workspace_id: str, block_id: str) -> Dict[str, Any]:
+    """Unschedule ONE booked session, KEEPING the task itself on the list.
+
+    This is the tool for "take that off my calendar but keep the task", "cancel
+    my 3pm, I still want to do it", "unschedule Thursday's session", "clear that
+    slot". The session and its Google Calendar event go; the work stays, as
+    unscheduled work you can place again later with schedule_task_at.
+
+    That is the difference from delete_task, which removes the work itself. If
+    the user is done with the WORK, delete the task; if they only want the TIME
+    back, cancel the session. If they want it at a different time instead of
+    gone, use move_session — cancelling and re-booking loses the calendar event.
+
+    If you do not have the session's id, call list_todays_sessions (for today) or
+    read it off the plan; never guess an id.
+
+    Returns the REAL session `title`, the `task_id` that survived, `task_kept`
+    and its `task_status`, plus the separate `calendar_deleted` /
+    `calendar_failures` truth for the ONE event this session had. If
+    calendar_deleted is 0 do not claim the calendar changed — the session is
+    still off the plan. An unknown id cancels nothing and says so.
+
+    Args:
+        workspace_id: The workspace the session belongs to.
+        block_id: The session's id, from list_todays_sessions or the plan.
+    """
+    try:
+        store = get_or_create_store(workspace_id)
+        result = _cancel_one_session(store, workspace_id, block_id)
+        if not result.get("cancelled"):
+            return {"status": "error", **result}
+        return {"status": "success", **result}
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "cancelled": False, "error_message": str(e)}
+
+
+def cancel_sessions(workspace_id: str, block_ids: List[str]) -> Dict[str, Any]:
+    """Unschedule SEVERAL booked sessions at once, KEEPING all of their tasks.
+
+    This is the tool for "clear my afternoon", "cancel everything tomorrow, I
+    still want to do it all", "take those three off my calendar". Use it whenever
+    the user means more than one session; use cancel_session for a single named
+    one. The tasks all survive as unscheduled work — nothing here deletes work,
+    so if they want the work itself gone use delete_tasks.
+
+    Each session is handled independently and the batch never stops early. The
+    reply carries a per-session `results` list saying which were really
+    cancelled (with their REAL titles) and which came back not-found, plus
+    `cancelled_count`, `not_found_count`, and the summed `calendar_deleted` /
+    `calendar_failures`. Say what really went and what did not; never report a
+    partial sweep as a clean one. An empty list is a clean no-op. More than 25 at
+    once is refused whole, changing nothing.
+
+    Args:
+        workspace_id: The workspace the sessions belong to.
+        block_ids: The ids of the sessions to unschedule.
+    """
+    try:
+        ids = _batch_ids(block_ids, "block_ids")
+        if isinstance(ids, dict):
+            ids["cancelled_count"] = 0
+            return ids
+        store = get_or_create_store(workspace_id)
+        results = [_cancel_one_session(store, workspace_id, bid) for bid in ids]
+        done = [r for r in results if r.get("cancelled")]
+        missing = [r for r in results if not r.get("cancelled")]
+        return {
+            "status": "success",
+            "requested_count": len(ids),
+            "cancelled_count": len(done),
+            "not_found_count": len(missing),
+            "cancelled_titles": [r.get("title") for r in done],
+            "not_found_ids": [r["block_id"] for r in missing],
+            "tasks_kept": sorted({r["task_id"] for r in done if r.get("task_id")}),
+            "calendar_deleted": sum(r.get("calendar_deleted", 0) for r in done),
+            "calendar_failures": sum(r.get("calendar_failures", 0) for r in done),
+            "results": results,
+        }
+    except Exception as e:  # pragma: no cover - defensive
+        return {"status": "error", "cancelled_count": 0, "error_message": str(e)}
+
+
 # The tool set exposed to the agent. Keep small (ADK guidance: ~10-20 max).
 # Calendar writes are two-phase: the propose_* tools only ask; the *_confirmed
 # tools execute and must never be called before the user answers yes. The read
@@ -1513,4 +1911,15 @@ ALL_TOOLS = [
     # calendar counts.
     move_session,
     schedule_task_at,
+    # P20-03: the create and delete halves of CRUD, singular AND batch, so the
+    # agent never has to say "I don't have a tool to delete tasks". DIRECT
+    # writes for the same reason as the two above: a user naming what they want
+    # gone is unambiguous, and the honesty comes from the returns (real titles,
+    # real session counts, separate real calendar counts, per-item outcomes in
+    # the batches) rather than from a confirm step.
+    create_task,
+    delete_task,
+    delete_tasks,
+    cancel_session,
+    cancel_sessions,
 ]
