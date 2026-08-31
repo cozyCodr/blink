@@ -181,6 +181,18 @@ def _store_zone(store, label: str, days: List[str], start: str, end: str,
     label_clean = " ".join(str(label or "").split())[:40]
     if not (start_n and end_n and clean_days and label_clean and start_n != end_n):
         return None
+    # 2026-08-31: Zone.start/end are expanded by zones_to_intervals against the
+    # ledger's NAIVE-UTC day, so what gets stored must be UTC wall clock. Every
+    # caller here speaks the user's LOCAL clock, and storing it raw made a
+    # Lusaka "work 9 to 5" block 11:00-19:00 local. Convert at this one
+    # chokepoint (weekday shift included); for a workspace with no timezone the
+    # conversion is the identity, which is what the old behaviour was.
+    from src.agent import tools as _zone_tools
+    hm = lambda v: (int(v[:2]), int(v[3:]))
+    clean_days, start_n, end_n = _zone_tools._zone_window_to_stored(
+        store, clean_days, hm(start_n), hm(end_n))
+    if start_n == end_n:
+        return None
     try:
         zone = Zone(
             id=f"z_{uuid.uuid4().hex[:10]}",
@@ -196,8 +208,13 @@ def _store_zone(store, label: str, days: List[str], start: str, end: str,
     return store.add_zone(zone)
 
 
-def _zone_sentence(z: Zone) -> str:
-    return f"{z.label} {_fmt_time(z.start)} to {_fmt_time(z.end)} {days_phrase(z.days)}"
+def _zone_sentence(store, z: Zone) -> str:
+    # Stored times are naive UTC (see _store_zone); the summary must speak the
+    # user's own wall clock or "9 to 5" reads back as "7 to 3".
+    from src.agent import tools as _zone_tools
+    v = _zone_tools._zone_local_view(store, z)
+    return (f"{z.label} {_fmt_time(v['start_local'])} to "
+            f"{_fmt_time(v['end_local'])} {days_phrase(v['days'])}")
 
 
 def _finish(store) -> Dict[str, Any]:
@@ -212,7 +229,7 @@ def _finish(store) -> Dict[str, Any]:
     elif not zones:
         text = "Noted. I'll keep that in mind when I plan."
     else:
-        parts = [_zone_sentence(z) for z in zones[:4]]
+        parts = [_zone_sentence(store, z) for z in zones[:4]]
         text = "Got it. " + "; ".join(parts) + ". I plan around those."
         if points:
             text += " And I noted how you like to work."
@@ -293,10 +310,12 @@ def _handle_insight_response(store, value: Any) -> Dict[str, Any]:
             return {"type": "message",
                     "text": "I couldn't turn that into a clear window, so I didn't change anything."}
         store.mark_insight_decision(insight_id, "accepted")
-        sentence = _zone_sentence(zone)
+        sentence = _zone_sentence(store, zone)
+        from src.agent import tools as _zone_tools
+        _v = _zone_tools._zone_local_view(store, zone)
         text = voice.scrub(f"Done. {sentence} stays clear from now on. I'll plan around it.")
         text = conversation.naturalize_outcome(
-            text, [zone.label, _fmt_time(zone.start), _fmt_time(zone.end)])
+            text, [zone.label, _fmt_time(_v["start_local"]), _fmt_time(_v["end_local"])])
         return {"type": "message", "text": voice.scrub(text),
                 "zone": zone.model_dump(mode="json")}
 
@@ -394,10 +413,12 @@ def handle_answer(store, step: str, value: Any, skipped: bool,
         if zone is None:
             return {"type": "message",
                     "text": "I couldn't read that one, so I didn't save anything."}
-        sentence = _zone_sentence(zone)
+        sentence = _zone_sentence(store, zone)
+        from src.agent import tools as _zone_tools
+        _v = _zone_tools._zone_local_view(store, zone)
         text = voice.scrub(f"Saved. {sentence} stays clear from now on.")
         text = conversation.naturalize_outcome(
-            text, [zone.label, _fmt_time(zone.start), _fmt_time(zone.end)])
+            text, [zone.label, _fmt_time(_v["start_local"]), _fmt_time(_v["end_local"])])
         return {"type": "message", "text": voice.scrub(text),
                 "zone": zone.model_dump(mode="json")}
 

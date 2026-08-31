@@ -289,6 +289,38 @@ class TestListZones(unittest.TestCase):
         self.assertEqual(res["zones"], [])
 
 
+class TestOnboardingChokepointConvertsToo(unittest.TestCase):
+    """The teach flow and the onboarding interview write zones through
+    onboarding._store_zone. Before 2026-08-31 that stored the user's LOCAL
+    strings raw, so the ledger (which reads zones as naive UTC) blocked the
+    wrong local hours: a Lusaka "work 9 to 5" blocked 11:00-19:00. The
+    chokepoint now converts exactly like add_zone."""
+
+    def test_a_taught_nine_to_five_is_stored_in_utc_for_lusaka(self):
+        from src.agent.specialists.onboarding import _store_zone
+        store = _ws()
+        z = _store_zone(store, "Work", list(_WEEKDAYS), "09:00", "17:00",
+                        source="taught")
+        self.assertIsNotNone(z)
+        self.assertEqual((z.start, z.end), ("07:00", "15:00"))
+        self.assertEqual(z.days, _WEEKDAYS)
+
+    def test_the_summary_still_speaks_the_users_clock(self):
+        from src.agent.specialists.onboarding import _store_zone, _zone_sentence
+        store = _ws()
+        z = _store_zone(store, "Work", list(_WEEKDAYS), "09:00", "17:00")
+        sentence = _zone_sentence(store, z)
+        self.assertIn("9:00", sentence)
+        self.assertIn("17:00", sentence)
+        self.assertNotIn("7:00 to 15:00", sentence)
+
+    def test_a_workspace_with_no_timezone_stores_what_was_said(self):
+        from src.agent.specialists.onboarding import _store_zone
+        store = _ws(tz=None)
+        z = _store_zone(store, "Work", list(_WEEKDAYS), "09:00", "17:00")
+        self.assertEqual((z.start, z.end), ("09:00", "17:00"))
+
+
 class TestWiring(unittest.TestCase):
     def test_all_three_are_exposed_and_are_direct_writes(self):
         names = [getattr(t, "__name__", "") for t in tools.ALL_TOOLS]
