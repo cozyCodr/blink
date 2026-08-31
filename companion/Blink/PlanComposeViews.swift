@@ -26,8 +26,31 @@ import BlinkKit
 
 // MARK: The compose field
 
+/// THE DOCK, the phone's reading of the web's `#dock` (src/web/index.html:244).
+///
+/// The web does NOT keep a text field open. It offers a centered row of equal
+/// circles — a keyboard, the mic, an attach "+" — with one teaching line under
+/// them, and the mic "reads as the primary one through colour and weight, not
+/// through size". That is a presence you speak to. A permanently-open field is
+/// a chat app, and it competes with the eyes for the whole screen's attention.
+///
+/// So this slot holds three states, never two things at once:
+///
+///   resting   — keyboard + mic circles, and the hint line
+///   typing    — the field row (mic, field, send), keyboard raised
+///   listening — the mic in its active look, the hint reading "Listening"
+///
+/// NO ATTACH BUTTON. The web has one because multimodal ingest exists there
+/// (`#attach-file`); this app has no photo ingest at all, and a "+" that did
+/// nothing would claim a capability Blink does not have on the phone
+/// (agent-governance.md: never offer an action you cannot take). Two circles.
+///
+/// THE HINT NAMES THE REAL GESTURE. The web says "Hold the mic"; the phone's
+/// mic is a TAP toggle (see `micButton`), so the phone's line says tap. Copy
+/// that describes a gesture the app does not have is a lie the dock tells.
 struct PlanComposeField: View {
     @Environment(\.face) private var face
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Bindable var composer: PlanComposer
     var prompt: String
     /// P15-12: hold-to-talk. Owned by the screen so the eyes can react to it.
@@ -36,35 +59,57 @@ struct PlanComposeField: View {
     /// reply audio (an interrupt is something you do to send — the web's rule).
     var onSend: () -> Void = {}
 
+    /// The person asked for the field by tapping the keyboard. Cleared when
+    /// they leave it with nothing typed, and by a send.
+    @State private var typing = false
+    @FocusState private var fieldFocused: Bool
+
     /// While the hold is live the transcript streams straight into the draft,
     /// which IS the review surface: release leaves it there, editable, never
     /// auto-sent (createVoiceInput's release-to-edit flow, app.js:1141-1148).
     private var isListening: Bool { voice?.isRecording ?? false }
 
+    private var draftText: String {
+        composer.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// NEVER STRAND WHAT WAS TYPED OR SAID. The field is up whenever it was
+    /// asked for, and it stays up for as long as there are words in the draft
+    /// whatever the keyboard is doing. This is also what keeps the release-to-
+    /// review contract: a transcript settles in `composer.draft`, so the moment
+    /// listening stops with text the field is on screen holding it, readable
+    /// and editable, and still nothing was sent on the person's behalf.
+    private var fieldUp: Bool { typing || !draftText.isEmpty }
+
     private func send() {
         onSend()
+        typing = false
+        fieldFocused = false
         Task { await composer.send() }
     }
 
     var body: some View {
         VStack(spacing: face.layout.tightGap) {
-            HStack(spacing: face.layout.tightGap) {
-                if let voice {
-                    micButton(voice)
+            if fieldUp {
+                HStack(spacing: face.layout.tightGap) {
+                    if let voice {
+                        micButton(voice)
+                    }
+                    field
+                    sendButton
                 }
-                field
-                sendButton
+            } else {
+                HStack(spacing: face.layout.rowGap) {
+                    keyboardButton
+                    if let voice {
+                        micButton(voice)
+                    }
+                }
             }
-            // The one-time explanation when the mic cannot listen. A denied
-            // permission is a normal state: it is named once, and the field
-            // above keeps working (the web's unsupported fallback, app.js:1156).
-            if let voice, voice.explained, let line = voice.limitationLine {
-                Text(line)
-                    .font(face.metaFont)
-                    .foregroundStyle(face.faint)
-                    .multilineTextAlignment(.center)
-            }
+            hintLine
         }
+        .animation(reduceMotion ? nil : face.motion.swapAnimation, value: fieldUp)
+        .animation(reduceMotion ? nil : face.motion.swapAnimation, value: isListening)
         // Live transcription: while the hold is on, the words land in the
         // draft as they are heard, so release-to-review is seamless (the
         // web's interim results streaming onto the surface, app.js:1170-1178).
@@ -72,6 +117,67 @@ struct PlanComposeField: View {
             guard let voice, voice.isRecording else { return }
             composer.draft = live
         }
+        // Leaving the field with nothing in it puts the dock back. Leaving it
+        // with something in it does NOT: see `fieldUp`.
+        .onChange(of: fieldFocused) { _, focused in
+            if !focused, draftText.isEmpty { typing = false }
+        }
+    }
+
+    /// The hint, or the one honest line about a mic that cannot listen.
+    ///
+    /// A denied permission is a normal state: it is named once and it takes
+    /// this slot when it does, because the teaching line would be telling the
+    /// person to tap a mic that will not work (the web's unsupported fallback,
+    /// app.js:1156). VoiceOver hears the gesture from the buttons' own labels,
+    /// so the teaching line is not read a second time; "Listening" is a state
+    /// nothing else announces, so that one is.
+    @ViewBuilder
+    private var hintLine: some View {
+        if let voice, voice.explained, let line = voice.limitationLine {
+            hintText(line, spoken: true)
+        } else if isListening {
+            hintText("Listening", spoken: true)
+        } else if !fieldUp {
+            hintText("Tap the mic to talk, or the keyboard to type.", spoken: false)
+        }
+    }
+
+    private func hintText(_ line: String, spoken: Bool) -> some View {
+        Text(line)
+            .font(face.metaFont)
+            .foregroundStyle(face.faint)
+            .multilineTextAlignment(.center)
+            .accessibilityHidden(!spoken)
+    }
+
+    /// The quiet circle that opens the field. Same size as the mic, a whole
+    /// register below it in colour: the web's `.dock-btn` next to `.mic`.
+    private var keyboardButton: some View {
+        Button {
+            typing = true
+            // The field has to EXIST before focus can land on it, so the ask
+            // waits out the swap that puts it there (the same cross-fade the
+            // state change above rides). The keyboard then rises on its own.
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(face.motion.swapFade))
+                fieldFocused = true
+            }
+        } label: {
+            Image(systemName: "keyboard")
+                .font(face.bodyFont.weight(.semibold))
+                .foregroundStyle(face.muted)
+                .frame(width: face.layout.minTapTarget, height: face.layout.minTapTarget)
+                .background(
+                    Circle()
+                        .fill(face.control)
+                        .overlay(Circle().stroke(face.line, lineWidth: 1))
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(composer.isSending || isListening)
+        .accessibilityLabel("Type your message")
     }
 
     private var field: some View {
@@ -88,6 +194,7 @@ struct PlanComposeField: View {
                     RoundedRectangle(cornerRadius: face.cornerStyle.nominalRadius, style: .continuous)
                         .fill(face.control)
                 )
+                .focused($fieldFocused)
                 .onSubmit { send() }
                 .disabled(composer.isSending || isListening)
     }
@@ -114,7 +221,19 @@ struct PlanComposeField: View {
     /// transcript streams into the draft live and settles there for review on
     /// stop. A tap while denied explains once, then stays quiet. A light haptic
     /// marks each start and stop so the toggle feels definite without looking.
+    ///
+    /// THE HERO, BY WEIGHT AND NOT BY SIZE (the web's dock comment). On the
+    /// resting dock the mic wears the accent fill against the keyboard's quiet
+    /// control, at exactly the same `minTapTarget` circle. Inside the field row
+    /// the send arrow is the decisive control, so the mic steps back to the
+    /// quiet register it has always had there. Listening keeps the accent
+    /// either way, because that one is a state, not a rank.
     private func micButton(_ voice: VoiceCapture) -> some View {
+        let filled = isListening || !fieldUp
+        return micBody(voice, filled: filled)
+    }
+
+    private func micBody(_ voice: VoiceCapture, filled: Bool) -> some View {
         Button {
             if isListening {
                 let text = voice.endHold()
@@ -127,15 +246,18 @@ struct PlanComposeField: View {
                 if !voice.explained { voice.markExplained() }
                 return
             }
+            // Talking replaces typing: let the keyboard go so the words being
+            // heard are not landing behind it.
+            fieldFocused = false
             voice.beginHold()
         } label: {
             Image(systemName: isListening ? "waveform" : "mic")
                 .font(face.bodyFont.weight(.semibold))
-                .foregroundStyle(isListening ? face.ground : face.accent)
+                .foregroundStyle(filled ? face.ground : face.accent)
                 .frame(width: face.layout.minTapTarget, height: face.layout.minTapTarget)
                 .background(
                     Circle()
-                        .fill(isListening ? face.accent : face.control)
+                        .fill(filled ? face.accent : face.control)
                         .overlay(Circle().stroke(face.line, lineWidth: 1))
                 )
                 .contentShape(Circle())
