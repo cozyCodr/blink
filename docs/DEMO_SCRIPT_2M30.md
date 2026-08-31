@@ -61,15 +61,26 @@ architectural discipline, so state it as engineering, not as a virtue.
 
 ## 3 · 0:45–1:20 · It changes your real calendar, and asks first
 
-**Screen:** Web. Say (or type) "move my thesis block to Thursday at 2." Blink
-proposes, **asks for confirmation**, you accept, and a **real Google Calendar
-event moves on camera** in a second tab.
+**Screen:** Web, two things in one beat.
 
-**VO (~55 words):** "Ask it to move something and it does not just talk. It
-proposes, waits for a yes, then writes to the real Google Calendar. The write
-tools are structurally unreachable until you confirm: the agent cannot call them
-inside a turn. And the reply reports the plan and the calendar as two separate
-truths, because one can fail while the other succeeds."
+First: "move my thesis block to Thursday at 2." You named the exact change, so
+Blink makes it, and a **real Google Calendar event moves on camera** in the
+second tab.
+
+Then: "reschedule what I missed today." Blink does not act. It **proposes and
+asks**, you say yes on camera, and only then does the calendar change.
+
+**VO (~55 words):** "When you name the exact change, it makes it, and your real
+Google Calendar moves. When Blink is the one deciding, it proposes and waits for
+a yes. That gate is structural, not a promise: the tool that performs the write
+is not in the model's toolset at all, so no turn can reach it without you."
+
+**Accuracy note (verified in the code, 2026-08-31):** explicit placement
+(`move_session`, `schedule_task_at`) is a deliberate direct write, documented as
+such in `src/agent/tools.py`. The confirm gate covers `propose_reschedule` and
+the Google Calendar create/edit/delete tools, whose `*_confirmed` halves are
+kept out of `ALL_TOOLS`. Narrating a confirmation over the plain move would be a
+claim the repository contradicts, and they read the repository.
 
 **Why:** this is the "extra bonus mark" beat. Governed external action, with the
 governance visible. Have Calendar open in a second tab BEFORE recording.
