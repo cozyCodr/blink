@@ -9,6 +9,78 @@ upload and Devpost. Everything is recorded against the live deployment.
 
 ---
 
+## The holiday arc (the spine of the film)
+
+One continuous story that chains notification, grounded search, the confirm
+gate, a real calendar write, and a replan across multiple days. It replaces the
+separate beats 3, 4 and 5 with one unbroken run, which is stronger television
+and easier to shoot.
+
+**The premise:** Monday to Friday, 06:00 to 18:00, is booked as work. A session
+today did not happen. A public holiday lands in the plan window, and that day's
+work block does not apply, so the missed work has somewhere to go.
+
+### The holiday must be real, and Sept 1 is not one
+
+Verified live against the deployment on 2026-08-31, three separate queries:
+
+- **"public holiday September 1 2026 Zimbabwe"** returns, correctly, *"There is
+  no public holiday in Zimbabwe on September 1, 2026"*, citing timeanddate.com
+  and officeholidays.com.
+- **Munhumutapa Day, Tuesday 15 September 2026** is real. Confirmed by
+  officeholidays.com, zimbabweyp.com, iharare.com and Wikipedia across two
+  independent queries. It is a newly established holiday.
+
+So do **not** stage an invented holiday for tomorrow. Blink is built to refuse
+to confirm what it cannot verify, which means on camera it would contradict you,
+with sources. Use **15 September** and the beat is dramatic *and* true, which is
+the only combination that survives judges reading the repository.
+
+### The run, in order
+
+1. **The notification arrives** on the locked phone about the session that did
+   not happen. Tap it.
+2. **"Reschedule what I missed."** Blink proposes. It has nowhere good to put
+   the work, because Monday to Friday 06:00 to 18:00 is blocked.
+3. **"The fifteenth is a public holiday here. Look it up and confirm."** Blink
+   asks permission to search, naming the real query. Say yes on camera.
+4. **The grounded answer lands** with real sources: Munhumutapa Day, Tuesday 15
+   September. This is the beat where a search is not decoration, it changes the
+   plan.
+5. **"So I am not working that day. Clear my work block on the fifteenth."**
+   Blink proposes the deletion, you confirm, and the **real Google Calendar
+   event disappears** in the second tab.
+6. **"Put the client project sessions in there."** Blink reads the now-open day
+   through `get_capacity`'s free windows and places several sessions across real
+   free time with `schedule_task_sessions`, reporting each one.
+
+That last step is the P21-01 work shipped today. Before it, Blink could only
+ever hold one session per task, so this beat was impossible.
+
+### Seeding it
+
+- Put the work blocks on the **real Google Calendar as single events**, 06:00 to
+  18:00, one per weekday, **not as a recurring series**. Deleting one instance of
+  a recurring event is a sharper edge than a demo needs. Then run
+  `POST /v1/workspaces/{ws}/calendar/sync-google` so they arrive as hard
+  constraints.
+- Set the workspace timezone first by opening the web app once. A workspace with
+  no timezone runs in UTC and every time on screen will be two hours out.
+- Leave one session earlier today unstarted so step 1 has something true to be
+  about.
+
+### Where it can break
+
+- **The searched fact must stay checkable.** If a source moves, re-run step 3
+  before recording and read what actually comes back.
+- **Step 5 needs the calendar scope connected.** Without it Blink correctly
+  reports the plan changed and the calendar did not, which is honest and not the
+  beat you want. Check the settings panel first.
+- **Step 6 with no free time does nothing.** Confirm the work block on the 15th
+  is really gone from the synced constraints before asking for placement.
+
+---
+
 ## T-30 · Prep
 
 **1. Seed real state.** An empty account demos nothing.
