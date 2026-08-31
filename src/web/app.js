@@ -451,8 +451,34 @@
        the room heard another, which is exactly what the user reported. An
        unplayed PCM stream also holds an audio context and a socket open
        (P12-03b), so this is the cleanup path too. */
+    /* P21-08: spoken replies now share ONE <audio> element, so "close this
+       reply's audio" can no longer mean "pause whatever is playing". What
+       arrives here is that reply's HANDLE on the shared element, and the
+       handle's pause() is a no-op once a newer reply has taken over. So this
+       still closes an unused or superseded reply's audio, and it can never
+       silence the reply the room is currently hearing. The PCM streaming path
+       hands over a buffer player instead, whose pause() also shuts its socket
+       (P12-03b) exactly as before. */
     function dropAudio(audio) {
       if (audio && audio.pause) { try { audio.pause(); } catch (_) {} }
+    }
+
+    /* A refused play() used to be invisible: `p.catch(finish)` landed the text
+       and left no trace anywhere, so a BLOCKED reply looked exactly like a
+       reply that never had audio. That is most of why this took so long to
+       pin down. Now it says so in the console, re-arms the unlock so the next
+       gesture restores the voice, and raises one quiet event the controller
+       turns into a single hint pointing at replay. */
+    function noteBlocked(err, where) {
+      var name = (err && (err.name || err.message)) || "unknown";
+      try {
+        console.debug("[voice] " + where + ": play() was refused (" + name +
+                      "): the words landed, the voice did not");
+      } catch (_) {}
+      try { if (speaker && speaker.relock) speaker.relock(); } catch (_) {}
+      try {
+        document.dispatchEvent(new CustomEvent("blink:audio-blocked", { detail: { reason: name } }));
+      } catch (_) { /* no CustomEvent: the console line still carries it */ }
     }
 
     var swapTimer = null, swapFn = null;
@@ -1135,8 +1161,10 @@
       sync = run;
       try {
         var p = audio.play();
-        if (p && p.catch) p.catch(function () { finish(); });   // autoplay blocked -> text still lands
-      } catch (_) { finish(); return; }
+        // Autoplay blocked -> the text still lands, and noteBlocked makes the
+        // refusal visible and re-arms the unlock (P21-08).
+        if (p && p.catch) p.catch(function (err) { noteBlocked(err, "speakSynced"); finish(); });
+      } catch (err) { noteBlocked(err, "speakSynced"); finish(); return; }
       // Hidden tab: rAF never fires there, so don't strand a frozen reveal —
       // land the full text now and let the audio keep playing.
       if (document.visibilityState === "hidden") { finish(); return; }
@@ -1189,8 +1217,8 @@
       }
       try {
         var p = audio.play();
-        if (p && p.catch) p.catch(function () { stopAmp(); });
-      } catch (_) { stopAmp(); return; }
+        if (p && p.catch) p.catch(function (err) { noteBlocked(err, "speakOver"); stopAmp(); });
+      } catch (err) { noteBlocked(err, "speakOver"); stopAmp(); return; }
       if (document.visibilityState !== "hidden") raf = requestAnimationFrame(frame);
     }
 
@@ -1416,9 +1444,25 @@
      VoiceInput — hold-to-talk over the mic button (below the eyes) and the
      Spacebar. Uses the Web Speech API for LIVE transcription: while held,
      interim + final results stream onto the surface; on release the accrued
-     transcript drops into the editable compose field (NOT auto-sent) so the
-     user can review + Send. A quick tap (or an unsupported browser) just
-     opens the empty editable field to type. Never throws.
+     transcript goes straight to Send when auto-send is on (the default), or
+     into the editable compose field to review when it is off.
+
+     THE MIC IS A CONVERSATION (user law, already law on iOS, web as of
+     P21-07). It must not drop the user into a text field holding a transcript
+     of their own words: seeing the recognizer's mistakes written down is the
+     thing they asked us to stop doing. Two paths used to end there and no
+     longer do:
+       - a brisk tap, released before recognition had started, LATCHES
+         instead (see `latched`): listening simply continues until the user
+         taps again or a short silence settles. Measured on the live app,
+         getUserMedia takes ~180ms to resolve even with permission ALREADY
+         granted, which is well inside a normal quick press, which is why
+         this read as "always";
+       - a hold that captured nothing says so and returns to idle.
+     The compose field stays the fallback for GENUINE failures only, each
+     carrying its own stickyHint saying why: unsupported browser, blocked or
+     missing microphone, network error. It also stays the keyboard button's
+     one job (openCompose), which is the deliberate typing route. Never throws.
 
      Deps: agent (state), surface (compose/live/setLiveText), onCommit(text)
      to send, setHint(text) for the dock hint line, onBegin() fired at the
@@ -1447,6 +1491,29 @@
     // which this code used to swallow — the "I click the mic and nothing
     // happens" report (2026-08-30).
     var micGranted = false;
+    // P21-07: know the answer BEFORE the first hold. `micGranted` only flipped
+    // true after getUserMedia RESOLVED, so the first hold of every page load
+    // paid the device-open latency even when the browser had already granted
+    // permission, and a brisk press-and-release landed inside that window. The
+    // Permissions API answers the same question without opening a device and
+    // without a prompt, so a returning user is primed before they ever touch
+    // the mic. Where it is unsupported (Safari, older Firefox) this is a no-op
+    // and the latch below carries the case instead.
+    function primeMic() {
+      if (micGranted) return;
+      var perms = navigator.permissions;
+      if (!perms || !perms.query) return;
+      try {
+        perms.query({ name: "microphone" }).then(function (st) {
+          if (!st) return;
+          if (st.state === "granted") micGranted = true;
+          st.onchange = function () {
+            if (st.state === "granted") micGranted = true;
+            else if (st.state === "denied") micGranted = false;
+          };
+        }).catch(function () { /* name unsupported: the latch covers it */ });
+      } catch (_) { /* query threw outright: same */ }
+    }
     function ensureMic() {
       if (micGranted) return Promise.resolve(true);
       var md = navigator.mediaDevices;
@@ -1468,6 +1535,100 @@
     // Auto-send (P8-01c): release commits straight through the Send path.
     function autoSendOn() {
       return !!(window.FocusSettings && window.FocusSettings.get("autoSend"));
+    }
+
+    // P21-07: the LATCH. A release that lands before recognition could start
+    // used to mean "that was a tap, open a text box". It now means "keep
+    // listening": recognition starts anyway and runs until the user taps the
+    // mic (or Space) again, or a short silence settles, or the cap trips. A
+    // quick tap begins a conversation, not a typing session.
+    var latched = false;
+    var silenceTimer = null;
+    var latchCap = null;
+    var LATCH_SILENCE_MS = 2600;   // quiet for this long after a tap: that was the end
+    var LATCH_MAX_MS = 20000;      // never leave the mic open on a forgotten tap
+
+    function clearLatchTimers() {
+      clearTimeout(silenceTimer); silenceTimer = null;
+      clearTimeout(latchCap); latchCap = null;
+    }
+    function armLatchSilence() {
+      if (!latched) return;
+      clearTimeout(silenceTimer);
+      silenceTimer = setTimeout(function () { stopLatched(); }, LATCH_SILENCE_MS);
+    }
+    function armLatch() {
+      latched = true;
+      clearLatchTimers();
+      armLatchSilence();
+      latchCap = setTimeout(function () { stopLatched(); }, LATCH_MAX_MS);
+      setHint("Listening… tap the mic when you’re done");
+    }
+    // The one exit from a latched session: settle it the same way a release
+    // settles a hold, warm-up grace included.
+    function stopLatched() {
+      if (!latched) return;
+      latched = false;
+      clearLatchTimers();
+      finishOrWait();
+    }
+
+    // P21-07, THE LIVE BUG. The user held the mic, spoke, and got the compose
+    // box. The three dots they saw are the tell: only `setLiveText(liveText ||
+    // "…")` writes those, so recognition HAD started and HAD fired a result,
+    // carrying nothing. An empty first result right after the press is
+    // recognizer WARM-UP, not silence: Chrome settles the device while the
+    // user is already talking, and the 180ms getUserMedia open (measured, with
+    // permission already granted) sits inside that same window.
+    //
+    // So a release that has heard nothing does not decide anything yet. It
+    // leaves the recognizer running for one short beat, and the moment a
+    // result carries words it sends them. Deliberately SHORT: this is a
+    // late-result window, not a silence timeout, and the control must not feel
+    // unresponsive. One beat per session, so it can never chain.
+    var GRACE_MS = 900;
+    var graceTimer = null;
+    var awaitingLate = false;   // released, heard nothing yet, still listening
+    var graceUsed = false;      // one per recognition session
+
+    function clearGrace() {
+      clearTimeout(graceTimer); graceTimer = null;
+      awaitingLate = false;
+    }
+
+    // The user is done (released, or ended a latch). Send what was heard, or
+    // wait one beat for a late first result before concluding we heard nothing.
+    function finishOrWait() {
+      if (!recording) return;
+      if (!(liveText || "").trim() && !graceUsed) {
+        graceUsed = true;
+        awaitingLate = true;
+        clearTimeout(graceTimer);
+        graceTimer = setTimeout(function () { awaitingLate = false; finishNow(); }, GRACE_MS);
+        return;
+      }
+      finishNow();
+    }
+
+    function finishNow() {
+      clearGrace();
+      latched = false;
+      clearLatchTimers();
+      if (!recording) return;
+      recording = false;
+      try { rec.stop(); } catch (_) {}
+      commitOrEdit(liveText);
+    }
+
+    // Pressing the mic again during the grace beat is not a new turn: the
+    // recognizer never stopped, so the hold simply resumes on the SAME
+    // session. No second SpeechRecognition, so no stale callback can land on
+    // the wrong one.
+    function resumeHold() {
+      clearGrace();
+      holdActive = true;
+      agent.set("listening");
+      setHint(autoSendOn() ? "Listening… release to send" : "Listening… release to edit");
     }
 
     // The surface claim for the turn this hold/keyboard press started. Reaching
@@ -1506,14 +1667,30 @@
       }, text || "", claim);
     }
 
-    // Released -> either commit the transcript now (auto-send on, non-empty)
+    // Heard nothing. NOT an invitation to type: say so and go quiet, which is
+    // what a person does when they miss a sentence. The state is set first so
+    // its own idle hint cannot land on top of this one (both go through the
+    // same debounced hint setter, last write wins).
+    function nothingHeard() {
+      agent.set("idle");
+      setHint("I didn’t catch that, hold the mic and speak as you press");
+      try { surface.hide(); } catch (_) {}
+    }
+
+    // Released -> either commit the transcript now (auto-send on, the default)
     // or settle into review. onCommit is the SAME path as pressing Send, so
     // the double-submit guard and the startTurn interrupt all apply.
+    //
+    // P21-07 changes exactly one branch: an EMPTY result no longer opens the
+    // compose field. Nothing heard is not an invitation to type. The
+    // auto-send setting is untouched and still decides what happens to words
+    // that were actually heard.
     function commitOrEdit(text) {
       var v = (text || "").trim();
+      if (!v) { nothingHeard(); return; }
       // Auto-send: these are the recognizer's words, unseen and unreviewed,
       // so the turn is marked SPOKEN and the echo never shows them.
-      if (v && autoSendOn()) { onCommit(v, { spoken: true }); return; }
+      if (autoSendOn()) { onCommit(v, { spoken: true }); return; }
       toEditable(v);
     }
 
@@ -1537,12 +1714,7 @@
       surface.live(claim);
 
       ensureMic().then(function (ok) {
-        if (!holdActive) {
-          // Released before we could start — a TAP, not a hold. Open the field
-          // to type, which is what a tap on the mic has always done.
-          toEditable("");
-          return;
-        }
+        var wasTap = !holdActive;   // released before we could start
         if (!ok) {
           // Blocked or dismissed. Say why, in words, and fall back to typing
           // so the turn is never a silent dead end. The reason rides the
@@ -1552,11 +1724,15 @@
           return;
         }
         startRecognition();
+        // Released before we got here: LATCH rather than open a text field.
+        // Listening carries on, and the hint says how to end it.
+        if (wasTap) armLatch();
       });
     }
 
     function startRecognition() {
       finalText = ""; liveText = "";
+      graceUsed = false; clearGrace();
       rec = new SR();
       rec.continuous = true;
       rec.interimResults = true;
@@ -1570,6 +1746,10 @@
         }
         liveText = (finalText + interim).replace(/\s+/g, " ").trim();
         surface.setLiveText(liveText || "…", claim);
+        // The late result the grace beat was waiting for: send it now.
+        if (awaitingLate && liveText) { finishNow(); return; }
+        // Still talking: push the latched session's silence deadline out.
+        armLatchSilence();
       };
       rec.onerror = function (e) {
         // No longer swallowed: a denied or broken mic must SAY so, or it reads
@@ -1589,8 +1769,17 @@
         /* no-speech / aborted: quiet — onend settles to edit */
       };
       rec.onend = function () {
-        // Ended on its own while still held (timeout/network): settle to edit.
-        if (recording) { recording = false; toEditable(liveText); }
+        // Ended on its own: a genuine failure falls back to typing (the
+        // stickyHint set in onerror says why), and anything else is simply the
+        // end of the sentence, so it SENDS. Nothing heard says so and goes
+        // quiet. P21-07: this used to settle to the compose field either way.
+        if (!recording) return;
+        recording = false;
+        latched = false;
+        clearLatchTimers();
+        clearGrace();
+        if (stickyHint) { toEditable(liveText); return; }
+        commitOrEdit(liveText);
       };
 
       recording = true;
@@ -1599,22 +1788,36 @@
 
     function end() {
       holdActive = false;
-      // recording is false on a tap or while permission is still pending; the
-      // begin() promise settles those paths, so there is nothing to stop here.
+      // A latched session is not ended by a release: the release is what
+      // started it. Only stopLatched (tap, Space, silence, cap) closes it.
+      if (latched) return;
+      // recording is false while permission is still pending; the begin()
+      // promise settles that path, so there is nothing to stop here.
       if (!recording) return;
-      recording = false;
-      // No transient hint flash here: commitOrEdit() (via toEditable or the
-      // send path) settles the one hint that should survive the release —
-      // the debounce absorbs the churn.
-      try { rec.stop(); } catch (_) {}
-      commitOrEdit(liveText);
+      // No transient hint flash here: finishOrWait() settles the one hint that
+      // should survive the release, through the send path, toEditable or
+      // nothingHeard. The debounce absorbs the churn. It does NOT stop the
+      // recognizer when nothing has been heard yet; that is the grace beat.
+      finishOrWait();
     }
 
     // --- Hold the mic (pointer) ---
-    mic.addEventListener("pointerdown", function (e) { e.preventDefault(); begin(); });
+    // P21-07: while LATCHED the pointer is already up, so every one of these
+    // has to keep its hands off. A pointerleave firing as the user moves the
+    // mouse away from the button would otherwise close the session they just
+    // opened. The only pointer gesture that ends a latch is a fresh tap.
+    mic.addEventListener("pointerdown", function (e) {
+      e.preventDefault();
+      if (awaitingLate) { resumeHold(); return; }
+      if (latched) { stopLatched(); return; }
+      begin();
+    });
     mic.addEventListener("pointerup",   function (e) { e.preventDefault(); end(); });
-    mic.addEventListener("pointerleave", function () { if (recording) end(); });
-    mic.addEventListener("pointercancel", function () { if (recording) end(); });
+    // The grace beat runs with the pointer already up, so leaving the button
+    // must not cut it short either.
+    function leftTheButton() { if (recording && !latched && !awaitingLate) end(); }
+    mic.addEventListener("pointerleave", leftTheButton);
+    mic.addEventListener("pointercancel", leftTheButton);
     mic.addEventListener("contextmenu", function (e) { e.preventDefault(); });
     // Open the field to type: Enter on the focused mic (P7-09), and the
     // dock's keyboard button (P11-02a) — the same one path, so the two
@@ -1639,13 +1842,18 @@
       if (e.code !== "Space" && e.key !== " ") return;
       if (isTyping(e.target)) return;         // let the spacebar type normally
       e.preventDefault();                     // never scroll the page
-      if (e.repeat || recording) return;      // ignore auto-repeat / re-entry
+      if (e.repeat) return;                   // ignore auto-repeat
+      // Space is the mic's twin (P21-07): it resumes a grace beat and ends a
+      // latched session exactly as a second tap does.
+      if (awaitingLate) { resumeHold(); return; }
+      if (latched) { stopLatched(); return; }
+      if (recording) return;                  // re-entry
       begin();
     });
     document.addEventListener("keyup", function (e) {
       if (e.code !== "Space" && e.key !== " ") return;
       if (isTyping(e.target)) return;
-      if (recording) { e.preventDefault(); end(); }
+      if (recording && !latched && !awaitingLate) { e.preventDefault(); end(); }
     });
 
     // --- Just start typing (P11-03) ---
@@ -1671,6 +1879,10 @@
       };
       if (!seed()) requestAnimationFrame(seed);
     });
+
+    // Ask the browser what it already knows, now, so the first hold does not
+    // have to (P21-07). Silent: no prompt, no device opened.
+    primeMic();
 
     return { supported: supported, begin: begin, end: end, openCompose: openCompose };
   }
@@ -5454,6 +5666,178 @@
     return { play: play, pause: shut };
   }
 
+  /* =====================================================================
+     Speaker (P21-08): the ONE <audio> element spoken replies play through.
+
+     THE BUG: on Safari a reply arrived, the words landed, and the room stayed
+     silent; clicking replay on that same reply spoke it. Silent on arrival,
+     audible on a click, is blocked autoplay, and two things caused it.
+
+     1. The priming did not prime. It called play() on `new Audio()` with NO
+        SRC, which rejects immediately on Safari and unlocks nothing. Chrome is
+        lenient about that, which is why this only ever showed up on Safari
+        while the comment claimed the session was unlocked.
+     2. Every reply built a BRAND NEW Audio element. An unlock does not
+        reliably carry from one element to another on Safari: it belongs to the
+        element you actually play.
+
+     So: one element, created once, unlocked inside a real user gesture by
+     playing a moment of real silence on IT, and reused by every reply.
+
+     REUSE MAKES THE CLAIM DISCIPLINE MORE IMPORTANT, NOT LESS. Two replies now
+     share one element, so a superseded reply holding a reference could pause
+     the audio the room is currently hearing, or reveal its own words against
+     the new reply's clock. `take()` therefore hands out a HANDLE, not the
+     element, and every handle goes inert the moment a newer reply takes over:
+     an old handle's play/pause do nothing, its ended listener never fires, its
+     currentTime reads 0 and its `ended` reads true, so the reveal loop it
+     drives lands its words and stops. A stale reply cannot touch the room.
+     ===================================================================== */
+  function createSpeaker() {
+    // 44 bytes of real WAV silence. A source-less element is what broke the
+    // old priming, so this one has a source the browser can actually decode.
+    var SILENCE = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=";
+    var el = null;
+    var gen = 0;             // bumped every time a new reply takes the element
+    var attached = [];       // this generation's listeners, removed on the next take
+    var unlocked = false;
+
+    function element() {
+      if (el) return el;
+      try {
+        el = new Audio();
+        el.preload = "auto";
+      } catch (_) { el = null; }
+      return el;
+    }
+
+    /* Called from the first REAL user gesture of any kind. Plays a moment of
+       silence on the element every later reply will use, then puts it straight
+       back. Muted, so even if a browser lets the sample through nobody hears
+       a click. Never throws: an unlock that fails leaves the p.catch fallbacks
+       in speakSynced/speakOver to land the text, which is the correct
+       degradation and is untouched by this. */
+    // The gesture wiring lives HERE, not at the call site, because a blocked
+    // play has to be able to re-arm it (see `relock`). The old priming was
+    // `{ once: true }`: it fired on the first pointerdown, silently failed,
+    // and the session was mute for the rest of its life with no second
+    // chance. That single fact explains "unreliable" better than anything
+    // else in this file.
+    var armed = false;
+    var GESTURES = ["pointerdown", "keydown", "touchstart"];
+    function onGesture() {
+      disarm();
+      unlock();
+    }
+    function disarm() {
+      armed = false;
+      GESTURES.forEach(function (t) {
+        try { document.removeEventListener(t, onGesture, true); } catch (_) {}
+      });
+    }
+    function arm() {
+      if (armed || unlocked) return;
+      armed = true;
+      // Capture phase: the gesture must reach this even if a handler on the
+      // way down stops propagation.
+      GESTURES.forEach(function (t) {
+        try { document.addEventListener(t, onGesture, true); } catch (_) {}
+      });
+    }
+    /* A play() that was refused means the element is not actually unlocked,
+       whatever we believed. Forget that belief and wait for the next real
+       gesture, so the very next thing the user touches restores the voice
+       instead of the session staying silent forever. */
+    function relock() {
+      unlocked = false;
+      arm();
+    }
+
+    function unlock() {
+      if (unlocked) return;
+      var e = element();
+      if (!e) return;
+      unlocked = true;
+      try {
+        e.muted = true;
+        e.src = SILENCE;
+        var restore = function () {
+          try {
+            e.pause();
+            e.currentTime = 0;
+            e.muted = false;
+            e.removeAttribute("src");
+            e.load();
+          } catch (_) {}
+        };
+        var p = e.play();
+        if (p && p.then) p.then(restore, restore);
+        else restore();
+      } catch (_) { /* no Audio support: replies stay text-only, as before */ }
+    }
+
+    /* A reply takes the element and gets a handle to it. Everything the reply
+       pipeline uses on an audio object is here: play, pause, addEventListener,
+       currentTime, duration, ended, src. */
+    function take(src) {
+      var e = element();
+      if (!e) return null;
+      var mine = ++gen;
+
+      // The previous generation's listeners go now, so a finished reply's
+      // handlers cannot accumulate on an element that lives forever.
+      attached.forEach(function (a) {
+        try { e.removeEventListener(a.type, a.fn); } catch (_) {}
+      });
+      attached = [];
+
+      try { e.pause(); } catch (_) {}
+      try { e.currentTime = 0; } catch (_) {}
+      e.src = src;
+      try { e.load(); } catch (_) {}
+
+      function current() { return mine === gen; }
+
+      var h = {
+        src: src,          // setReplayable keys the whole-file branch off this
+        play: function () {
+          if (!current()) return Promise.resolve();   // superseded: stay silent
+          try {
+            var p = e.play();
+            return (p && p.then) ? p : Promise.resolve();
+          } catch (err) { return Promise.reject(err); }
+        },
+        pause: function () {
+          if (!current()) return;   // never pause the reply the room is hearing
+          try { e.pause(); } catch (_) {}
+        },
+        addEventListener: function (type, fn) {
+          var wrapped = function (ev) { if (current()) fn(ev); };
+          attached.push({ type: type, fn: wrapped });
+          try { e.addEventListener(type, wrapped); } catch (_) {}
+        },
+        load: function () { if (current()) { try { e.load(); } catch (_) {} } },
+      };
+      Object.defineProperty(h, "currentTime", {
+        get: function () { return current() ? (e.currentTime || 0) : 0; },
+        set: function (v) { if (current()) { try { e.currentTime = v; } catch (_) {} } },
+      });
+      Object.defineProperty(h, "duration", {
+        get: function () { return current() ? (e.duration || 0) : 0; },
+      });
+      // A superseded handle reads as finished, so the reveal loop driving it
+      // lands its words and stops instead of spinning against another reply.
+      Object.defineProperty(h, "ended", {
+        get: function () { return current() ? !!e.ended : true; },
+      });
+      return h;
+    }
+
+    return { arm: arm, unlock: unlock, relock: relock, take: take };
+  }
+
+  var speaker = createSpeaker();
+
   function createVoice() {
     var currentAudio = null;   // so a new reply / interrupt cuts off the previous one
     var token = 0;             // bumped by stop(); stale prepares resolve null
@@ -5618,11 +6002,16 @@
           var done = false;
           function settle(v) { if (!done) { done = true; resolve(v); } }
           try {
-            var audio = new Audio("data:audio/mpeg;base64," + res.audio_base64);
-            // preload="auto" plus a second readiness event: a data: URL that
-            // never fires loadedmetadata used to leave this promise hanging
-            // forever, and a hanging prepare is a permanently silent reply.
-            try { audio.preload = "auto"; } catch (_) {}
+            // P21-08: the ONE unlocked element, not a fresh one per reply. A
+            // brand new element is not covered by the session's unlock on
+            // Safari, which is what made every reply silent until it was
+            // clicked. `take` also makes the previous reply's handle inert.
+            var audio = speaker.take("data:audio/mpeg;base64," + res.audio_base64);
+            if (!audio) { settle(null); return; }
+            // A second readiness event as well as loadedmetadata: a data: URL
+            // that never fires loadedmetadata used to leave this promise
+            // hanging forever, and a hanging prepare is a permanently silent
+            // reply.
             function ready() {
               settle(tok === token ? { audio: audio, duration: audio.duration } : null);
             }
@@ -7192,16 +7581,31 @@
       onFile: sendImage,
     });
 
-    // Autoplay priming (P7-01): one real user gesture unlocks audio playback
-    // for the session, so the first synced reply isn't blocked by the browser.
-    document.addEventListener("pointerdown", function prime() {
-      try {
-        var a = new Audio();
-        a.muted = true;
-        var p = a.play();
-        if (p && p.catch) p.catch(function () { /* fine — gesture still registered */ });
-      } catch (_) { /* no Audio support — nothing to prime */ }
-    }, { once: true });
+    // Autoplay priming (P7-01, rebuilt in P21-08). One real user gesture
+    // unlocks the element every spoken reply will play through.
+    //
+    // What it used to do was call play() on a source-less `new Audio()`, which
+    // rejects instantly on Safari and unlocks nothing, on an element no reply
+    // ever used. Two reasons it could not work, and the comment claimed it did.
+    //
+    // Now: the shared speaker element, given real silence to play, inside the
+    // first gesture of ANY kind. Keydown and touchstart matter as much as
+    // pointerdown. A user whose first act is typing their message must not
+    // end up in a permanently silent session.
+    speaker.arm();
+
+    /* If a reply's voice was refused, the words are on screen and the replay
+       control beside them is the way to hear it. Say that ONCE per session, as
+       a hint pulse that clears itself: repeating it on every reply would be
+       noise, and saying nothing would leave a silent failure looking like a
+       reply that simply had no voice. The next gesture re-unlocks the element
+       anyway (speaker.relock), so in practice this is a one-time nudge. */
+    var toldAboutBlockedAudio = false;
+    document.addEventListener("blink:audio-blocked", function () {
+      if (toldAboutBlockedAudio) return;
+      toldAboutBlockedAudio = true;
+      hint.pulse("Your browser held the sound back. Tap replay to hear it.");
+    });
 
     // Local block reminders (P9-03d): armed here, re-armed on every refresh
     // so a fresh plan reschedules its nudges.
