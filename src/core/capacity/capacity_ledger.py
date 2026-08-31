@@ -2,6 +2,8 @@
 from datetime import datetime, timedelta, time
 from typing import List, Dict, NamedTuple
 from src.core.utils.date_utils import TimeInterval, subtract_intervals, diff_minutes
+from src.core.calendar.calendar_sync import constraints_to_intervals
+from src.core.zones import zones_to_intervals
 
 class DayCapacity(NamedTuple):
     date: str  # YYYY-MM-DD
@@ -35,6 +37,33 @@ def earliest_placement(now: datetime) -> datetime:
     if remainder:
         n += timedelta(minutes=PLACEMENT_GRANULARITY_MINUTES - remainder)
     return n
+
+def build_planning_ledger(
+    constraints,
+    zones,
+    start_date: datetime,
+    days: int = 7,
+    extra_busy: List[TimeInterval] = (),
+) -> CapacityLedger:
+    """THE capacity construction every planning path shares.
+
+    One place turns a workspace's real busy time into a ledger: stored
+    constraints (work hours, imported calendar events) + life-memory zones
+    (P9-08) + any `extra_busy` the caller knows about (still-standing sessions,
+    for instance). All three feed the SAME subtraction path, so an overlap can
+    never double-subtract.
+
+    `ledger_for` (the /details, /ingest and _schedule_current path) and the
+    disruption rebalancer both call this. Any path that builds its own ledger
+    with `constraints=[]` is planning against a workspace that does not exist.
+    """
+    busy: List[TimeInterval] = constraints_to_intervals(
+        list(constraints or []), start_date=start_date, days=days)
+    busy += zones_to_intervals(list(zones or []), start_date=start_date, days=days)
+    busy += list(extra_busy or [])
+    return build_capacity_ledger(
+        start_date=start_date, days=days, constraints=busy, calendar_busy=[])
+
 
 def build_capacity_ledger(
     start_date: datetime,

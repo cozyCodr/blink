@@ -756,8 +756,14 @@ def _ingest_image(workspace_id: str, payload: IngestImageRequest):
 
 def _apply_disruption(store, workspace_id: str, reason: str, notes, now: datetime):
     """Run the disruption rebalancer and APPLY its outcome to the store.
-    Shared by the /disruptions route and the /turn `disruption` intent (P9-01).
-    Returns (trigger_res, rebalance_res, new_blocks)."""
+    Shared by the /disruptions route and the /turn `disruption` intent (P9-01),
+    where it is the OFFLINE fallback for the agent path.
+
+    Returns (trigger_res, rebalance_res, new_blocks, cancelled_blocks) — the
+    last two are what was ACTUALLY committed / actually cancelled in this
+    store, never what the pure rebalancer merely proposed. Every count a reply
+    speaks is composed from these.
+    """
     trigger_res, rebalance_res = execute_disruption_trigger(
         commitments=store.get_active_commitments(),
         tasks=store.get_ready_tasks(),
@@ -765,16 +771,17 @@ def _apply_disruption(store, workspace_id: str, reason: str, notes, now: datetim
         now=now,
         workspace_id=workspace_id,
         reason=reason,
-        notes=notes
+        notes=notes,
+        # Audit gap 4: the replan is mirrored to the user's REAL calendar, so it
+        # must be planned against their real constraints and no-touch zones.
+        constraints=list(store.constraints.values()),
+        zones=list(store.zones.values()),
     )
     cancelled_blocks = []
     for cid in rebalance_res.cancelled_block_ids:
         if cid in store.blocks:
             store.blocks[cid].status = "cancelled"
             cancelled_blocks.append(store.blocks[cid])
-    # Cancel-before-create (P19-04): drop the cancelled blocks' calendar events
-    # BEFORE the replacements are created. Best-effort; never raises.
-    mirror_cancel(store, workspace_id, cancelled_blocks)
     new_blocks = [
         Block(
             id=pb.id,
@@ -786,11 +793,35 @@ def _apply_disruption(store, workspace_id: str, reason: str, notes, now: datetim
         )
         for pb in rebalance_res.new_blocks
     ]
+    # Replace semantics, same discipline as _schedule_current (audit gap 5):
+    # the rebalancer re-places EVERY ready/scheduled task, not only today's, so
+    # without this a task already booked for Thursday gains a SECOND Thursday
+    # session and a second Google Calendar event, and the reported count is
+    # inflated. Blocks with outcomes are history and are never touched.
+    dropped = store.drop_planned_blocks({b.task_id for b in new_blocks})
+    # Cancel-before-create (P19-04): every event that is going away — the
+    # disruption's own cancellations AND the superseded duplicates — loses its
+    # calendar event BEFORE the replacements are created, so a replaced task
+    # never briefly holds two events. Best-effort; never raises.
+    mirror_cancel(store, workspace_id, cancelled_blocks + dropped)
     store.commit_blocks(new_blocks)
     # Mirror the committed blocks to Google Calendar (P19-04), after commit.
     mirror_commit(store, workspace_id, new_blocks)
+    # The diagnostics the reply's `schedule` field carries must describe THIS
+    # pass, not whichever earlier _schedule_current happened to run last.
+    sched = rebalance_res.schedule
+    store.last_schedule_report = {
+        "utilization_pct": sched.diagnostics.get("utilization_pct"),
+        "total_planned_minutes": sched.diagnostics.get("total_planned_minutes"),
+        "unplaced": [
+            {"task_id": u.task_id, "title": u.title, "reason": u.reason}
+            for u in sched.unplaced
+        ],
+        "blocks_scheduled": len(new_blocks),
+        "block_ids": [b.id for b in new_blocks],
+    }
     store.record_disruption(rebalance_res.disruption)
-    return trigger_res, rebalance_res, new_blocks
+    return trigger_res, rebalance_res, new_blocks, cancelled_blocks
 
 
 @app.post("/v1/workspaces/{workspace_id}/disruptions")
@@ -803,7 +834,7 @@ async def trigger_disruption(
     store = get_or_create_store(workspace_id)
     now = _now()
 
-    trigger_res, rebalance_res, new_blocks = _apply_disruption(
+    trigger_res, rebalance_res, new_blocks, cancelled_blocks = _apply_disruption(
         store, workspace_id, payload.reason, payload.notes, now
     )
 
@@ -817,7 +848,8 @@ async def trigger_disruption(
     return {
         "status": "rebalanced",
         "reason": payload.reason,
-        "cancelled_blocks": len(rebalance_res.cancelled_block_ids),
+        # Real applied counts, not proposed ones.
+        "cancelled_blocks": len(cancelled_blocks),
         "rescheduled_blocks": len(new_blocks),
         "notification": trigger_res.notification_body
     }
@@ -1565,85 +1597,24 @@ def _turn(workspace_id: str, payload: TurnRequest,
         return reply
 
     if intent.label == "disruption":
-        # P9-01 "life happens": the user says today's time is gone — run the
-        # existing rebalancer autonomously and answer with the REAL outcome
-        # (grounded-text discipline from P8-01: exact counts, or an honest
-        # "nothing needed moving"). Pure moves need no confirm gate.
-        # DisruptionEvent.reason is a typed enum; the raw phrase rides in notes.
-        lowered = message.lower()
-        if any(w in lowered for w in ("sick", "ill", "unwell")):
-            reason = "illness"
-        elif any(w in lowered for w in ("meeting", "call ", "ran over", "overran", "ran late")):
-            reason = "meeting_overrun"
-        elif any(w in lowered for w in ("tired", "exhausted", "fatigue")):
-            reason = "fatigue"
-        elif any(w in lowered for w in ("travel", "flight", "trip")):
-            reason = "travel"
-        elif "emergency" in lowered:
-            reason = "emergency"
-        else:
-            reason = "other"
-        _t, rebalance_res, new_blocks = _apply_disruption(
-            store, workspace_id, reason, message[:200], now
-        )
-        cancelled = len(rebalance_res.cancelled_block_ids)
-        moved = len(new_blocks)
-        if cancelled == 0 and moved == 0:
-            text = ("Nothing on today's plan needed moving, so you're already "
-                    "clear. Take the time you need.")
-        elif cancelled == 0:
-            # nothing today had to go, but upcoming sessions were re-placed
-            sess = "session" if moved == 1 else "sessions"
-            text = (f"Today stays as it was; I re-placed {moved} upcoming "
-                    f"{sess} into better room. Nothing was dropped.")
-            text = conversation.naturalize_outcome(text, [str(moved)])
-        else:
-            sess = "session" if cancelled == 1 else "sessions"
-            text = (f"I cleared {cancelled} {sess} from today and rescheduled "
-                    f"{moved} into open room later. Nothing was dropped."
-                    if moved >= cancelled else
-                    f"I cleared {cancelled} {sess} from today and rescheduled "
-                    f"{moved} so far; the rest needs open room I couldn't find yet.")
-            text = conversation.naturalize_outcome(
-                text, [str(cancelled), str(moved), "rescheduled"])
-        # P11-08: the two counts are the facts the reply is built on, and the
-        # first re-placed block is a real object, so "open the day it landed on"
-        # is a capability that already exists rather than a promise.
-        disruption_actions: List[Dict[str, Any]] = []
-        if new_blocks:
-            first_moved = min(new_blocks, key=lambda b: b.starts_at)
-            disruption_actions = [{
-                "action": "open_plan",
-                "label": "Open the day this moved to",
-                "level": "day",
-                "date": first_moved.starts_at.date().isoformat(),
-            }]
-        return {
-            "type": "replanned",
-            "text": text,
-            **decorate(
-                text,
-                [make_candidate(cancelled, "count"), make_candidate(moved, "count")],
-                disruption_actions,
-            ),
-            "cancelled_blocks": cancelled,
-            "rescheduled_blocks": moved,
-            # block-level detail so the frontend can animate the week diff
-            # (P9-01): ghosts fade at the old slots, new chips spring in.
-            "moved_blocks_detail": [
-                {"id": b.id, "task_id": b.task_id,
-                 "starts_at": b.starts_at.isoformat(), "ends_at": b.ends_at.isoformat()}
-                for b in new_blocks
-            ],
-            "cancelled_blocks_detail": [
-                {"id": cid,
-                 "task_id": store.blocks[cid].task_id,
-                 "starts_at": store.blocks[cid].starts_at.isoformat(),
-                 "ends_at": store.blocks[cid].ends_at.isoformat()}
-                for cid in rebalance_res.cancelled_block_ids if cid in store.blocks
-            ],
-            "schedule": store.last_schedule_report,
-        }
+        # "Life happens" is a CONVERSATION, not one hard-coded manoeuvre.
+        # Audit gap 1: this branch used to call _apply_disruption directly and
+        # never invoke the agent, so `cancel_sessions` / `delete_tasks` /
+        # `move_session` — the tools built and documented for exactly "clear my
+        # afternoon", "cancel my day" — were unreachable for every phrasing the
+        # router labels `disruption`. The user asked for a CLEAR and got a MOVE.
+        # So: run the real agent when it is up, with a note that separates
+        # "give me the time back" from "I lost time, re-place it", and keep the
+        # deterministic rebalancer as the OFFLINE fallback — the same shape the
+        # evening check-in already uses above (agent_available() -> agent, else
+        # the structured flow), so accountability degrades instead of vanishing.
+        if agent_runtime.agent_available():
+            reply = agent_runtime.run_chat_turn(
+                workspace_id, message, payload.history,
+                context_note=_DISRUPTION_CONTEXT_NOTE)
+            reply.setdefault("type", "message")
+            return reply
+        return _disruption_structured_response(store, workspace_id, message, now)
 
     if intent.label == "plan_goal":
         # P11-11: the commitment title is a LABEL in the horizon, so the model
@@ -1693,6 +1664,121 @@ def _turn(workspace_id: str, payload: TurnRequest,
         store.questions[q.id] = q
     blocks = _schedule_current(store, workspace_id, now)
     return _planned_outcome_response(store, len(decomp.tasks), blocks, now)
+
+
+_DISRUPTION_CONTEXT_NOTE = (
+    "The user's day just changed. First work out WHICH of two things they are "
+    "asking for, because they are not the same:\n"
+    "(a) CLEAR — they want the time back and the work off the day (\"clear "
+    "everything that's on for today\", \"cancel my afternoon\", \"wipe my "
+    "morning\", \"take it all off, I'm not doing any of it\"). Call "
+    "list_todays_sessions to get the real session ids, work out which ones they "
+    "actually mean, and cancel exactly those with cancel_sessions (it removes "
+    "the session and keeps the task). Do not re-book them anywhere; they asked "
+    "for the time back. If they want the tasks gone too, that is delete_tasks, "
+    "and say plainly that deleting cannot be undone before you do it.\n"
+    "(b) LOST TIME — something took the time from them and the work still has "
+    "to happen (\"my meeting ran over\", \"I'm sick today\", \"I lost my "
+    "morning\"). Then the work needs re-placing into real open room, not "
+    "cancelling.\n"
+    "If which one they mean is genuinely unclear, ask one short question rather "
+    "than guessing — a wrong cancel is not recoverable. Name back the sessions "
+    "you are about to remove before you remove a batch of them. Report only "
+    "what a tool actually returned: never claim you cleared, moved or "
+    "rescheduled anything unless the tool said it happened, and never invent a "
+    "count."
+)
+
+
+def _disruption_structured_response(store, workspace_id: str, message: str,
+                                    now: datetime):
+    """The deterministic 'life happens' rebalance — the OFFLINE fallback for the
+    `disruption` intent when the agent path is down (mirrors
+    `_checkin_structured_response`). Runs the rebalancer autonomously and
+    answers with the REAL outcome (grounded-text discipline from P8-01: exact
+    committed counts, or an honest "nothing needed moving"). Pure moves need no
+    confirm gate. DisruptionEvent.reason is a typed enum; the raw phrase rides
+    in notes."""
+    lowered = message.lower()
+    if any(w in lowered for w in ("sick", "ill", "unwell")):
+        reason = "illness"
+    elif any(w in lowered for w in ("meeting", "call ", "ran over", "overran", "ran late")):
+        reason = "meeting_overrun"
+    elif any(w in lowered for w in ("tired", "exhausted", "fatigue")):
+        reason = "fatigue"
+    elif any(w in lowered for w in ("travel", "flight", "trip")):
+        reason = "travel"
+    elif "emergency" in lowered:
+        reason = "emergency"
+    else:
+        reason = "other"
+    _t, rebalance_res, new_blocks, cancelled_blocks = _apply_disruption(
+        store, workspace_id, reason, message[:200], now
+    )
+    # Truthfulness (audit TR-4): both numbers the reply speaks are the numbers
+    # that were ACTUALLY applied to this store — `cancelled_blocks` are the
+    # blocks whose status this store really flipped to cancelled, `new_blocks`
+    # are the blocks really committed after the duplicate drop. The rebalancer's
+    # proposed `cancelled_block_ids` / `rescheduled_task_ids` are attempts, and
+    # an attempt is not an outcome.
+    cancelled = len(cancelled_blocks)
+    moved = len(new_blocks)
+    if cancelled == 0 and moved == 0:
+        text = ("Nothing on today's plan needed moving, so you're already "
+                "clear. Take the time you need.")
+    elif cancelled == 0:
+        # nothing today had to go, but upcoming sessions were re-placed
+        sess = "session" if moved == 1 else "sessions"
+        text = (f"Today stays as it was; I re-placed {moved} upcoming "
+                f"{sess} into better room. Nothing was dropped.")
+        text = conversation.naturalize_outcome(text, [str(moved)])
+    else:
+        sess = "session" if cancelled == 1 else "sessions"
+        text = (f"I cleared {cancelled} {sess} from today and rescheduled "
+                f"{moved} into open room later. Nothing was dropped."
+                if moved >= cancelled else
+                f"I cleared {cancelled} {sess} from today and rescheduled "
+                f"{moved} so far; the rest needs open room I couldn't find yet.")
+        text = conversation.naturalize_outcome(
+            text, [str(cancelled), str(moved), "rescheduled"])
+    # P11-08: the two counts are the facts the reply is built on, and the
+    # first re-placed block is a real object, so "open the day it landed on"
+    # is a capability that already exists rather than a promise.
+    disruption_actions: List[Dict[str, Any]] = []
+    if new_blocks:
+        first_moved = min(new_blocks, key=lambda b: b.starts_at)
+        disruption_actions = [{
+            "action": "open_plan",
+            "label": "Open the day this moved to",
+            "level": "day",
+            "date": first_moved.starts_at.date().isoformat(),
+        }]
+    return {
+        "type": "replanned",
+        "text": text,
+        **decorate(
+            text,
+            [make_candidate(cancelled, "count"), make_candidate(moved, "count")],
+            disruption_actions,
+        ),
+        "cancelled_blocks": cancelled,
+        "rescheduled_blocks": moved,
+        # block-level detail so the frontend can animate the week diff
+        # (P9-01): ghosts fade at the old slots, new chips spring in.
+        "moved_blocks_detail": [
+            {"id": b.id, "task_id": b.task_id,
+             "starts_at": b.starts_at.isoformat(), "ends_at": b.ends_at.isoformat()}
+            for b in new_blocks
+        ],
+        "cancelled_blocks_detail": [
+            {"id": b.id,
+             "task_id": b.task_id,
+             "starts_at": b.starts_at.isoformat(),
+             "ends_at": b.ends_at.isoformat()}
+            for b in cancelled_blocks
+        ],
+        "schedule": store.last_schedule_report,
+    }
 
 
 # --- Evening check-in (P9-03) ----------------------------------------------

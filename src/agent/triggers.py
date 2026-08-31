@@ -74,9 +74,14 @@ def execute_disruption_trigger(
     now: datetime,
     workspace_id: str,
     reason: str = "emergency",
-    notes: Optional[str] = None
+    notes: Optional[str] = None,
+    constraints: Optional[List] = None,
+    zones: Optional[List] = None,
 ) -> Tuple[TriggerResult, RebalanceResult]:
-    """Handles on-demand emergency disruption: cancels remaining today's blocks & rebalances."""
+    """Handles on-demand emergency disruption: cancels remaining today's blocks & rebalances.
+
+    `constraints` / `zones` are the workspace's REAL ones; without them the
+    rebalancer plans against an empty day (audit gap 4)."""
     rebalance_res = rebalance_after_disruption(
         commitments=commitments,
         tasks=tasks,
@@ -84,7 +89,9 @@ def execute_disruption_trigger(
         now=now,
         workspace_id=workspace_id,
         reason=reason,  # type: ignore
-        notes=notes
+        notes=notes,
+        constraints=constraints,
+        zones=zones,
     )
 
     body = f"Disruption absorbed ({reason}): {len(rebalance_res.cancelled_block_ids)} blocks cleared, {len(rebalance_res.new_blocks)} rescheduled across future days."

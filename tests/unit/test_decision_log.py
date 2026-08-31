@@ -95,7 +95,10 @@ def test_turn_emits_trace_line_without_message_content(capsys):
         assert re.fullmatch(
             r"\[turn ws=ws_trace_test\] intent=disruption -> "
             r"cleared \d+ today, re-placed \d+, unplaced \d+"
-            r"(, utilization \d+%)? \(\d+ms\)",
+            # utilization_pct is a float from the scheduler's own diagnostics
+            # ("0.0%", "13.3%"); the disruption path now publishes ITS pass's
+            # report instead of leaving an earlier pass's numbers standing.
+            r"(, utilization [\d.]+%)? \(\d+ms\)",
             lines[0]), lines[0]
         # zero content: the user's message never reaches stdout
         assert "meeting" not in out

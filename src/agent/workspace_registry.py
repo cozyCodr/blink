@@ -23,7 +23,9 @@ from typing import Dict, List, Optional, Set
 from src.sim.fake_store import FakeStore
 from src.agent import decision_log
 from src.agent import persistence
-from src.core.capacity.capacity_ledger import build_capacity_ledger, CapacityLedger
+from src.core.capacity.capacity_ledger import (
+    build_capacity_ledger, build_planning_ledger, CapacityLedger,
+)
 from src.core.calendar.calendar_sync import constraints_to_intervals
 from src.core.zones import zones_to_intervals
 
@@ -173,7 +175,13 @@ def ledger_for(store: FakeStore, now: datetime, days: int = 7) -> CapacityLedger
     """Build the capacity ledger using the workspace's real constraints (busy/work times)
     AND its life-memory zones (P9-08), so work is placed around them instead of
     ignoring them. Both feed the same subtraction path, so a zone overlapping a
-    calendar-imported constraint can never double-subtract."""
-    busy = constraints_to_intervals(list(store.constraints.values()), start_date=now, days=days)
-    busy += zones_to_intervals(list(store.zones.values()), start_date=now, days=days)
-    return build_capacity_ledger(start_date=now, days=days, constraints=busy, calendar_busy=[])
+    calendar-imported constraint can never double-subtract.
+
+    The construction itself lives in `build_planning_ledger` so the disruption
+    rebalancer plans against the same real busy time this path does."""
+    return build_planning_ledger(
+        constraints=list(store.constraints.values()),
+        zones=list(store.zones.values()),
+        start_date=now,
+        days=days,
+    )
