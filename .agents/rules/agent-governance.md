@@ -8,7 +8,7 @@ To maintain high engineering discipline and avoid brittle agent behavior, the fo
 - **`gemini-config.md`** — Gemini 3.x generation config (Flash-first; temperature stays 1.0), structured output, function calling, prompting, safety.
 - **`conversational-voice.md`** — the human-voice style guide (banned AI tells incl. em dashes) and clarify-question-as-data schema. Drives `src/agent/voice.py`.
 - **`code-style.md`**, **`testing-and-sim.md`** — modularity and simulation discipline.
-- **`frontend-standards.md`** — the web app's CSS organization (eight ownership-scoped files in `src/web/css/`, load order is load-bearing, tokens only in `tokens.css`, transform-channel contract on the face), the face-theme scope (`data-face` on `<html>`, capsule default; lumen/cathode/folio/unit land post-superpowers as P10), the twelve-emotion vocabulary with its truthfulness rule (emotion beats only when the grounded data backs them), and the factory-per-component JS pattern.
+- **`frontend-standards.md`** — the web app's CSS organization (nine ownership-scoped files in `src/web/css/`, load order is load-bearing, tokens only in `tokens.css`, transform-channel contract on the face), the face-theme scope (`data-face` on `<html>`, capsule default; lumen/cathode/folio/unit land post-superpowers as P10), the twelve-emotion vocabulary with its truthfulness rule (emotion beats only when the grounded data backs them), and the factory-per-component JS pattern.
 
 These are hard requirements, not suggestions: they map to the hackathon's 30% "Architectural Discipline & Tech Stack" score.
 

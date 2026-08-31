@@ -5,13 +5,22 @@
 
 Everything below is cited to the file and line it was read from. Nothing is credited on the strength of a tool's name.
 
+> **Partly superseded (2026-08-31).** A further batch landed after the re-score in §(b):
+> `get_progress`, `undo_last_change`, `set_task_estimate`, `check_slot` and
+> `shift_sessions`. `ALL_TOOLS` is now **28 tools** at `src/agent/tools.py:3093`, so the
+> gap §(c) lists first (no progress / streak / history tool) is closed, §(c)'s second gap
+> is closed too (`list_tasks` now returns `commitment_id`, `commitment_title` and
+> `estimate_minutes` per row and takes `include_done`, `src/agent/tools.py:1469`), and the
+> 54/100 effective pass rate below understates the product. The audit is kept as the record of the
+> before/after, not as the current capability list.
+
 ---
 
 ## (a) The capability surface, as it actually is
 
 ### A.1 The ADK tool list
 
-`ALL_TOOLS` — `src/agent/tools.py:1871-1925`. Twenty-four tools. Signatures verified individually.
+`ALL_TOOLS` as it stood at audit time: twenty-four tools, signatures verified individually. (It is **28 tools** today, at `src/agent/tools.py:3093`; see the superseding note above.)
 
 | Tool | Signature | Returns / limits | Cite |
 |---|---|---|---|

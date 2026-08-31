@@ -10,9 +10,69 @@ Blink is an ambient presence, not a chat box. You tell it something as vague as 
 
 ---
 
+## Claims → where they are proven
+
+Every row is a claim we make, the file that proves it, and a way to check it in seconds.
+Nothing here rests on a document's own word.
+
+| Claim | Where it is proven | How to verify |
+|---|---|---|
+| A real Google ADK agent is on the live request path, not decoration | `root_agent` in `src/agent/agent.py:210`; `run_chat_turn` in `src/agent/agent_runtime.py:398`, called from `src/api/server.py:1507`, `:1570`, `:1594`, `:1612` | `grep -n run_chat_turn src/api/server.py` |
+| 28 typed, docstring'd, status-returning tools over a pure deterministic core | `ALL_TOOLS`, `src/agent/tools.py:3093` | `python -c "from src.agent.tools import ALL_TOOLS; print(len(ALL_TOOLS))"` → `28` |
+| Google Calendar writes are gated **structurally**, not by prompting | The four `*_confirmed` wire tools are removed from the model's toolset (`src/agent/tools.py:3093`); `before_tool_callback=_block_unconfirmed_writes` is the belt (`src/agent/agent.py:222`) | `python -c "from src.agent.tools import ALL_TOOLS; print([t.__name__ for t in ALL_TOOLS if t.__name__.endswith('_confirmed')])"` → `[]` |
+| Committed focus blocks are mirrored into real Google Calendar, best-effort, and the reply is composed from what actually landed | `src/api/calendar_mirror.py` (`MirrorResult`; never raises into the commit path, idempotent, retryable) | `python -m pytest -q tests/unit/test_calendar_mirror.py` |
+| Timer-measured minutes and self-reported minutes are kept apart and never summed | `get_progress`, `src/agent/tools.py:1045` (see the `NEVER SUMMED` comment at `:1156`) | `grep -n "NEVER SUMMED" src/agent/tools.py` |
+| Insights are mined deterministically, never on fewer than three occurrences, and change nothing without your consent | `src/core/insights.py`; surfaced one at a time by `_strongest_insight_payload`, `src/api/server.py:2068` | `python -m pytest -q tests/unit/test_insights.py` |
+| Reply text is post-checked against the real outcome; a rephrase that drops a real count is discarded | `src/agent/conversation.py` + the grounded-reply invariants | `python -m pytest -q tests/unit/test_grounded_responses.py tests/unit/test_reply_evidence.py` |
+| We audited our own agent against 100 realistic requests, fixed the gaps, and re-scored | `docs/AGENT_COVERAGE_AUDIT.md` (effective pass rate 42/100 → 54/100, with every remaining miss still listed) | read §(b) and §(c) |
+| Tool **selection** is measured against the live model, and a destructive mistake is scored separately | `tests/evalsets/tool_selection_probe.py` (exit code 2 is reserved for a delete/cancel that fired where it was not authorised) | `tests/evalsets/TOOL_SELECTION_PROBE.md` |
+| Blink is measured against Google's own agent canon, PARTIAL and ABSENT verdicts included | `docs/AGENTIC_STANDARDS_AUDIT.md` | read it |
+| 849 tests, fully offline: the LLM mocked at one seam, Firestore off | `tests/` | `python -m pytest -q` |
+| The app boots and serves a turn with **no credentials at all** | deterministic fallbacks on every LLM path; `/_health` reports `"backend": "memory"` | see [Run it locally](#run-it-locally) |
+
 ## The problem
 
 Knowledge workers burn cognitive effort on three things that aren't the work itself: **decomposing** big opaque goals, **arbitrating** what to do right now, and **maintaining** the plan after reality diverges from it. Task managers store tasks you already decomposed; calendars store blocks you already decided on; chatbots forget you between sessions. The gap is a partner that carries state, exercises judgment, and **keeps working after the conversation ends**.
+
+## The data loop
+
+Blink is a data partner, not a chatbot that remembers.
+
+**Ingests.** Every channel you give it: typed and spoken messages (browser speech
+recognition into the same turn endpoint), syllabus and timetable photos through Gemini
+vision (`POST /ingest-image`), your Google Calendar over OAuth, a get-to-know-you
+interview on first run, and a focus timer that *measures* work instead of trusting a
+self-report.
+
+**Lifecycle.** Hard rules, not vibes. Timer minutes are recorded fact and a later
+self-report can never overwrite a measurement (`actual_source: "timer"`). The
+conversation log is capped at 40 entries so the prompt window cannot grow unbounded
+(`CONVERSATION_MAX_ENTRIES`, `src/sim/fake_store.py:14`), which is the concrete answer to
+context rot. Live listeners and the trace stream are never persisted. Only the workspace
+sections that actually changed are written back to Firestore, after the response, off the
+request path (`src/agent/persistence.py`). Progress, streaks and pacing are derived at
+read time so no stored number can drift.
+
+**Filters.** Insight mining refuses to fire on fewer than three occurrences, and an
+insight you accepted or dismissed never comes back (`src/core/insights.py`,
+`src/api/server.py:2068`). At most one insight rides any single response, chosen by
+evidence count. `web_search` asks before its first search and hands the model URL-free,
+scrubbed source cards, so it cannot recite a URL it never saw (`_speakable_sources`,
+`src/agent/tools.py:561`). Grounded page text is treated as untrusted data, never as
+instruction.
+
+**Shapes the response.** Durable facts change what Blink says and does, not just what it
+can recall: no-touch zones from onboarding constrain the capacity arithmetic and are cited
+back to you ("I kept your Work and Sleep time clear"); `get_progress` is the only grounding
+for "how am I doing", and it quotes measured and reported minutes as two separate numbers
+because summing them would be a lie.
+
+**Self-improves.** Accept an insight and it graduates into durable state: a learned
+no-touch zone the capacity math then respects, or a planning key point that joins the
+synthesis prompt for every future plan (`src/agent/specialists/onboarding.py:286-325`,
+`src/agent/specialists/plan_synthesizer.py:232`). Decline it and the id is recorded as
+dismissed, so it is never offered again. Memory here is not recall, it is behaviour
+change: filtered to what the evidence supports, and gated on your consent.
 
 ## What makes it different
 
@@ -47,7 +107,7 @@ status-returning functions over a pure deterministic core, `src/agent/tools.py`)
 and an **orchestration layer** (the turn router plus the LLM specialists,
 `src/api/server.py` and `src/agent/specialists/`). In short:
 
-- **Browser** — the eyes presence + horizon + response-component kit (`src/web/`, eight ownership-scoped stylesheets, vanilla component factories).
+- **Browser** — the eyes presence + horizon + response-component kit (`src/web/`, nine ownership-scoped stylesheets, vanilla component factories).
 - **FastAPI** (`src/api/server.py`) — a **turn router** (`/turn`) classifies every message (chat · plan a goal · concrete tasks · disruption) and routes it; `/elicit/answer` runs the elicitation loop; `/details` powers the horizon; `/calendar/*` handles OAuth + sync; `/tts` speaks.
 - **LLM specialists** (`src/agent/specialists/`) — `intent_router`, `goal_classifier`, `elicitor`, `extractor`, `plan_synthesizer`, all LLM-first with deterministic fallbacks, all through one Gemini gateway (`src/agent/llm.py`) with client-lifecycle hygiene (timeouts, stale-client rebuild, retry-once).
 - **Deterministic core** (`src/core/`) — pure capacity ledger, greedy scheduler, rebalancer, validator, priority scoring, milestone progress accrual. Zero I/O, fully tested.
@@ -87,7 +147,7 @@ cd blink
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 3. configure (copy .env.example -> .env and fill in)
+# 3. configure — OPTIONAL (copy .env.example -> .env and fill in)
 #    Simplest local path: set GEMINI_API_KEY (already stubbed in .env.example).
 #    For keyless Vertex instead, add these to .env:
 #      GOOGLE_GENAI_USE_VERTEXAI=TRUE
@@ -96,9 +156,21 @@ pip install -r requirements.txt
 #      GOOGLE_APPLICATION_CREDENTIALS=</abs/path/to/sa-key.json>   # or use ADC
 cp .env.example .env   # then edit
 
-# 4. run
-python -c "from dotenv import load_dotenv; load_dotenv('.env'); import uvicorn; uvicorn.run('src.api.server:app', host='0.0.0.0', port=8080)"
+# 4. run (either one). The app reads the environment, not the file, so export it first;
+#    skip the export entirely and Blink still runs on its deterministic core.
+set -a && source .env && set +a
+uvicorn src.api.server:app --host 0.0.0.0 --port 8080
+
+# or containerised, exactly the way Cloud Run runs it:
+docker build -t blink . && docker run --env-file .env -p 8080:8080 blink
 ```
+
+**No credentials needed to run it.** With an empty environment the app still boots and
+serves a real turn: `GET /_health` returns `200` with `"backend": "memory"`, and every
+LLM path answers from its deterministic fallback (`POST /v1/workspaces/{id}/turn` replies
+with the real state of the workspace and says it is running without the model). Verified
+from a clean environment. Credentials only add the Gemini, Firestore, Calendar and TTS
+paths.
 
 Open **http://localhost:8080**. Tap the mic, type *"I want to become a data scientist,"* and answer the questions.
 
@@ -106,7 +178,7 @@ Open **http://localhost:8080**. Tap the mic, type *"I want to become a data scie
 
 ```bash
 source .venv/bin/activate
-python -m pytest -q     # 477 passing, fully offline (the LLM is mocked, Firestore is off)
+python -m pytest -q     # 849 passing, fully offline (the LLM is mocked, Firestore is off)
 ```
 
 There is also an ADK-native evalset that runs the real `root_agent` in Google's own harness — strict tool-trajectory scoring plus final-response matching (see `tests/evalsets/README.md`; unlike pytest it drives the live Gemini model, so it needs the Vertex credentials from `.env`):
@@ -117,7 +189,7 @@ PYTHONPATH=. .venv/bin/adk eval src/agent tests/evalsets/blink.evalset.json \
   --config_file_path tests/evalsets/test_config.json --print_detailed_results
 ```
 
-The suite covers both halves of agent evaluation: **trajectory** (scenario tests in `tests/scenarios/` drive full pipelines end to end and assert the route and tool path taken) and **final response** (the grounded-reply invariants assert the text matches what actually happened, `tests/unit/test_grounded_responses.py`). The deterministic core, every specialist's fallback, and the disruption pipeline are all covered too. 477 tests, fully offline, with the LLM mocked at the `llm.set_client` seam, so the whole suite runs without spending a single token.
+The suite covers both halves of agent evaluation: **trajectory** (scenario tests in `tests/scenarios/` drive full pipelines end to end and assert the route and tool path taken) and **final response** (the grounded-reply invariants assert the text matches what actually happened, `tests/unit/test_grounded_responses.py`). The deterministic core, every specialist's fallback, and the disruption pipeline are all covered too. 849 tests, fully offline, with the LLM mocked at the `llm.set_client` seam, so the whole suite runs without spending a single token.
 
 ## Deploy to Cloud Run
 
@@ -145,10 +217,6 @@ Python 3.13 · FastAPI · Pydantic v2 · Google ADK · Google GenAI SDK · **Gem
 Blink today is the planner that keeps working after the conversation ends. The
 direction is a planner that **starts doing**:
 
-- **Measured work, not claimed work.** Focus sessions bind a timer to the
-  current block, so actuals are recorded fact — and every downstream judgment
-  (estimation bias, pacing, replans) runs on evidence instead of self-report.
-  *What you can measure, you can improve.*
 - **Timed actions.** "Send that email at 4pm" — scheduled, confirm-gated
   actions through Google's APIs, the same way calendar writes are gated today.
 - **A desktop companion with computer use.** Blink on your desk, able to open
@@ -176,11 +244,16 @@ src/core/           # the pure deterministic engine: capacity ledger, scheduler,
 src/api/            # FastAPI server: turn router, elicitation loop, horizon details,
                     #   calendar OAuth + sync, TTS streaming
 src/web/            # the eyes presence + horizon UI: app.js component factories,
-                    #   css/ split into eight ownership-scoped stylesheets
+                    #   css/ split into nine ownership-scoped stylesheets
 src/types/          # the Pydantic domain model (entities.py)
+src/memory/         # the memory manager over the durable Memory entity
+src/sim/            # offline simulation: fake store, personas, scenario runner
 companion/          # the iOS companion (SwiftUI): same brain, same API, in your pocket
-tests/              # 477 offline tests (unit + scenario; the LLM is mocked, Firestore off)
-docs/               # PRD, ARCHITECTURE, DIAGRAMS, DEMO_SCRIPT, companion design docs
+tests/              # 849 offline tests (unit + scenario; the LLM is mocked, Firestore off)
+tests/evalsets/     # the adk eval evalset + the live tool-selection probe (billable, never in CI)
+docs/               # PRD, ARCHITECTURE, DIAGRAMS, the companion design docs, and two
+                    #   audits: AGENT_COVERAGE_AUDIT (100 scenarios scored against real
+                    #   code) and AGENTIC_STANDARDS_AUDIT (Blink vs Google's agent canon)
 deployment/         # deploy.sh (Cloud Build only), seed_demo.sh, cloud_run.yaml
 .agents/rules/      # the engineering rulebook the code is held to (start with agent-governance.md)
 ```

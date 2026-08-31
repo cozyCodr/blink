@@ -18,6 +18,8 @@ flowchart TB
         Ingest["Photo drop / paste / attach"]
     end
 
+    Phone["iOS companion (SwiftUI)<br/>same brain, same API"]
+
     subgraph CloudRun["Google Cloud Run (keyless service account)"]
         API["FastAPI server<br/>/turn /elicit/answer /ingest-image /details /checkin/* /calendar/* /tts"]
         Router["Intent router (orchestration layer)<br/>chat · plan_goal · concrete_tasks · disruption · checkin<br/>(deterministic guards run BEFORE the LLM)"]
@@ -36,20 +38,30 @@ flowchart TB
             Progress["progress + streak + pacing<br/>(derived at read time)"]
         end
 
+        Agent["ADK root_agent (src/agent/agent.py)<br/>28 typed tools · before_tool_callback confirm-gate<br/>(agent_runtime.run_chat_turn)"]
+        Mirror["calendar mirror<br/>after the commit, best-effort, never raises"]
         LLM["src/agent/llm.py (the model)<br/>one Gemini gateway (text + vision)"]
-        Store["workspace store"]
+        Store["workspace store<br/>dirty-tracked sections, flushed off the request path"]
+        Insights["insight mining<br/>≥3 occurrences, consent-gated"]
     end
 
     Vertex["Vertex AI — Gemini 3.5 Flash"]
     TTS["Cloud TTS — Chirp3-HD Charon"]
     GCal["Google Calendar<br/>(OAuth; every write confirm-gated)"]
+    FS["Firestore (blink_workspaces)<br/>snapshot per workspace, hydrate on cold start"]
 
     Eyes -->|"POST /turn, /elicit/answer"| API
     Ingest -->|"POST /ingest-image"| API
     Horizon -->|"GET /details"| API
+    Phone -->|"same REST API"| API
     API --> Router
+    Router --> Agent
     Router --> Elicitor & Extractor & Synth & Convo
     Elicitor & Extractor & Synth & Convo --> LLM
+    Agent -->|"ADK Runner, keyless"| Vertex
+    Agent --> Core
+    Agent --> Mirror
+    Mirror --> GCal
     LLM -->|"keyless"| Vertex
     API -->|"/tts"| TTS
     API --> GCal
@@ -57,15 +69,28 @@ flowchart TB
     Extractor & Synth --> Core
     Core --> Store
     API --> Store
+    Store --> FS
+    Store --> Insights
+    Insights -->|"one at a time, on consent"| Eyes
 ```
 
 **Why it is decoupled this way:** every specialist is LLM-first with a
 deterministic fallback, so the app degrades instead of dying if Gemini is
 unavailable. The core never calls the model; the model reaches the core only
 through typed, docstring'd, status-returning tools (`src/agent/tools.py`).
-State lives behind one store interface. In the Agents whitepaper's triad, the
-gateway is the model, `tools.py` is the tools, and the router plus specialists
-are the orchestration layer.
+State lives behind one store interface, snapshotted to Firestore so a cold Cloud
+Run instance can rehydrate. In the Agents whitepaper's triad, the gateway is the
+model, `tools.py` is the tools, and the router plus specialists are the
+orchestration layer.
+
+**How it is deployed and coordinated:** everything inside the box is one Cloud
+Run service on a keyless runtime service account; Vertex AI, Cloud TTS, Firestore
+and Google Calendar are the services outside it. The router is the coordinator:
+deterministic guards classify the turn first, then it either drives the ADK
+`root_agent` (chat and general requests, `agent_runtime.run_chat_turn`) or a
+narrow specialist pipeline (elicitation, extraction, plan synthesis). Both ends
+land on the same deterministic core, and the model itself can only reach that
+core through the typed tool layer.
 
 ---
 

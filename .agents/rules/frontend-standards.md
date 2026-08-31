@@ -2,7 +2,7 @@
 
 ## CSS: split by ownership, never one blob
 
-`src/web/css/` holds the design system as EIGHT ordered files. The `<link>` order
+`src/web/css/` holds the design system as NINE ordered files. The `<link>` order
 in `index.html` is load-bearing — it reproduces the cascade the app was built
 against. Never merge them back into a single file.
 
@@ -15,7 +15,8 @@ against. Never merge them back into a single file.
 | `horizon.css` | `#horizon` container, peek handle, zoom shell, all five levels. |
 | `responsive.css` | The 640px mobile breakpoint + accessibility overrides. |
 | `clarify.css` | The clarify input components (14 with the P9-04 course cards). |
-| `now.css` | The Now focus-session surface (P9-07). Loads LAST. |
+| `now.css` | The Now focus-session surface (P9-07). |
+| `artifacts.css` | Conversational artifacts (P20-02): tool trace lines, search sources, session and move cards. Loads LAST. |
 
 Rules:
 - New styles go in the file that OWNS the feature. A new feature area gets a new
