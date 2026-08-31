@@ -460,6 +460,97 @@ def get_workspace_details(
         ],
     }
 
+# --- P21-05: one seam for "the automatic planner may not touch this" ---------
+#
+# `Block.user_placed` (P21-04) marks a session the USER put somewhere. Four
+# paths in this file hand a task list to a scheduler and rebuild the resulting
+# blocks: _schedule_current, _apply_disruption, the question-answered trigger,
+# and the weekly-review trigger. Each one was independently capable of dragging
+# a pinned session back to the first free slot, and each rebuilt its blocks
+# field by field WITHOUT `user_placed`, so the pin was erased on the way past
+# and the session was unprotected from then on. These two helpers exist so all
+# four get identical treatment instead of the same four lines copied four times.
+
+
+def _user_placed_blocks(store) -> List[Block]:
+    """Every still-planned session the user placed themselves.
+
+    Only 'planned' ones: a block with an outcome is history, and history is
+    never re-placed by anything here.
+    """
+    return [
+        b for b in store.blocks.values()
+        if b.status == "planned" and getattr(b, "user_placed", False)
+    ]
+
+
+def _plan_around_user_placements(store, now: datetime, days: int = 7,
+                                 protected: Optional[List[Block]] = None):
+    """What an automatic scheduling pass needs in order to leave pinned work alone.
+
+    Returns (schedulable_tasks, ledger, protected_task_ids):
+    - `schedulable_tasks` is the ready/scheduled tasks MINUS any task holding a
+      protected block. Excluding them is what protects them: `drop_planned_blocks`
+      only drops tasks that RECEIVED new proposals, so a task that was never
+      proposed for keeps its session by construction.
+    - `ledger` is the SAME construction `ledger_for` uses, with the protected
+      sessions passed in as `extra_busy`. That part is not optional: this pass
+      no longer proposes anything for them, and the planning ledger does not
+      subtract existing blocks, so without it the scheduler would place a
+      DIFFERENT task straight on top of the session just protected, trading a
+      silent move for a silent double-booking.
+    - `protected_task_ids` goes to `_block_from_proposed` so a pin survives even
+      if a protected task somehow still receives a proposal.
+
+    `protected` overrides which user-placed blocks count. The disruption path
+    passes only the ones it is not about to cancel: "I'm sick today" is a
+    statement about TODAY, so it may still clear a pinned session today, but it
+    may not quietly relocate one six weeks out. That is a deliberate choice
+    about the SCOPE of a disruption, not an oversight.
+    """
+    blocks = _user_placed_blocks(store) if protected is None else list(protected)
+    protected_task_ids = {b.task_id for b in blocks}
+    schedulable = [t for t in store.get_ready_tasks() if t.id not in protected_task_ids]
+    # Only sessions still ahead of us can be collided with; a window already
+    # behind us is dropped by the scheduler anyway. The naive/aware
+    # normalisation mirrors the rebalancer's standing_busy: the store keeps
+    # naive UTC, but callers have handed these paths an aware `now` before.
+    naive_now = now.replace(tzinfo=None) if now.tzinfo else now
+    protected_busy = []
+    for b in blocks:
+        b_start = b.starts_at.replace(tzinfo=None) if b.starts_at.tzinfo else b.starts_at
+        b_end = b.ends_at.replace(tzinfo=None) if b.ends_at.tzinfo else b.ends_at
+        if b_end > naive_now:
+            protected_busy.append(TimeInterval(start=b_start, end=b_end))
+    ledger = build_planning_ledger(
+        constraints=list(store.constraints.values()),
+        zones=list(store.zones.values()),
+        start_date=now,
+        days=days,
+        extra_busy=protected_busy,
+    )
+    return schedulable, ledger, protected_task_ids
+
+
+def _block_from_proposed(pb, workspace_id: str, protected_task_ids=()) -> Block:
+    """One ProposedBlock as a real Block, keeping the pin when there is one.
+
+    The four rebuild sites used to construct this inline and none of them
+    carried `user_placed`, so any pass that DID re-place a pinned task also
+    stripped its pin permanently. Belt and braces: with the exclusion above, a
+    protected task should never receive a proposal in the first place.
+    """
+    return Block(
+        id=pb.id,
+        workspace_id=workspace_id,
+        task_id=pb.task_id,
+        starts_at=pb.starts_at,
+        ends_at=pb.ends_at,
+        plan_version=pb.plan_version,
+        user_placed=pb.task_id in set(protected_task_ids or ()),
+    )
+
+
 def _schedule_current(store, workspace_id: str, now: datetime) -> int:
     """Propose + commit schedule blocks for the workspace's ready tasks.
 
@@ -493,35 +584,12 @@ def _schedule_current(store, workspace_id: str, now: datetime) -> int:
     not subtract existing blocks, so otherwise the scheduler would place a
     DIFFERENT task straight on top of the session we just protected and we would
     have traded a silent move for a silent double-booking.
+
+    P21-05: that whole rule now lives in `_plan_around_user_placements`, shared
+    with the three other paths that hand tasks to a scheduler. Behaviour here is
+    unchanged.
     """
-    protected_blocks = [
-        b for b in store.blocks.values()
-        if b.status == "planned" and getattr(b, "user_placed", False)
-    ]
-    protected_task_ids = {b.task_id for b in protected_blocks}
-    schedulable = [t for t in store.get_ready_tasks() if t.id not in protected_task_ids]
-    # Only the ones still ahead of us can be collided with; a window already
-    # behind us is dropped by the scheduler anyway. Naive/aware normalisation
-    # copied from the rebalancer's standing_busy: the store keeps naive UTC but
-    # callers have handed this function an aware `now` before.
-    naive_now = now.replace(tzinfo=None) if now.tzinfo else now
-    protected_busy = []
-    for b in protected_blocks:
-        b_start = b.starts_at.replace(tzinfo=None) if b.starts_at.tzinfo else b.starts_at
-        b_end = b.ends_at.replace(tzinfo=None) if b.ends_at.tzinfo else b.ends_at
-        if b_end > naive_now:
-            protected_busy.append(TimeInterval(start=b_start, end=b_end))
-    # The SAME construction `ledger_for` uses, called directly only so the
-    # protected sessions can ride in as extra_busy. `build_planning_ledger`
-    # exists for exactly this (the disruption rebalancer passes its standing
-    # sessions the same way), so no capacity arithmetic is duplicated here.
-    ledger = build_planning_ledger(
-        constraints=list(store.constraints.values()),
-        zones=list(store.zones.values()),
-        start_date=now,
-        days=7,
-        extra_busy=protected_busy,
-    )
+    schedulable, ledger, protected_task_ids = _plan_around_user_placements(store, now)
     sched = propose_schedule(store.get_active_commitments(), schedulable, ledger, now)
     # Replace semantics: a task being (re)scheduled gets its old planned blocks
     # dropped so repeated ingest/turn/synthesis passes never duplicate blocks.
@@ -531,14 +599,7 @@ def _schedule_current(store, workspace_id: str, now: datetime) -> int:
     # briefly holds two events. Best-effort; never raises into the commit.
     mirror_cancel(store, workspace_id, dropped)
     new_blocks = [
-        Block(
-            id=pb.id,
-            workspace_id=workspace_id,
-            task_id=pb.task_id,
-            starts_at=pb.starts_at,
-            ends_at=pb.ends_at,
-            plan_version=pb.plan_version
-        )
+        _block_from_proposed(pb, workspace_id, protected_task_ids)
         for pb in sched.blocks
     ]
     store.commit_blocks(new_blocks)
@@ -807,10 +868,36 @@ def _apply_disruption(store, workspace_id: str, reason: str, notes, now: datetim
     last two are what was ACTUALLY committed / actually cancelled in this
     store, never what the pure rebalancer merely proposed. Every count a reply
     speaks is composed from these.
+
+    P21-05: a disruption is a statement about TODAY, so it keeps the right to
+    cancel a user-placed session today, and loses the right to relocate one on a
+    future day. Only the pinned sessions this pass will NOT cancel are treated
+    as protected, and their tasks are held out of the rebalance. This is a
+    deliberate choice about the scope of a disruption: "I'm sick today" silently
+    moving a session six weeks out is the same trust failure P21-04 fixed, and
+    the user can always move that session themselves.
     """
+    # The rebalancer cancels planned blocks that START today and have not ended
+    # (rebalancer.rebalance_after_disruption step 1). Anything else that is
+    # pinned is out of this disruption's scope and must survive it.
+    naive_now = now.replace(tzinfo=None) if now.tzinfo else now
+    today_str = naive_now.strftime("%Y-%m-%d")
+
+    def _this_disruption_cancels(b) -> bool:
+        b_start = b.starts_at.replace(tzinfo=None) if b.starts_at.tzinfo else b.starts_at
+        b_end = b.ends_at.replace(tzinfo=None) if b.ends_at.tzinfo else b.ends_at
+        return b_start.strftime("%Y-%m-%d") == today_str and b_end >= naive_now
+
+    protected = [b for b in _user_placed_blocks(store) if not _this_disruption_cancels(b)]
+    # The ledger is deliberately dropped here: the rebalancer builds its own,
+    # and it already counts every planned block of a task it is NOT re-placing
+    # as busy time (`standing_busy`), so holding these tasks out of `tasks` is
+    # by itself enough to make their sessions both untouchable and occupied.
+    schedulable, _ledger, protected_task_ids = _plan_around_user_placements(
+        store, now, protected=protected)
     trigger_res, rebalance_res = execute_disruption_trigger(
         commitments=store.get_active_commitments(),
-        tasks=store.get_ready_tasks(),
+        tasks=schedulable,
         existing_blocks=list(store.blocks.values()),
         now=now,
         workspace_id=workspace_id,
@@ -827,14 +914,7 @@ def _apply_disruption(store, workspace_id: str, reason: str, notes, now: datetim
             store.blocks[cid].status = "cancelled"
             cancelled_blocks.append(store.blocks[cid])
     new_blocks = [
-        Block(
-            id=pb.id,
-            workspace_id=workspace_id,
-            task_id=pb.task_id,
-            starts_at=pb.starts_at,
-            ends_at=pb.ends_at,
-            plan_version=pb.plan_version
-        )
+        _block_from_proposed(pb, workspace_id, protected_task_ids)
         for pb in rebalance_res.new_blocks
     ]
     # Replace semantics, same discipline as _schedule_current (audit gap 5):
@@ -919,19 +999,15 @@ async def answer_question_endpoint(
                 store.tasks[tid].status = "ready"
 
     now = _now()
-    ledger = ledger_for(store, now)
-    res = execute_question_answered_trigger(store.get_active_commitments(), store.get_ready_tasks(), ledger, now)
+    # P21-05: answering a clarification re-plans, and a re-plan may not drag a
+    # user-placed session off the day the user chose.
+    schedulable, ledger, protected_task_ids = _plan_around_user_placements(store, now)
+    res = execute_question_answered_trigger(
+        store.get_active_commitments(), schedulable, ledger, now)
 
     if res.schedule:
         new_blocks = [
-            Block(
-                id=pb.id,
-                workspace_id=workspace_id,
-                task_id=pb.task_id,
-                starts_at=pb.starts_at,
-                ends_at=pb.ends_at,
-                plan_version=pb.plan_version
-            )
+            _block_from_proposed(pb, workspace_id, protected_task_ids)
             for pb in res.schedule.blocks
         ]
         store.commit_blocks(new_blocks)
@@ -3445,22 +3521,21 @@ async def trigger_routine(
         if brief_insight is not None:
             brief_payload["insight"] = brief_insight
     elif payload.trigger == "weekly_review":
+        # P21-05: the weekly review re-plans and commits, so it gets the same
+        # protection as every other automatic pass. It builds its own ledger
+        # here rather than reusing the endpoint's, because that one does not
+        # know the pinned sessions are busy.
+        review_tasks, review_ledger, protected_task_ids = _plan_around_user_placements(
+            store, now)
         res = execute_weekly_review(
             commitments=store.get_active_commitments(),
-            tasks=store.get_ready_tasks(),
-            ledger=ledger,
+            tasks=review_tasks,
+            ledger=review_ledger,
             now=now
         )
         if res.schedule:
             new_blocks = [
-                Block(
-                    id=pb.id,
-                    workspace_id=workspace_id,
-                    task_id=pb.task_id,
-                    starts_at=pb.starts_at,
-                    ends_at=pb.ends_at,
-                    plan_version=pb.plan_version
-                )
+                _block_from_proposed(pb, workspace_id, protected_task_ids)
                 for pb in res.schedule.blocks
             ]
             store.commit_blocks(new_blocks)
