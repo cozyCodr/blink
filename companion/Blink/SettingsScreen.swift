@@ -24,10 +24,12 @@ struct SettingsScreen: View {
     /// answers, and nothing here claims a sync that did not happen.
     @State private var calendar = CalendarController()
 
-    /// P15-12: the agent's voice, default OFF like the web's `voiceEnabled`
-    /// toggle, persisted locally the same way the face preference is
-    /// (UserDefaults; AgentVoice re-reads it per utterance).
-    @AppStorage(AgentVoice.storageKey) private var voiceEnabled = false
+    /// P15-12: the agent's voice, persisted locally the same way the face
+    /// preference is (UserDefaults; AgentVoice re-reads it per utterance).
+    /// Seeded from `AgentVoice.defaultEnabled` (ON) rather than a literal, so
+    /// this switch and the voice itself can never disagree about what an
+    /// untouched toggle means.
+    @AppStorage(AgentVoice.storageKey) private var voiceEnabled = AgentVoice.defaultEnabled
 
     // DEBUG-only rehearsal doors, moved here off the main Today screen (user,
     // 2026-08-30): developer tools, not something a person using Blink should

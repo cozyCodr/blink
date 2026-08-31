@@ -18,7 +18,7 @@ import Observation
 //     because an interrupt is something you do in order to speak (the web's
 //     rule, P7-01).
 //
-// The toggle lives in UserDefaults (`blink.voiceEnabled`, default OFF —
+// The toggle lives in UserDefaults (`blink.voiceEnabled`, default ON —
 // matching the web's `voiceEnabled` default) and is re-read per utterance, so
 // switching it off mid-request drops the audio exactly as app.js:4961 does.
 
@@ -76,7 +76,8 @@ private final class PlaybackWatcher: NSObject, AVAudioPlayerDelegate {
 @Observable
 public final class AgentVoice {
     /// The persisted toggle, same storage style as the face preference
-    /// (FaceProvider's UserDefaults fast path). Default OFF, like the web.
+    /// (FaceProvider's UserDefaults fast path). Unset means ON, like the web:
+    /// see `defaultEnabled`.
     public static let storageKey = "blink.voiceEnabled"
 
     @ObservationIgnored private let client: BlinkDetailsClient
@@ -106,8 +107,21 @@ public final class AgentVoice {
         self.defaults = defaults
     }
 
+    /// What the toggle reads before anyone has touched it. ON (user, 2026-09-01:
+    /// "voice agent on by default on mobile", the same call they made for the
+    /// web). Blink is a thing you talk with, so it should speak the first time
+    /// without a settings trip. SettingsScreen seeds its `@AppStorage` from this
+    /// same constant, so the switch and the voice can never disagree.
+    public static let defaultEnabled = true
+
     public var enabled: Bool {
-        defaults.bool(forKey: Self.storageKey)   // unset reads false: default OFF
+        // `bool(forKey:)` cannot tell "off" from "never set", and those mean
+        // different things here: an explicit off must be honoured, an untouched
+        // toggle takes the default above.
+        guard defaults.object(forKey: Self.storageKey) != nil else {
+            return Self.defaultEnabled
+        }
+        return defaults.bool(forKey: Self.storageKey)
     }
 
     /// Speak the server's sentence. Fire-and-forget: the text is already on
