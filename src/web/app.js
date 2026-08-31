@@ -17,6 +17,35 @@
 (function () {
   "use strict";
 
+  /* ---------- the server's clock, read correctly (2026-08-31) ----------
+     Every datetime the server sends (blocks, free windows, `now`) is NAIVE
+     UTC: an ISO string with no zone suffix. JavaScript parses a zoneless ISO
+     string as LOCAL time, so `new Date(b.starts_at)` silently shifted every
+     hour label by the user's UTC offset: a session truthfully placed at
+     6:30 PM Lusaka (16:30 UTC) rendered as 4:30 PM, reminders fired two
+     hours early, and reminder events were written to the real calendar two
+     hours early. The view was self-consistent (the now-line shifted too),
+     which is why it survived: nothing looked broken relative to anything
+     else, it only disagreed with the user's watch.
+     serverDate() is the one door: it stamps the missing Z so the string is
+     read as the instant the server meant, and the browser's own formatter
+     then renders it in the user's real zone. serverDayKey() is the matching
+     LOCAL calendar date, for grouping blocks under the day the user lives. */
+  function serverDate(iso) {
+    if (typeof iso !== "string" || !iso) return new Date(NaN);
+    // Already zoned (Z or ±hh:mm)? Trust it.
+    if (/(?:Z|[+-]\d\d:?\d\d)$/.test(iso)) return new Date(iso);
+    // Date-only strings are calendar dates, not instants; local midnight.
+    if (!/T/.test(iso)) return new Date(iso + "T00:00:00");
+    return new Date(iso + "Z");
+  }
+  function serverDayKey(iso) {
+    var d = serverDate(iso);
+    if (isNaN(d)) return (typeof iso === "string" ? iso.slice(0, 10) : "");
+    function p2(n) { return (n < 10 ? "0" : "") + n; }
+    return d.getFullYear() + "-" + p2(d.getMonth() + 1) + "-" + p2(d.getDate());
+  }
+
   /* ---------- workspace identity (P14) ----------
      Guest by default, never a login wall. A first visit mints a crypto-random
      per-browser workspace id and keeps it in localStorage, so two browsers
@@ -864,7 +893,7 @@
     }
     function artDate(iso) {
       if (typeof iso !== "string" || !iso) return null;
-      var d = new Date(iso);
+      var d = serverDate(iso);
       return isNaN(d) ? null : d;
     }
     function artTime(d) {
@@ -2368,7 +2397,7 @@
       return d.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
     }
     function fmtTime(iso) {
-      var d = new Date(iso);
+      var d = serverDate(iso);
       if (isNaN(d)) return "";
       return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
     }
@@ -2388,7 +2417,7 @@
     }
     // minute-of-day for an ISO datetime, in the viewer's clock
     function minOf(iso) {
-      var d = new Date(iso);
+      var d = serverDate(iso);
       return isNaN(d) ? null : d.getHours() * 60 + d.getMinutes();
     }
 
@@ -2436,7 +2465,7 @@
       (d.commitments || []).forEach(function (c) { commitments[c.id] = c; });
       (d.blocks || []).forEach(function (b) {
         if (b.status === "cancelled") return;
-        var key = (b.starts_at || "").slice(0, 10);
+        var key = serverDayKey(b.starts_at);
         (byDate[key] = byDate[key] || []).push(b);
       });
       Object.keys(byDate).forEach(function (k) {
@@ -2592,7 +2621,7 @@
 
       // 2. ghosts at the cancelled slots
       (d.cancelled_blocks_detail || []).forEach(function (c, i) {
-        var date = (c.starts_at || "").slice(0, 10);
+        var date = serverDayKey(c.starts_at);
         var card = layer.querySelector('.hz-daycard[data-date="' + date + '"]');
         if (!card) return;
         var body = card.querySelector(".hz-dc-body");
@@ -3123,7 +3152,7 @@
     /* ---------- shared helpers for the wide levels (P7-08) ---------- */
     // planned minutes inside one block (actuals win once they exist)
     function blockMinutes(b) {
-      var s = new Date(b.starts_at), e = new Date(b.ends_at);
+      var s = serverDate(b.starts_at), e = serverDate(b.ends_at);
       if (isNaN(s) || isNaN(e)) return 0;
       return Math.max(0, (e - s) / 60000);
     }
@@ -3212,7 +3241,7 @@
         if (b.status === "cancelled") return;
         var t = m.tasks[b.task_id];
         if (!t || t.commitment_id !== cid) return;
-        var s = new Date(b.starts_at).getTime();
+        var s = serverDate(b.starts_at).getTime();
         if (isNaN(s) || s < fromMs || s >= toMs) return;
         sum.blocks += 1;
         sum.planned += blockMinutes(b);
@@ -3595,7 +3624,7 @@
       var pastMin = 0, firstPast = null, futureMin = 0;
       (m.data.blocks || []).forEach(function (b) {
         if (b.status === "cancelled") return;
-        var s = new Date(b.starts_at).getTime(), e = new Date(b.ends_at).getTime();
+        var s = serverDate(b.starts_at).getTime(), e = serverDate(b.ends_at).getTime();
         if (isNaN(s) || isNaN(e)) return;
         if (e <= now) {
           pastMin += (b.actual_minutes != null ? b.actual_minutes : (e - s) / 60000);
@@ -3655,7 +3684,7 @@
       var timer = 0, reported = 0, assumed = 0, assumedBlocks = 0, notYet = 0, notYetBlocks = 0;
       (m.data.blocks || []).forEach(function (b) {
         if (b.status === "cancelled") return;
-        var e = new Date(b.ends_at).getTime();
+        var e = serverDate(b.ends_at).getTime();
         if (isNaN(e)) return;
         var a = measuredOf(b);
         // the sentence above averages blocks that have already ENDED, so the
@@ -4984,11 +5013,11 @@
             var todayKey = fmtNaive(now).slice(0, 10);
             var upcoming = (d.blocks || []).filter(function (b) {
               if (b.status !== "planned") return false;
-              var s = new Date(b.starts_at);
-              return !isNaN(s) && (b.starts_at || "").slice(0, 10) === todayKey && s > now;
+              var s = serverDate(b.starts_at);
+              return !isNaN(s) && serverDayKey(b.starts_at) === todayKey && s > now;
             }).map(function (b) {
               var t = (d.tasks || []).filter(function (x) { return x.id === b.task_id; })[0];
-              return { title: (t && t.title) || "Focus session", start: new Date(b.starts_at) };
+              return { title: (t && t.title) || "Focus session", start: serverDate(b.starts_at) };
             });
             if (!upcoming.length) {
               remSay("Nothing upcoming today to remind about.");
@@ -5359,8 +5388,8 @@
         var scheduled = 0;
         (d.blocks || []).forEach(function (b) {
           if (b.status !== "planned") return;
-          if ((b.starts_at || "").slice(0, 10) !== tk) return;
-          var start = new Date(b.starts_at);
+          if (serverDayKey(b.starts_at) !== tk) return;
+          var start = serverDate(b.starts_at);
           if (isNaN(start) || start <= now) return;    // already started
           if (l.ids.indexOf(b.id) !== -1) return;      // fired earlier today
           if (scheduled + l.fired >= MAX_PER_DAY) return;
@@ -7752,8 +7781,8 @@
           var now = new Date();
           var pending = (d.blocks || []).some(function (b) {
             if (b.status !== "planned") return false;
-            if ((b.starts_at || "").slice(0, 10) !== tk) return false;
-            var end = new Date(b.ends_at);
+            if (serverDayKey(b.starts_at) !== tk) return false;
+            var end = serverDate(b.ends_at);
             return !isNaN(end) && end <= now;
           });
           if (!pending) return;                       // nothing to check off
