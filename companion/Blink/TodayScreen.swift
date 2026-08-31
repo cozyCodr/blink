@@ -115,6 +115,14 @@ struct TodayScreen: View {
                     .padding(.horizontal, face.layout.screenMargin)
                     .padding(.bottom, face.layout.cardPaddingBottom)
                     .animation(reduceMotion ? nil : face.motion.swapAnimation, value: eyeScale)
+                    // P18-06: a tap on the paper puts the stage back to the eyes
+                    // and the dock (user: "the ability to just clear the
+                    // screen"). Buttons and cards inside still take their own
+                    // taps first, so this only ever fires on the empty space
+                    // around them. It changes nothing on the server: the screen
+                    // forgets what it was shown, the plan is untouched.
+                    .contentShape(Rectangle())
+                    .onTapGesture { clearScreen() }
                 }
                 .refreshable {
                     retireGreeting()
@@ -396,6 +404,18 @@ struct TodayScreen: View {
                     guard !Task.isCancelled else { return }
                     retireGreeting()
                 }
+        }
+    }
+
+    /// P18-06 — clear the stage: the reply, the echo and the artifact cards go,
+    /// leaving the eyes and the dock. Deliberately inert while a spoken loop is
+    /// running (the reply on screen is the thing being said out loud), and the
+    /// composer itself refuses while a question is up or a turn is in flight,
+    /// because dropping either would lose work the person is owed.
+    private func clearScreen() {
+        guard !voiceLoop.isActive, composer.hasClearableScreen else { return }
+        withAnimation(reduceMotion ? nil : face.motion.releaseAnimation) {
+            composer.clearScreen()
         }
     }
 

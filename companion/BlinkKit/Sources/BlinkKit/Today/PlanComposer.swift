@@ -344,6 +344,34 @@ public final class PlanComposer {
         calendarNote = nil
     }
 
+    /// P18-06 — put the stage back to the eyes and the dock (user, 2026-09-01:
+    /// "the ability to just clear the screen"). The web's rule: a reply persists
+    /// until it is dismissed, never on a timer, and dismissing it is something
+    /// the person does.
+    ///
+    /// WHAT IT WILL NOT CLEAR, because clearing these would lose real work: a
+    /// QUESTION that is up (it is waiting on an answer, and dropping it strands
+    /// the turn it belongs to), and a request still IN FLIGHT (its reply is
+    /// about to land). The typed `draft` is not touched either. Nothing here
+    /// talks to the server: this is the screen forgetting what it was shown, not
+    /// the plan changing, so it can never claim or undo anything.
+    public func clearScreen() {
+        guard question == nil, !isSending else { return }
+        reply = nil
+        answerEcho = nil
+        didRefuse = false
+        wasUnreachable = false
+        clearArtifacts()
+    }
+
+    /// Whether there is anything on the stage worth clearing, so the screen can
+    /// keep the gesture inert (and silent for VoiceOver) when there is not.
+    public var hasClearableScreen: Bool {
+        question == nil && !isSending
+            && (reply != nil || answerEcho != nil || didRefuse || wasUnreachable
+                || !sessionCards.isEmpty || !moveCards.isEmpty)
+    }
+
     private func run(_ request: @escaping () async throws -> TurnResponse) async {
         isSending = true
         didRefuse = false
