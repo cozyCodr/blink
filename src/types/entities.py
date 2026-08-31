@@ -108,6 +108,21 @@ class Block(BaseModel):
     # to Google Calendar, so it must never be deleted/patched there (mirrors how
     # Constraint.source_ref carries the real Google id for an inbound event).
     gcal_event_id: Optional[str] = None
+    # P21-04: this block sits where the USER put it, not where the scheduler
+    # chose. False is the existing automatic behaviour, so every block ever
+    # written stays exactly as it was.
+    #
+    # It exists because the automatic replanner (server._schedule_current)
+    # re-proposes every ready/scheduled task and drops the old planned blocks of
+    # any task that got new proposals. An explicitly placed session was just one
+    # of those, so adding an unrelated task silently dragged the user's chosen
+    # time back to today, after Blink had told them it was moved. A pin is the
+    # only thing that survives a pass the user did not ask for.
+    #
+    # It pins against the AUTOMATIC replan and nothing else: a missed one is
+    # still re-placeable by propose_reschedule, and it stays cancellable,
+    # movable and deletable by every CRUD tool.
+    user_placed: bool = False
     created_at: datetime = Field(default_factory=now_utc)
 
 QuestionType = Literal[

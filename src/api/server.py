@@ -22,7 +22,9 @@ from pydantic import BaseModel, Field
 from src.types.entities import (
     Commitment, Task, Block, Question, Memory, Milestone, DisruptionEvent
 )
-from src.core.capacity.capacity_ledger import build_capacity_ledger, CapacityLedger
+from src.core.capacity.capacity_ledger import (
+    build_capacity_ledger, build_planning_ledger, CapacityLedger)
+from src.core.utils.date_utils import TimeInterval
 from src.core.validator.validator import validate_state
 from src.core.scheduler.scheduler import propose_schedule
 from src.core.calendar.calendar_sync import parse_ics_data, events_to_constraints, constraints_to_intervals
@@ -476,9 +478,51 @@ def _schedule_current(store, workspace_id: str, now: datetime) -> int:
     blocks are committed. Blocks with outcomes (done/partial/missed/cancelled)
     are history and are never touched; tasks the scheduler could not place this
     pass keep whatever planned blocks they already had.
+
+    USER-PLACED SESSIONS ARE EXCLUDED (P21-04). A task holding a planned block
+    the user put somewhere themselves is kept out of the proposal entirely, and
+    the drop then leaves it alone by construction, because it only drops tasks
+    that RECEIVED new proposals. Without this, "move the client proposal to
+    September 15th" survived exactly until the next unrelated "add", which
+    re-proposed every ready/scheduled task and dragged the proposal back to
+    today. The pin is only against THIS automatic pass: propose_reschedule still
+    re-places a missed one, and the CRUD tools still cancel, move and delete it.
+
+    Those protected blocks also ride into the ledger as busy time. They have to:
+    this pass no longer proposes anything for them, and the planning ledger does
+    not subtract existing blocks, so otherwise the scheduler would place a
+    DIFFERENT task straight on top of the session we just protected and we would
+    have traded a silent move for a silent double-booking.
     """
-    ledger = ledger_for(store, now)
-    sched = propose_schedule(store.get_active_commitments(), store.get_ready_tasks(), ledger, now)
+    protected_blocks = [
+        b for b in store.blocks.values()
+        if b.status == "planned" and getattr(b, "user_placed", False)
+    ]
+    protected_task_ids = {b.task_id for b in protected_blocks}
+    schedulable = [t for t in store.get_ready_tasks() if t.id not in protected_task_ids]
+    # Only the ones still ahead of us can be collided with; a window already
+    # behind us is dropped by the scheduler anyway. Naive/aware normalisation
+    # copied from the rebalancer's standing_busy: the store keeps naive UTC but
+    # callers have handed this function an aware `now` before.
+    naive_now = now.replace(tzinfo=None) if now.tzinfo else now
+    protected_busy = []
+    for b in protected_blocks:
+        b_start = b.starts_at.replace(tzinfo=None) if b.starts_at.tzinfo else b.starts_at
+        b_end = b.ends_at.replace(tzinfo=None) if b.ends_at.tzinfo else b.ends_at
+        if b_end > naive_now:
+            protected_busy.append(TimeInterval(start=b_start, end=b_end))
+    # The SAME construction `ledger_for` uses, called directly only so the
+    # protected sessions can ride in as extra_busy. `build_planning_ledger`
+    # exists for exactly this (the disruption rebalancer passes its standing
+    # sessions the same way), so no capacity arithmetic is duplicated here.
+    ledger = build_planning_ledger(
+        constraints=list(store.constraints.values()),
+        zones=list(store.zones.values()),
+        start_date=now,
+        days=7,
+        extra_busy=protected_busy,
+    )
+    sched = propose_schedule(store.get_active_commitments(), schedulable, ledger, now)
     # Replace semantics: a task being (re)scheduled gets its old planned blocks
     # dropped so repeated ingest/turn/synthesis passes never duplicate blocks.
     dropped = store.drop_planned_blocks({pb.task_id for pb in sched.blocks})

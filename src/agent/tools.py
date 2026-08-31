@@ -2107,6 +2107,12 @@ def _place_block(store, workspace_id: str, block, start: datetime, minutes: int,
         return {"status": "error", "moved": False,
                 "error_message": f"No session with id {block.id!r} in this workspace."}
 
+    # P21-04: the time came from the USER, so pin it against the automatic
+    # replanner. Every caller of this helper is a user-named placement
+    # (move_session, schedule_task_at's move branch, shift_sessions), which is
+    # why the pin is set here rather than three times over.
+    block.user_placed = True
+
     # Local import avoids a module-load cycle: calendar_mirror imports
     # _session_title from this module.
     from src.api.calendar_mirror import mirror_move
@@ -2579,6 +2585,9 @@ def schedule_task_at(workspace_id: str, task_id: str, start: str,
             task_id=task_id,
             starts_at=begin,
             ends_at=end,
+            # P21-04: the user named this time, so the automatic replanner may
+            # not drag it back to the first free slot on a later pass.
+            user_placed=True,
             # gcal_event_id stays None until the mirror below really creates one.
         )
         store.commit_blocks([block])
@@ -2753,6 +2762,9 @@ def schedule_task_sessions(workspace_id: str, task_id: str, starts: List[str],
                 task_id=task_id,
                 starts_at=begin,
                 ends_at=end,
+                # P21-04: every one of these times came from the user, so each
+                # sitting is pinned against the automatic replanner.
+                user_placed=True,
                 # gcal_event_id stays None until the mirror below really creates one.
             )
             placed_blocks.append(block)
