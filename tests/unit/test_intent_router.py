@@ -335,6 +335,7 @@ class TestSiblingRoutesAreNotSwallowed(unittest.TestCase):
 
         self.assertIn("schedule dentist Tuesday 3pm", text)
         self.assertIn("add: finish report, email John, buy milk", text)
+        self.assertIn("plan out this list for me", text)
         self.assertIn("reschedule the 2 I didn't get to", text)
         self.assertIn("my meeting ran over", text)
 
@@ -381,6 +382,151 @@ class TestOfflineFallbackIsUnchangedAndItsLimitIsKnown(unittest.TestCase):
         )
         self.assertEqual(res.label, "concrete_tasks")
         self.assertIn("duration", res.reason)
+
+
+class TestNewWorkWithANamedTimeRoutesToTheAgent(unittest.TestCase):
+    """P21-10: "plan a bug fix session for Wednesday evening at 7:30" must reach
+    the agent, not the deterministic decompose-and-book pipeline.
+
+    The live failure: that sentence was labelled `concrete_tasks`, whose /turn
+    branch decomposes the work and books the FIRST FREE SLOT. The named time was
+    silently dropped: the user asked for Wednesday evening and got tonight. The
+    working path exists and was verified live on the `chat` route, where the
+    agent calls create_task then schedule_task_at and lands the session exactly
+    where the user said. The gap was purely routing, and the router prompt's own
+    "schedule dentist Tuesday 3pm" example taught the wrong label for it.
+
+    As with P21-03, the label itself is the live model's judgment and cannot be
+    asserted offline. What IS assertable: (a) no deterministic guard intercepts
+    these messages before the model sees them, (b) the prompt, the enum
+    description and the module docstring all teach the same distinction, and
+    (c) the dentist example moved out of the concrete_tasks examples.
+    """
+
+    NAMED_TIME_PHRASINGS = [
+        "Plan a two hour session to fix a bug in Blink's backend, Wednesday "
+        "evening at 7:30.",
+        "plan a bug fix session for Wednesday evening at 7:30",
+        "schedule dentist Tuesday 3pm",
+        "book two hours for the report tomorrow morning",
+    ]
+
+    def tearDown(self):
+        llm.set_client(None)
+
+    def test_no_deterministic_guard_intercepts_them_before_the_model(self):
+        # The sentinel reason can only come from the LLM path. A guard firing
+        # (checkin, focus, whatif, disruption, teach, viewing, no-schedule)
+        # would replace it with the guard's own reason. In particular the teach
+        # guard runs pre-LLM via parse_taught_zone, and none of these phrasings
+        # may parse as a taught zone.
+        llm.set_client(_CannedClient(Intent(label="chat", reason="SENTINEL")))
+        for msg in self.NAMED_TIME_PHRASINGS:
+            res = classify_intent(msg)
+            self.assertEqual(res.reason, "SENTINEL", msg)
+            self.assertEqual(res.label, "chat", msg)
+
+    def test_a_chat_label_maps_straight_through(self):
+        llm.set_client(_CannedClient(
+            Intent(label="chat", reason="New work with a named time.")
+        ))
+        self.assertEqual(
+            classify_intent(self.NAMED_TIME_PHRASINGS[0]).label, "chat"
+        )
+
+    def test_the_prompt_teaches_the_distinction(self):
+        text = _flat_prompt()
+
+        self.assertIn("NEW work whose message NAMES a specific day or time", text)
+        self.assertIn("a concrete WHEN attached to the work", text)
+        self.assertIn("the named time is silently dropped", text)
+        self.assertIn("NO named placement", text)
+        self.assertIn(
+            "concrete_tasks is for work that does not exist yet AND has no "
+            "named placement",
+            text,
+        )
+
+    def test_the_prompt_carries_the_real_phrasings(self):
+        text = _flat_prompt()
+
+        for phrase in [
+            "plan a bug fix session for Wednesday evening at 7:30",
+            "book two hours for the report tomorrow morning",
+            "schedule dentist Tuesday 3pm",
+        ]:
+            self.assertIn(phrase, text, phrase)
+
+    def test_the_dentist_example_moved_out_of_concrete_tasks_examples(self):
+        # The old prompt listed the dentist imperative as a concrete_tasks
+        # EXAMPLE, teaching the exact label that drops the named time. It now
+        # appears only in the chat clause and the NOT-concrete_tasks clause.
+        text = _flat_prompt()
+        self.assertNotIn('Examples: "schedule dentist Tuesday 3pm"', text)
+        self.assertIn(
+            'NOT concrete_tasks: NEW work whose message names a specific day '
+            'or time for it ("schedule dentist Tuesday 3pm"',
+            text,
+        )
+
+    def test_the_enum_description_agrees_with_the_prompt(self):
+        desc = Intent.model_fields["label"].description
+        self.assertIn("NO named day or time", desc)
+        self.assertIn("NAMED day or time", desc)
+        self.assertIn("is chat instead", desc)
+
+    def test_the_module_docstring_agrees_with_the_prompt(self):
+        import src.agent.specialists.intent_router as ir
+
+        doc = " ".join((ir.__doc__ or "").split())
+        self.assertIn("NO named placement", doc)
+        self.assertIn("NAMED day or time", doc)
+        self.assertIn("schedule dentist Tuesday 3pm", doc)
+        self.assertIn("create_task then schedule_task_at", doc)
+
+    def test_the_llm_can_still_return_the_sibling_labels(self):
+        # The new clause must not stop the model from choosing a sibling label
+        # for a message it judges differently: nothing deterministic overrides.
+        for label in ("concrete_tasks", "reschedule", "disruption", "calendar"):
+            llm.set_client(_CannedClient(Intent(label=label, reason="r")))
+            self.assertEqual(
+                classify_intent(self.NAMED_TIME_PHRASINGS[1]).label, label
+            )
+
+
+class TestNamedTimeOfflineFallbackIsUnchangedAndItsLimitIsKnown(unittest.TestCase):
+    """P21-10 deliberately does NOT teach the deterministic fallback this
+    distinction. Extracting "Wednesday evening at 7:30" in regex is the keyword
+    routing this codebase forbids, and the command-verb signal that catches
+    "schedule dentist Tuesday 3pm" offline is the same one every imperative
+    depends on. So the fallback keeps its existing conservative behaviour,
+    pinned here as documented fact: with Gemini unavailable, the imperative
+    phrasings still land on concrete_tasks and the named time is still dropped
+    offline. The "plan ..." phrasings already fall to chat offline ("plan" is
+    not a command verb and "two hour" carries no digit-based duration), which
+    happens to be the correct route. The fix is LLM-only by design.
+    """
+
+    def setUp(self):
+        llm.set_client(_RaisingClient())
+
+    def tearDown(self):
+        llm.set_client(None)
+
+    def test_plan_phrasings_fall_to_chat_offline(self):
+        for msg in [
+            "Plan a two hour session to fix a bug in Blink's backend, "
+            "Wednesday evening at 7:30.",
+            "plan a bug fix session for Wednesday evening at 7:30",
+        ]:
+            self.assertEqual(classify_intent(msg).label, "chat", msg)
+
+    def test_imperatives_still_win_offline_which_is_the_known_gap(self):
+        for msg in [
+            "schedule dentist Tuesday 3pm",
+            "book two hours for the report tomorrow morning",
+        ]:
+            self.assertEqual(classify_intent(msg).label, "concrete_tasks", msg)
 
 
 if __name__ == "__main__":
