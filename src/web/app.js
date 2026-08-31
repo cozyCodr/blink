@@ -2420,6 +2420,17 @@
       var d = serverDate(iso);
       return isNaN(d) ? null : d.getHours() * 60 + d.getMinutes();
     }
+    // A [start,end] span in minutes-of-day. The ledger's UTC-anchored day ends
+    // at local midnight for zones east of UTC, so a real evening window like
+    // 18:00-00:00 arrives with end <= start; that is "runs to the end of the
+    // day", not an empty window. Clamping to 1440 keeps it drawable instead of
+    // letting it vanish and the whole day render as already spoken for.
+    function spanOf(startIso, endIso) {
+      var s = minOf(startIso), e = minOf(endIso);
+      if (s == null || e == null) return [s, e];
+      if (e <= s) e = 1440;
+      return [s, e];
+    }
 
     /* ---------- level state: restore + persist (FocusSettings) ---------- */
     function restoreOnce() {
@@ -2633,7 +2644,7 @@
         var ghost = el("div", "hz-span hz-ghost");
         ghost.appendChild(el("span", "hz-span-title", t.title || "Session"));
         ghost.appendChild(el("span", "hz-span-time", fmtTime(c.starts_at) + "–" + fmtTime(c.ends_at)));
-        var gs = minOf(c.starts_at), ge = minOf(c.ends_at);
+        var gsp = spanOf(c.starts_at, c.ends_at), gs = gsp[0], ge = gsp[1];
         if (lastGeom && gs != null && ge != null) {
           ghost.style.left = lastGeom.pct(gs) + "%";
           ghost.style.width = Math.max(0.6, lastGeom.pct(ge) - lastGeom.pct(gs)) + "%";
@@ -4151,11 +4162,11 @@
     // inventing one.
     function openMinutes(day, m) {
       var wins = (day.free_windows || []).map(function (w) {
-        return [minOf(w.start), minOf(w.end)];
+        return spanOf(w.start, w.end);
       }).filter(function (iv) { return iv[0] != null && iv[1] != null && iv[1] > iv[0]; });
       if (!wins.length) return day.available || 0;
       var blocks = (m.byDate[day.date] || []).map(function (b) {
-        return [minOf(b.starts_at), minOf(b.ends_at)];
+        return spanOf(b.starts_at, b.ends_at);
       }).filter(function (iv) { return iv[0] != null && iv[1] != null && iv[1] > iv[0]; });
       var total = 0;
       wins.forEach(function (w) {
@@ -4184,10 +4195,10 @@
         hi = (hi == null) ? e : Math.max(hi, e);
       }
       (m.data.ledger_days || []).forEach(function (d2) {
-        (d2.free_windows || []).forEach(function (w) { note(minOf(w.start), minOf(w.end)); });
+        (d2.free_windows || []).forEach(function (w) { var sp = spanOf(w.start, w.end); note(sp[0], sp[1]); });
       });
       Object.keys(m.byDate).forEach(function (k) {
-        m.byDate[k].forEach(function (b) { note(minOf(b.starts_at), minOf(b.ends_at)); });
+        m.byDate[k].forEach(function (b) { var sp = spanOf(b.starts_at, b.ends_at); note(sp[0], sp[1]); });
       });
       var start, end;
       if (lo == null) { start = 7 * 60; end = 22 * 60; }   // a plan-less day still gets a real waking window
@@ -4274,10 +4285,11 @@
         if (placeOn(run, geom, g[0], g[1], "hz-busy")) drew.busy = true;
       });
       wins.forEach(function (w) {
-        if (placeOn(run, geom, minOf(w.start), minOf(w.end), "hz-open")) drew.open = true;
+        var wsp = spanOf(w.start, w.end);
+        if (placeOn(run, geom, wsp[0], wsp[1], "hz-open")) drew.open = true;
       });
       blocks.forEach(function (b) {
-        var s = minOf(b.starts_at), e = minOf(b.ends_at);
+        var bsp = spanOf(b.starts_at, b.ends_at), s = bsp[0], e = bsp[1];
         if (s == null || e == null) return;
         var span = blockSpan(b, m, big);
         span.style.left = geom.pct(s) + "%";
@@ -4482,7 +4494,7 @@
       if (!isToday) return { kicker: "First up", block: blocks[0] };
       var now = m.nowMin, cur = null, next = null;
       blocks.forEach(function (b) {
-        var s = minOf(b.starts_at), e = minOf(b.ends_at);
+        var bsp = spanOf(b.starts_at, b.ends_at), s = bsp[0], e = bsp[1];
         if (s == null || e == null) return;
         if (s <= now && now < e && !cur) cur = b;
         else if (s > now && !next) next = b;
@@ -4530,8 +4542,8 @@
         s = Math.max(startMin, s); e = Math.min(endMin, e);
         if (e > s) covered.push([s, e]);
       }
-      wins.forEach(function (w) { push(minOf(w.start), minOf(w.end)); });
-      blocks.forEach(function (b) { push(minOf(b.starts_at), minOf(b.ends_at)); });
+      wins.forEach(function (w) { var sp = spanOf(w.start, w.end); push(sp[0], sp[1]); });
+      blocks.forEach(function (b) { var sp = spanOf(b.starts_at, b.ends_at); push(sp[0], sp[1]); });
       covered.sort(function (a, b) { return a[0] - b[0]; });
       var gaps = [], cur = startMin;
       covered.forEach(function (iv) {
