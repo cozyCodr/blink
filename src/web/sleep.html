@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blink is sleeping</title>
+  <meta name="description" content="Blink, the planning agent built for Google's All Things Agentic Hackathon, is archived and resting.">
+  <!-- Standalone archive page: deliberately self-contained (no app.js, no API
+       calls, no workspace minting), so a sleeping Blink costs nothing and
+       writes nothing. The app's CSS ownership split governs the app shell;
+       this page is outside the shell by design. -->
+  <style>
+    :root {
+      --ground: #14181d; --surface: #1d232b; --ink: #cad2d9;
+      --muted: #97a1aa; --faint: #6c757e; --accent: #8fbba3; --line: #2a323b;
+    }
+    * { box-sizing: border-box; margin: 0; }
+    body {
+      background: var(--ground); color: var(--ink);
+      font: 17px/1.6 Georgia, 'Times New Roman', serif;
+      min-height: 100vh; display: grid; place-items: center; padding: 24px 16px;
+    }
+    main { max-width: 34rem; text-align: center; }
+    .eyes {
+      display: flex; gap: 34px; justify-content: center;
+      margin: 0 auto 3rem; width: max-content;
+    }
+    .eye {
+      width: 46px; height: 6px; border-radius: 3px;
+      background: var(--accent); opacity: .75;
+      animation: rest 6s ease-in-out infinite;
+    }
+    @keyframes rest {
+      0%, 100% { transform: scaleX(1); opacity: .75; }
+      50%      { transform: scaleX(.92); opacity: .55; }
+    }
+    @media (prefers-reduced-motion: reduce) { .eye { animation: none; } }
+    h1 { font-size: 1.6rem; font-weight: normal; letter-spacing: .3px; margin-bottom: 1rem; }
+    p  { color: var(--muted); margin-bottom: .9rem; }
+    .quiet { color: var(--faint); font-size: .92rem; }
+    a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--line); }
+    a:hover { border-bottom-color: var(--accent); }
+    hr { border: 0; border-top: 1px solid var(--line); margin: 2.2rem auto; width: 7rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyes" aria-hidden="true"><span class="eye"></span><span class="eye"></span></div>
+    <h1>Blink is sleeping.</h1>
+    <p>This planning agent was built in the open for Google's All Things
+       Agentic Hackathon: Gemini and the ADK deciding what to do, deterministic
+       code deciding what is true, and a calendar it could never lie about.</p>
+    <p>The hackathon ended, and Blink has earned its rest. No plans are being
+       made here for now, and nothing you type is being heard.</p>
+    <hr>
+    <p class="quiet">The code is awake at
+       <a href="https://github.com/cozyCodr/blink">github.com/cozyCodr/blink</a>
+       &mdash; 987 offline tests and all.</p>
+  </main>
+</body>
+</html>

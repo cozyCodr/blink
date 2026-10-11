@@ -3786,9 +3786,34 @@ def serve_privacy():
         return FileResponse(privacy_file)
     return {"message": "Privacy policy is temporarily unavailable."}
 
+# Archive mode (2026-10-11). BLINK_SLEEP=1 puts the whole deployment to rest:
+# "/" serves a static sleep page that makes no API calls (so crawlers stop
+# minting one orphan guest workspace per visit), and every /v1 call answers
+# with an honest 503 instead of pretending to plan. /_health stays live so
+# monitoring can tell "asleep" from "dead". Unset the env var to wake it.
+def _sleeping() -> bool:
+    return os.getenv("BLINK_SLEEP", "") in ("1", "true", "True")
+
+
+@app.middleware("http")
+async def _sleep_gate(request, call_next):
+    if _sleeping() and request.url.path.startswith("/v1/"):
+        return JSONResponse(status_code=503, content={
+            "type": "message",
+            "text": ("Blink is asleep. The hackathon build is archived and "
+                     "no plans are being made here. The code is at "
+                     "github.com/cozyCodr/blink."),
+        })
+    return await call_next(request)
+
+
 # Serve Neo-Brutalist Dashboard UI
 @app.get("/")
 def serve_index():
+    if _sleeping():
+        sleep_file = os.path.join(STATIC_DIR, "sleep.html")
+        if os.path.exists(sleep_file):
+            return FileResponse(sleep_file)
     index_file = os.path.join(STATIC_DIR, "index.html")
     if os.path.exists(index_file):
         return FileResponse(index_file)
