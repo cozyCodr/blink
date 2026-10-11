@@ -57,14 +57,17 @@ gcloud run deploy "${SERVICE}" \
   `# Missing APNs secrets = push disabled with one log line; everything else unaffected.` \
   `# Missing blink-sweep-secret = /internal/sweep answers 403 to everyone, which is the safe default.` \
   --set-secrets "GOOGLE_OAUTH_CLIENT_SECRET=blink-oauth-client-secret:latest,BLINK_SESSION_SECRET=blink-session-secret:latest,APNS_KEY_P8=blink-apns-key:latest,APNS_KEY_ID=blink-apns-key-id:latest,BLINK_SWEEP_SECRET=blink-sweep-secret:latest" \
-  `# min-instances 1 = judging keep-alive (P9-06, 2026-08-26); drop to 0 after judging` \
+  `# min-instances 0 since 2026-10-11: judging is over, the service sleeps` \
+  `# between visits (cold start ~5s) and costs nothing while idle. The` \
+  `# blink-push-sweep scheduler job is PAUSED too; resume it and raise this` \
+  `# back to 1 if Blink ever goes back into daily use.` \
   `# max-instances 1 is LOAD-BEARING (2026-08-31): each instance hydrates a` \
   `# workspace into memory ONCE and serves from that copy. With two instances` \
   `# up, an answer stored on one is invisible on the other, so elicitation` \
   `# re-asks the same question forever and a stale flush can clobber newer` \
   `# state. One instance = one memory = one truth. Raise it only after the` \
   `# store is re-read per request or moved fully server-side.` \
-  --min-instances 1 \
+  --min-instances 0 \
   --max-instances 1 \
   --memory 1Gi \
   --cpu 1 \
